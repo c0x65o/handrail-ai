@@ -18,6 +18,25 @@ export {
   type ChatDialogTriggerProps,
 } from "./dialog.js";
 export {
+  ChatDrawerClose,
+  ChatDrawerContent,
+  ChatDrawerDescription,
+  ChatDrawerOverlay,
+  ChatDrawerPortal,
+  ChatDrawerRoot,
+  ChatDrawerTitle,
+  ChatDrawerTrigger,
+  type ChatDrawerCloseProps,
+  type ChatDrawerContentProps,
+  type ChatDrawerDescriptionProps,
+  type ChatDrawerOverlayProps,
+  type ChatDrawerPortalProps,
+  type ChatDrawerRootProps,
+  type ChatDrawerSide,
+  type ChatDrawerTitleProps,
+  type ChatDrawerTriggerProps,
+} from "./drawer.js";
+export {
   ChatTabsContent,
   ChatTabsList,
   ChatTabsRoot,

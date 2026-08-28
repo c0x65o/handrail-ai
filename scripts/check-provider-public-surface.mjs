@@ -39,6 +39,10 @@ const anthropicEntry = readFileSync(
   join(distDirectory, "providers", "anthropic.d.ts"),
   "utf8",
 );
+const geminiEntry = readFileSync(
+  join(distDirectory, "providers", "gemini.d.ts"),
+  "utf8",
+);
 const managedEntry = readFileSync(
   join(distDirectory, "server", "managed.d.ts"),
   "utf8",
@@ -65,18 +69,23 @@ assert.match(
   "the opt-in Anthropic entry must export its provider adapter",
 );
 assert.match(
+  geminiEntry,
+  /export declare (?:class GeminiProviderAdapter|function createGeminiProviderAdapter)/,
+  "the opt-in Gemini entry must export its provider adapter",
+);
+assert.match(
   managedEntry,
   /export \* from ["']\.\.\/transports\/managed-runtime\.js["'];/,
   "the trusted-server managed entry must export ManagedRuntimeTransport",
 );
 assert.doesNotMatch(
   packageEntry,
-  /providers\/(?:openai|anthropic)/,
+  /providers\/(?:openai|anthropic|gemini)/,
   "the core package entry must not export concrete provider adapters",
 );
 
 const declarationsCheckedForSdkImports =
-  `${runtimeNeutralDeclarations}\n${openAIEntry}\n${anthropicEntry}\n${managedEntry}`;
+  `${runtimeNeutralDeclarations}\n${openAIEntry}\n${anthropicEntry}\n${geminiEntry}\n${managedEntry}`;
 const externalImports = [
   ...declarationsCheckedForSdkImports.matchAll(/from ["']([^"']+)["']/g),
 ]

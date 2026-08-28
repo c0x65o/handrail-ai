@@ -48,6 +48,16 @@ test("declares Anthropic as an explicit opt-in provider boundary", () => {
   assert.equal(packageJson.dependencies["@anthropic-ai/sdk"], undefined);
 });
 
+test("declares Gemini as an explicit opt-in provider boundary", () => {
+  assert.deepEqual(packageJson.exports["./providers/gemini"], {
+    types: "./dist/providers/gemini.d.ts",
+    import: "./dist/providers/gemini.js",
+    default: "./dist/providers/gemini.js",
+  });
+  assert.equal(packageJson.dependencies["@google/genai"], undefined);
+  assert.equal(packageJson.dependencies["@google/generative-ai"], undefined);
+});
+
 test("resolves every public ESM export from the built package", async () => {
   for (const exportName of Object.keys(packageJson.exports)) {
     const target = packageJson.exports[exportName].import;
@@ -105,6 +115,8 @@ test("dry pack contains only intended package assets", () => {
     "dist/providers/openai.d.ts",
     "dist/providers/anthropic.js",
     "dist/providers/anthropic.d.ts",
+    "dist/providers/gemini.js",
+    "dist/providers/gemini.d.ts",
   ]) {
     assert.ok(packedFiles.has(expected), `missing packed file ${expected}`);
   }

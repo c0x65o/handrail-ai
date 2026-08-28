@@ -3,6 +3,7 @@ export * from "./conversation/index.js";
 export * from "./presence/index.js";
 export * from "./protocol.js";
 export * from "./providers/index.js";
+export * from "./runtime.js";
 export * from "./sync/index.js";
 export * from "./tools/index.js";
 export * from "./transports/index.js";
