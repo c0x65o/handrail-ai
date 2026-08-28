@@ -300,7 +300,7 @@ const PARTICIPANTS = [
     updated_at: "2026-08-28T00:00:00.000Z",
     record_count: 1,
     records: [],
-  } as PresenceParticipantSummary,
+  } as unknown as PresenceParticipantSummary,
 ] as const;
 
 function useExampleComposer(

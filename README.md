@@ -91,6 +91,30 @@ against the built package declarations. It also demonstrates:
 the protocol image's `content_ref` opaque and records only attachment metadata
 in conversation history.
 
+## Unstyled React presentation recipes
+
+The checked [`examples/react-presentations.tsx`](./examples/react-presentations.tsx)
+uses the public `@handrail/ai` and `@handrail/ai/react` declarations to compose
+one credential-free headless runtime as six presentations:
+
+- `ChatDialogRecipe` for a modal;
+- `ChatTabsRecipe` for a tab panel;
+- `ChatDrawerRecipe` for a side drawer;
+- `ChatLauncherRecipe` for a floating disclosure;
+- `FullPageChatRecipe` from semantic chat primitives; and
+- `CustomHooksChatRecipe` from native application markup plus hooks/selectors.
+
+The recipes include named transcripts, live status, presence and typing,
+image intake/removal, and send, Stop, and Retry controls. Presentation close or
+tab-hide handlers only change local visibility; authoritative cancellation is
+reserved for the explicit Stop action. The fake transport and uploader are
+deterministic and perform no network, provider, or Handrail control-plane call.
+
+The SDK injects no CSS, fonts, branding, layout, or theme. Every `app-*` class
+in the recipes is a consumer-owned placeholder. Responsive layout, breakpoints,
+drawer/launcher placement, and all visual styling remain the host application's
+responsibility.
+
 ## Direct/BYOK and managed operation
 
 Both credential modes belong on an application-owned trusted server. Browser
