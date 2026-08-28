@@ -45,10 +45,30 @@ export const AI_RUNTIME_ERROR_CODES = [
   "internal_error",
 ] as const;
 
+export const AI_RUNTIME_IMAGE_MIME_TYPES = [
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+] as const;
+
+export const AI_RUNTIME_ATTACHMENT_ID_GRAMMAR =
+  "^att_[A-Za-z0-9][A-Za-z0-9._-]{0,251}$" as const;
+export const AI_RUNTIME_CONTENT_REFERENCE_GRAMMAR =
+  "^ref_[A-Za-z0-9][A-Za-z0-9._-]{0,251}$" as const;
+
 export const AI_RUNTIME_PROTOCOL_LIMITS = {
   identifierLength: 256,
   textLength: 1_000_000,
   errorMessageLength: 1_024,
+  attachmentIdLength: 256,
+  attachmentContentReferenceLength: 256,
+  attachmentFilenameLength: 255,
+  attachmentAltTextLength: 1_024,
+  imageAttachmentMinBytes: 1,
+  imageAttachmentMaxBytes: 10 * 1024 * 1024,
+  imageAttachmentsPerMessage: 4,
+  imageAttachmentsPerRequest: 8,
   jsonDepth: 20,
   jsonNodes: 10_000,
   jsonArrayLength: 2_000,
@@ -77,15 +97,33 @@ export type CancellationReason =
 export type PublicErrorCategory =
   (typeof AI_RUNTIME_ERROR_CATEGORIES)[number];
 export type PublicErrorCode = (typeof AI_RUNTIME_ERROR_CODES)[number];
+export type ImageMimeType = (typeof AI_RUNTIME_IMAGE_MIME_TYPES)[number];
 
 export interface MessageTextPart {
   type: "text";
   text: string;
 }
 
+export interface AttachmentReference {
+  attachment_id: string;
+  content_ref: string;
+  media_type: ImageMimeType;
+  byte_size: number;
+  filename?: string;
+}
+
+/** A trusted host or transport resolves attachment.content_ref before provider input is built. */
+export interface MessageImagePart {
+  type: "image";
+  attachment: AttachmentReference;
+  alt_text?: string;
+}
+
+export type MessageContentPart = MessageTextPart | MessageImagePart;
+
 export interface ChatMessage {
   role: "user" | "assistant";
-  content: MessageTextPart[];
+  content: MessageContentPart[];
 }
 
 export type JsonSchemaObject = JsonObject & { type: "object" };
@@ -343,9 +381,12 @@ const METADATA_FORBIDDEN_STRING_VALUES = new Set([
 
 const CREDENTIAL_VALUE_PATTERNS = [
   /\bbearer\s+[a-z0-9._~+/=-]{8,}/i,
-  /\bsk-[a-z0-9_-]{8,}\b/i,
+  /(?:^|[^a-z0-9])sk-[a-z0-9_-]{8,}\b/i,
   /-----begin (?:rsa |ec |openssh )?private key-----/i,
 ] as const;
+
+const ATTACHMENT_ID_PATTERN = new RegExp(AI_RUNTIME_ATTACHMENT_ID_GRAMMAR);
+const CONTENT_REFERENCE_PATTERN = new RegExp(AI_RUNTIME_CONTENT_REFERENCE_GRAMMAR);
 
 const normalizeFieldName = (value: string): string =>
   value.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -609,7 +650,100 @@ function validateTextPart(value: unknown, path: string): asserts value is Messag
   });
 }
 
-function validateMessage(value: unknown, path: string): asserts value is ChatMessage {
+function rejectCredentialMaterial(value: string, path: string): void {
+  if (CREDENTIAL_VALUE_PATTERNS.some((pattern) => pattern.test(value))) {
+    fail(path, "must not contain credential material");
+  }
+}
+
+function validateAttachmentIdentifier(value: unknown, path: string): void {
+  const parsed = stringValue(value, path, {
+    maxLength: AI_RUNTIME_PROTOCOL_LIMITS.attachmentIdLength,
+  });
+  rejectCredentialMaterial(parsed, path);
+  if (!ATTACHMENT_ID_PATTERN.test(parsed)) {
+    fail(path, `must match ${AI_RUNTIME_ATTACHMENT_ID_GRAMMAR}`);
+  }
+}
+
+function validateContentReference(value: unknown, path: string): void {
+  const parsed = stringValue(value, path, {
+    maxLength: AI_RUNTIME_PROTOCOL_LIMITS.attachmentContentReferenceLength,
+  });
+  rejectCredentialMaterial(parsed, path);
+  if (/^(?:data|blob|https?):/i.test(parsed) || !CONTENT_REFERENCE_PATTERN.test(parsed)) {
+    fail(path, `must be an opaque identifier matching ${AI_RUNTIME_CONTENT_REFERENCE_GRAMMAR}`);
+  }
+}
+
+function validateSafeFilename(value: unknown, path: string): void {
+  const parsed = stringValue(value, path, {
+    maxLength: AI_RUNTIME_PROTOCOL_LIMITS.attachmentFilenameLength,
+  });
+  rejectCredentialMaterial(parsed, path);
+  if (parsed === "." || parsed === ".." || /[\u0000-\u001f\u007f<>:"/\\|?*]/.test(parsed)) {
+    fail(path, "must be a safe filename without path separators or control characters");
+  }
+}
+
+function validateImagePart(value: unknown, path: string): asserts value is MessageImagePart {
+  const object = record(value, path);
+  requiredKeys(object, ["type", "attachment"], path);
+  allowedKeys(object, ["type", "attachment", "alt_text"], path);
+  if (object.type !== "image") fail(`${path}.type`, 'must equal "image"');
+
+  const attachment = record(object.attachment, `${path}.attachment`);
+  requiredKeys(
+    attachment,
+    ["attachment_id", "content_ref", "media_type", "byte_size"],
+    `${path}.attachment`,
+  );
+  allowedKeys(
+    attachment,
+    ["attachment_id", "content_ref", "media_type", "byte_size", "filename"],
+    `${path}.attachment`,
+  );
+  validateAttachmentIdentifier(attachment.attachment_id, `${path}.attachment.attachment_id`);
+  validateContentReference(attachment.content_ref, `${path}.attachment.content_ref`);
+  enumValue(attachment.media_type, AI_RUNTIME_IMAGE_MIME_TYPES, `${path}.attachment.media_type`);
+  if (
+    !Number.isInteger(attachment.byte_size) ||
+    (attachment.byte_size as number) < AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMinBytes ||
+    (attachment.byte_size as number) > AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMaxBytes
+  ) {
+    fail(
+      `${path}.attachment.byte_size`,
+      `must be an integer from ${AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMinBytes} through ${AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMaxBytes}`,
+    );
+  }
+  if (Object.hasOwn(attachment, "filename")) {
+    validateSafeFilename(attachment.filename, `${path}.attachment.filename`);
+  }
+  if (Object.hasOwn(object, "alt_text")) {
+    const altText = stringValue(object.alt_text, `${path}.alt_text`, {
+      maxLength: AI_RUNTIME_PROTOCOL_LIMITS.attachmentAltTextLength,
+    });
+    rejectCredentialMaterial(altText, `${path}.alt_text`);
+  }
+}
+
+function validateMessageContentPart(
+  value: unknown,
+  path: string,
+): asserts value is MessageContentPart {
+  const object = record(value, path);
+  if (object.type === "text") {
+    validateTextPart(value, path);
+    return;
+  }
+  if (object.type === "image") {
+    validateImagePart(value, path);
+    return;
+  }
+  fail(`${path}.type`, 'must equal "text" or "image"');
+}
+
+function validateMessage(value: unknown, path: string): number {
   const object = record(value, path);
   requiredKeys(object, ["role", "content"], path);
   allowedKeys(object, ["role", "content"], path);
@@ -617,7 +751,18 @@ function validateMessage(value: unknown, path: string): asserts value is ChatMes
   if (!Array.isArray(object.content) || object.content.length === 0) {
     fail(`${path}.content`, "must be a non-empty array");
   }
-  object.content.forEach((part, index) => validateTextPart(part, `${path}.content[${index}]`));
+  let imageCount = 0;
+  object.content.forEach((part, index) => {
+    validateMessageContentPart(part, `${path}.content[${index}]`);
+    if (part.type === "image") imageCount += 1;
+  });
+  if (imageCount > AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentsPerMessage) {
+    fail(
+      `${path}.content`,
+      `must contain at most ${AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentsPerMessage} image parts`,
+    );
+  }
+  return imageCount;
 }
 
 function validateToolDefinition(value: unknown, path: string): asserts value is ToolDefinition {
@@ -631,6 +776,11 @@ function validateToolDefinition(value: unknown, path: string): asserts value is 
   const schema = record(object.input_schema, `${path}.input_schema`);
   validateCredentialsAbsent(schema, `${path}.input_schema`);
   validateJsonSchemaNode(schema, `${path}.input_schema`, true);
+}
+
+export function parseToolDefinition(value: unknown): ToolDefinition {
+  validateToolDefinition(value, "$tool");
+  return value;
 }
 
 function validateToolResultPart(
@@ -738,7 +888,16 @@ export function parseChatRequest(value: unknown): ChatRequest {
   if (!Array.isArray(object.messages) || object.messages.length === 0) {
     fail("$request.messages", "must be a non-empty array");
   }
-  object.messages.forEach((message, index) => validateMessage(message, `$request.messages[${index}]`));
+  let requestImageCount = 0;
+  object.messages.forEach((message, index) => {
+    requestImageCount += validateMessage(message, `$request.messages[${index}]`);
+  });
+  if (requestImageCount > AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentsPerRequest) {
+    fail(
+      "$request.messages",
+      `must contain at most ${AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentsPerRequest} image parts across the request`,
+    );
+  }
   if (!Array.isArray(object.tools)) fail("$request.tools", "must be an array");
   const toolNames = new Set<string>();
   object.tools.forEach((tool, index) => {
