@@ -150,11 +150,14 @@ dependencies must be injected by trusted-server infrastructure so rotation and
 authorization policy stay outside browser/mobile bundles. The checked trusted
 server example accepts both dependencies instead of embedding either.
 
-The current managed transport keeps resume snapshots in process and negotiates
-authoritative cancellation, attachment upload, presence, and synchronization
-as unsupported. Applications must inspect `transport.capabilities` and provide
-host adapters where required; unsupported capabilities must not be inferred
-from method names or UI state.
+The managed transport keeps resume snapshots in a process-local map as its fast
+path and backward-compatible fallback. Cross-instance restoration after a
+refresh or process restart requires an optional trusted-server
+`turnStateStore`, which durably retains only the validated replay identity and
+canonical request body. The transport negotiates authoritative cancellation,
+attachment upload, presence, and synchronization as unsupported. Applications
+must inspect `transport.capabilities` and provide host adapters where required;
+unsupported capabilities must not be inferred from method names or UI state.
 
 ## Lifecycle and consistency contracts
 

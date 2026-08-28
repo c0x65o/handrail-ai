@@ -17,6 +17,14 @@ import {
   type UsageContinuationIdentity,
   type UsageReceiptTerminalStatus,
 } from "../usage.js";
+import {
+  MANAGED_RUNTIME_TURN_STATE_SCHEMA_VERSION,
+  ManagedRuntimeTurnStateStoreConflictError,
+  ManagedRuntimeTurnStateStoreUnavailableError,
+  parseManagedRuntimeTurnStateRecord,
+  type ManagedRuntimeTurnStateRecord,
+  type ManagedRuntimeTurnStateStore,
+} from "./managed-runtime-state.js";
 import { parseServerSentEvents, type ServerSentEventFrame } from "./sse.js";
 import type {
   ConversationTransport,
@@ -82,6 +90,8 @@ export interface ManagedRuntimeTransportOptions {
   readonly fetch: ManagedRuntimeFetch;
   /** Bounds header acquisition, request setup, and the complete SSE stream. */
   readonly timeoutMs?: number;
+  /** Optional trusted-server persistence for cross-instance turn restoration. */
+  readonly turnStateStore?: ManagedRuntimeTurnStateStore;
   /** Optional trusted identity needed to project cumulative runtime usage. */
   readonly createUsageReceiptIdentity?: ManagedRuntimeUsageReceiptIdentityProvider;
 }
@@ -186,6 +196,70 @@ const TIMED_OUT = fixedError(
   "The managed runtime request timed out.",
   true,
 );
+const TURN_STATE_NOT_FOUND = fixedError(
+  "not_found",
+  "The managed runtime turn is not available for replay.",
+  false,
+);
+const INVALID_TURN_STATE = fixedError(
+  "internal_error",
+  "The managed runtime turn state is invalid.",
+  false,
+);
+const CONFLICTING_TURN_STATE = fixedError(
+  "conflict",
+  "The managed runtime turn state conflicts with an existing replay.",
+  false,
+);
+
+function turnStateStoreError(error: unknown): TransportError {
+  if (error instanceof ManagedRuntimeTurnStateStoreConflictError) {
+    return CONFLICTING_TURN_STATE;
+  }
+  if (error instanceof ManagedRuntimeTurnStateStoreUnavailableError) {
+    return fixedError(
+      "unavailable",
+      "The managed runtime turn state store is unavailable.",
+      error.retryable,
+    );
+  }
+  return INVALID_TURN_STATE;
+}
+
+function turnStateRecord(snapshot: TurnSnapshot): ManagedRuntimeTurnStateRecord {
+  return parseManagedRuntimeTurnStateRecord({
+    schemaVersion: MANAGED_RUNTIME_TURN_STATE_SCHEMA_VERSION,
+    ...snapshot,
+  });
+}
+
+function snapshotFromTurnState(
+  value: unknown,
+  conversationId?: string,
+  turnId?: string,
+): TurnSnapshot {
+  const record = parseManagedRuntimeTurnStateRecord(value);
+  if (
+    (conversationId !== undefined && record.conversationId !== conversationId) ||
+    (turnId !== undefined && record.turnId !== turnId)
+  ) {
+    throw new TypeError("Managed runtime turn state identity mismatch");
+  }
+  return {
+    conversationId: record.conversationId,
+    conversationTurnId: record.conversationTurnId,
+    mutationId: record.mutationId,
+    request: record.request,
+    serializedBody: record.serializedBody,
+    idempotencyKey: record.idempotencyKey,
+    turnId: record.turnId,
+  };
+}
+
+function discardOpenedStream(opened: OpenedStream): void {
+  opened.connection.controller.abort(DISCONNECT_REASON);
+  opened.connection.clearTimeout();
+}
 
 function timeoutValue(value: number | undefined): number {
   if (value === undefined) return DEFAULT_TIMEOUT_MS;
@@ -861,6 +935,13 @@ export class ManagedRuntimeTransport implements ManagedRuntimeTransportContract 
     if (typeof options.getHeaders !== "function" || typeof options.fetch !== "function") {
       throw new TypeError("Managed runtime header and fetch providers are required");
     }
+    if (
+      options.turnStateStore !== undefined &&
+      (typeof options.turnStateStore.load !== "function" ||
+        typeof options.turnStateStore.save !== "function")
+    ) {
+      throw new TypeError("Managed runtime turn state store is invalid");
+    }
   }
 
   async startTurn(
@@ -890,10 +971,36 @@ export class ManagedRuntimeTransport implements ManagedRuntimeTransportContract 
       provisional,
     );
     if (!opened.ok) return opened;
-    const snapshot: TurnSnapshot = {
+    let snapshot: TurnSnapshot = {
       ...provisional,
       turnId: opened.value.started.request_id,
     };
+    let record: ManagedRuntimeTurnStateRecord;
+    try {
+      record = turnStateRecord(snapshot);
+    } catch {
+      discardOpenedStream(opened.value);
+      return failure(INVALID_REQUEST);
+    }
+    if (this.#options.turnStateStore !== undefined) {
+      try {
+        const saved = await awaitWithAbort(
+          Promise.resolve().then(() => this.#options.turnStateStore!.save(record)),
+          opened.value.connection.controller.signal,
+        );
+        const savedRecord = parseManagedRuntimeTurnStateRecord(saved);
+        if (JSON.stringify(savedRecord) !== JSON.stringify(record)) {
+          throw new TypeError("Managed runtime turn state save changed replay identity");
+        }
+        snapshot = snapshotFromTurnState(savedRecord);
+      } catch (error) {
+        const stateError = opened.value.connection.controller.signal.aborted
+          ? abortError(opened.value.connection.controller.signal)
+          : turnStateStoreError(error);
+        discardOpenedStream(opened.value);
+        return failure(stateError);
+      }
+    }
     this.#turns.set(this.#turnKey(snapshot.conversationId, snapshot.turnId), snapshot);
     const observation = this.#observation(snapshot, opened.value, null, {
       lastAppliedEventId: null,
@@ -915,16 +1022,31 @@ export class ManagedRuntimeTransport implements ManagedRuntimeTransportContract 
   async resumeTurn(
     input: ResumeTurnInput,
   ): Promise<TransportResult<ManagedRuntimeTurnObservation>> {
-    const snapshot = this.#turns.get(this.#turnKey(input.conversationId, input.turnId));
-    if (snapshot === undefined) {
-      return failure(
-        fixedError(
-          "not_found",
-          "The managed runtime turn is not available for replay in this process.",
-          false,
-        ),
-      );
+    const key = this.#turnKey(input.conversationId, input.turnId);
+    let snapshot = this.#turns.get(key);
+    if (snapshot === undefined && this.#options.turnStateStore !== undefined) {
+      let loaded: ManagedRuntimeTurnStateRecord | null;
+      try {
+        loaded = await this.#options.turnStateStore.load(
+          input.conversationId,
+          input.turnId,
+        );
+      } catch (error) {
+        return failure(turnStateStoreError(error));
+      }
+      if (loaded === null) return failure(TURN_STATE_NOT_FOUND);
+      try {
+        snapshot = snapshotFromTurnState(
+          loaded,
+          input.conversationId,
+          input.turnId,
+        );
+      } catch {
+        return failure(INVALID_TURN_STATE);
+      }
+      this.#turns.set(key, snapshot);
     }
+    if (snapshot === undefined) return failure(TURN_STATE_NOT_FOUND);
     let suppressThrough: number | null;
     try {
       suppressThrough = eventSequenceFromCheckpoint(input.resumeFrom, input.turnId);
@@ -939,8 +1061,7 @@ export class ManagedRuntimeTransport implements ManagedRuntimeTransportContract 
     );
     if (!opened.ok) return opened;
     if (opened.value.started.request_id !== snapshot.turnId) {
-      opened.value.connection.controller.abort(DISCONNECT_REASON);
-      opened.value.connection.clearTimeout();
+      discardOpenedStream(opened.value);
       return failure(INVALID_PROTOCOL);
     }
     return {
