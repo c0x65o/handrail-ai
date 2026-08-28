@@ -343,6 +343,9 @@ export async function createConversationRuntime<TRequest>(
         const expectedRevision = store.getSnapshot().revision;
         const drafts = generateDrafts(expectedRevision);
         if (drafts.length === 0) return [];
+        if (revisionConflictRetries > 0) {
+          assertRebasedDraftsRemainCompatible(store.getSnapshot(), drafts);
+        }
         const occurredAt = timestamp();
         const events = drafts.map((draft, index) =>
           parseConversationEvent({
@@ -1179,6 +1182,25 @@ export async function createConversationRuntime<TRequest>(
     restoreActiveTurn,
     destroy,
   });
+}
+
+function assertRebasedDraftsRemainCompatible(
+  state: ConversationState,
+  drafts: readonly EventDraft[],
+): void {
+  for (const { payload } of drafts) {
+    if (!("turn_id" in payload) || payload.type === "turn.started") continue;
+    const turn = state.turns.find((candidate) => candidate.turn_id === payload.turn_id);
+    if (turn === undefined) {
+      throw new TypeError("The canonical conversation no longer has the expected active turn");
+    }
+    if (isTerminalTurnStatus(turn.status)) {
+      throw new TypeError("The canonical conversation turn became terminal during append rebase");
+    }
+    if (state.active_turn_id !== payload.turn_id) {
+      throw new TypeError("The canonical conversation no longer has the expected active turn");
+    }
+  }
 }
 
 function normalizeMessageContent(

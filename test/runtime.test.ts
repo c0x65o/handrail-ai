@@ -446,6 +446,13 @@ class RevisionConflictInjectingEventStore implements ConversationEventStore {
   constructor(
     private readonly isTarget: (input: AppendConversationEventsInput) => boolean,
     private readonly maximumInjections = 1,
+    private readonly createInjectedEvent: (
+      revision: ConversationRevision,
+      input: AppendConversationEventsInput,
+    ) => ConversationEvent = (revision) => externalEvent(revision, {
+      type: "conversation.metadata_updated",
+      metadata: { injected_revision: revision },
+    }),
   ) {}
 
   async append(input: AppendConversationEventsInput): Promise<AppendConversationEventsResult> {
@@ -457,10 +464,7 @@ class RevisionConflictInjectingEventStore implements ConversationEventStore {
         await this.inner.append({
           conversationId: input.conversationId,
           expectedRevision: currentRevision,
-          events: [externalEvent(injectedRevision, {
-            type: "conversation.metadata_updated",
-            metadata: { injected_revision: injectedRevision },
-          })],
+          events: [this.createInjectedEvent(injectedRevision, input)],
         });
         this.injectionCount += 1;
       }
@@ -654,6 +658,53 @@ describe("createConversationRuntime", () => {
     );
     expect(outcome.checkpoint.lastAppliedRevision).toBe(history.latestRevision);
     expect(runtime.getSnapshot().revision).toBe(history.latestRevision);
+    expect(transport.starts).toHaveLength(1);
+  });
+
+  it("does not retry a stream append after catch-up reveals a terminal turn", async () => {
+    const eventStore = new RevisionConflictInjectingEventStore(
+      (input) => input.events.some((event) => event.payload.type === "message.text_appended"),
+      1,
+      (revision, input) => {
+        const delta = input.events.find(
+          (event) => event.payload.type === "message.text_appended",
+        );
+        if (delta?.payload.type !== "message.text_appended") {
+          throw new TypeError("Expected an injected streamed delta");
+        }
+        return externalEvent(revision, {
+          type: "turn.cancelled",
+          turn_id: delta.payload.turn_id,
+          reason: "superseded",
+        });
+      },
+    );
+    const transport = new FakeTransport();
+    transport.startObservations.push(observation([
+      startedFrame(),
+      deltaFrame(1, "Must not become durable"),
+    ], "disconnected"));
+    const runtime = await createConversationRuntime({
+      conversationId,
+      clientId,
+      transport,
+      eventStore,
+      retryPolicy: createRetryPolicy({ maximumAttempts: 1 }),
+      ...deterministicSources(),
+    });
+
+    const outcome = await runtime.sendMessage({
+      content: "Respect the canonical terminal turn",
+      request: { prompt: "Respect the canonical terminal turn" },
+    });
+
+    const history = await eventStore.read({ conversationId, limit: 100 });
+    expect(outcome.status).toBe("interrupted");
+    expect(eventStore.targetedAppendAttempts).toBe(1);
+    expect(history.entries.filter(
+      ({ event }) => event.payload.type === "message.text_appended",
+    )).toHaveLength(0);
+    expect(runtime.getSnapshot().turns[0]?.status).toBe("cancelled");
     expect(transport.starts).toHaveLength(1);
   });
 

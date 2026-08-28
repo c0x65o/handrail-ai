@@ -6,11 +6,18 @@ import { renderToString } from "react-dom/server";
 import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 
 import {
+  AI_RUNTIME_PROTOCOL_VERSION,
   CONVERSATION_EVENT_VERSION,
   InMemoryConversationEventStore,
+  createConversationRuntime,
   createConversationStore,
   createConversationSyncCoordinator,
   parseConversationEvent,
+  parseNormalizedUsageReceipt,
+  type AppendConversationEventsInput,
+  type AppendConversationEventsResult,
+  type AuthoritativeAttribution,
+  type ConversationClientId,
   type ConversationEvent,
   type ConversationId,
   type ConversationRuntime,
@@ -19,6 +26,9 @@ import {
   type ConversationSyncAdapter,
   type ConversationSyncSubscription,
   type ConversationSyncUpdate,
+  type ConversationTransport,
+  type TurnObservation,
+  type TurnObservationResult,
 } from "../src/index.js";
 import {
   ConversationProvider,
@@ -62,6 +72,209 @@ class RemoteUpdateStream implements AsyncIterable<ConversationSyncUpdate> {
       },
     };
   }
+}
+
+class DeterministicCanonicalLog extends InMemoryConversationEventStore {
+  private readonly updateStreams = new Set<RemoteUpdateStream>();
+
+  override async append(
+    input: AppendConversationEventsInput,
+  ): Promise<AppendConversationEventsResult> {
+    const result = await super.append(input);
+    if (result.status === "appended") {
+      const update: ConversationSyncUpdate = {
+        status: "events",
+        events: result.entries.map(({ event }) => event),
+        revision: result.latestRevision,
+        latestRevision: result.latestRevision,
+        hasMore: false,
+      };
+      for (const stream of this.updateStreams) stream.push(update);
+    }
+    return result;
+  }
+
+  createSyncAdapter(): ConversationSyncAdapter {
+    return {
+      pullSnapshot: async () => ({
+        status: "unauthorized",
+        message: "Canonical-log fixture does not use snapshots",
+      }),
+      readSince: async ({ conversationId, afterRevision, limit }) => {
+        const page = await this.read({
+          conversationId,
+          ...(afterRevision === null ? {} : { after: { revision: afterRevision } }),
+          ...(limit === undefined ? {} : { limit }),
+        });
+        return {
+          status: "events",
+          events: page.entries.map(({ event }) => event),
+          revision: page.entries.at(-1)?.event.revision ?? afterRevision,
+          latestRevision: page.latestRevision,
+          hasMore: page.hasMore,
+        };
+      },
+      appendMutations: async () => ({
+        status: "unauthorized",
+        message: "Runtime writes directly to the canonical-log fixture",
+      }),
+      subscribeSince: async () => {
+        const updates = new RemoteUpdateStream();
+        this.updateStreams.add(updates);
+        const subscription: ConversationSyncSubscription = {
+          updates,
+          close: () => {
+            this.updateStreams.delete(updates);
+            updates.close();
+          },
+        };
+        return { status: "subscribed", subscription };
+      },
+      publishPresence: async () => ({
+        status: "unauthorized",
+        message: "Presence not used",
+      }),
+      subscribePresence: async () => ({
+        status: "unauthorized",
+        message: "Presence not used",
+      }),
+    };
+  }
+}
+
+interface PairedRequest {
+  readonly model: string;
+}
+
+const pairedAttribution: AuthoritativeAttribution = {
+  organization: { id: "org_paired", source: "server_derived", trust: "authoritative" },
+  project: { id: "project_paired", source: "server_derived", trust: "authoritative" },
+  service_environment: {
+    id: "test",
+    source: "server_derived",
+    trust: "authoritative",
+  },
+  known_user: { id: null, source: "server_derived", trust: "authoritative" },
+  session: { id: null, source: "server_derived", trust: "authoritative" },
+  automation: { id: null, source: "server_derived", trust: "authoritative" },
+};
+
+function pairedFrame(
+  type: string,
+  sequence: number,
+  fields: Record<string, unknown> = {},
+): unknown {
+  return {
+    type,
+    protocol_version: AI_RUNTIME_PROTOCOL_VERSION,
+    request_id: "request_paired",
+    trace_id: "trace_paired",
+    sequence,
+    ...fields,
+  };
+}
+
+function pairedUsageReceipt(conversationId: ConversationId, turnId: string) {
+  return parseNormalizedUsageReceipt({
+    version: 1,
+    usage_receipt_id: "usage_paired_1",
+    conversation_id: conversationId,
+    turn_id: turnId,
+    logical_request_id: "logical_paired_1",
+    trace_id: "trace_paired",
+    attempt: { id: "attempt_paired_0", index: 0 },
+    continuation: { id: "continuation_paired_0", index: 0 },
+    provider_id: "offline-fixture",
+    model_id: "fixture-model",
+    attribution: pairedAttribution,
+    source: "provider",
+    terminal_status: "completed",
+    tokens: {
+      input_tokens: { status: "reported", value: 4 },
+      cached_input_tokens: { status: "reported", value: 0 },
+      output_tokens: { status: "reported", value: 3 },
+      reasoning_tokens: { status: "reported", value: 0 },
+      total_tokens: { status: "reported", value: 7 },
+    },
+    provider_cost: { status: "unavailable" },
+  });
+}
+
+function controlledPairedObservation(
+  usageReceipt: ReturnType<typeof pairedUsageReceipt>,
+): {
+  readonly observation: TurnObservation<unknown>;
+  readonly paused: Promise<void>;
+  readonly release: () => void;
+} {
+  let release!: () => void;
+  let markPaused!: () => void;
+  let resolveResult!: (result: TurnObservationResult) => void;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const paused = new Promise<void>((resolve) => {
+    markPaused = resolve;
+  });
+  const result = new Promise<TurnObservationResult>((resolve) => {
+    resolveResult = resolve;
+  });
+  const checkpoint = {
+    lastAppliedEventId: "request_paired:3",
+    lastAppliedCursor: "request_paired:3",
+    lastAppliedRevision: 3,
+  };
+  const observation: TurnObservation<unknown> = {
+    events: {
+      async *[Symbol.asyncIterator]() {
+        yield pairedFrame("response.started", 0, { attribution: pairedAttribution });
+        yield pairedFrame("response.text.delta", 1, { delta: "Hello " });
+        markPaused();
+        await released;
+        yield pairedFrame("response.text.delta", 2, { delta: "from the canonical log" });
+        yield pairedFrame("response.completed", 3, { outcome: "stop" });
+        resolveResult({ status: "completed", checkpoint, usageReceipt });
+      },
+    },
+    result,
+    disconnect() {
+      release();
+      resolveResult({ status: "disconnected", checkpoint });
+    },
+  };
+  return { observation, paused, release };
+}
+
+function offlinePairedTransport(observation?: TurnObservation<unknown>) {
+  const startTurn = vi.fn<ConversationTransport<unknown, PairedRequest>["startTurn"]>(
+    async (input) => {
+      if (observation === undefined) {
+        throw new Error("No offline observation configured");
+      }
+      return {
+        ok: true,
+        value: {
+          conversationId: input.conversationId,
+          turnId: "transport_turn_paired",
+          mutationId: input.mutationId,
+          observation,
+        },
+      };
+    },
+  );
+  const transport: ConversationTransport<unknown, PairedRequest> = {
+    capabilities: {
+      authoritativeCancellation: { supported: false },
+      attachmentUpload: { supported: false },
+      presence: { supported: false },
+      synchronization: { supported: false },
+    },
+    startTurn,
+    resumeTurn: async () => {
+      throw new Error("Offline fixture does not resume turns");
+    },
+  };
+  return { transport, startTurn };
 }
 
 function remoteSyncAdapter(updates: RemoteUpdateStream): ConversationSyncAdapter {
@@ -321,31 +534,51 @@ describe("ConversationProvider and hooks", () => {
     await coordinator.destroy();
   });
 
-  it("pairs authoritative sync reads with external runtime actions", async () => {
-    interface Request {
-      readonly model: string;
-    }
+  it("converges paired sync reads and runtime actions through one canonical log", async () => {
     const conversationId = "conversation_react_paired_sync" as ConversationId;
-    const updates = new RemoteUpdateStream();
+    const canonicalLog = new DeterministicCanonicalLog();
+    const receipt = pairedUsageReceipt(conversationId, "turn_paired_2");
+    const controlled = controlledPairedObservation(receipt);
+    const { transport, startTurn } = offlinePairedTransport(controlled.observation);
+    let nextId = 0;
+    let nextTime = 0;
+    const runtime = await createConversationRuntime({
+      conversationId,
+      clientId: "client_paired" as ConversationClientId,
+      transport,
+      eventStore: canonicalLog,
+      createId: (kind) => `${kind}_paired_${++nextId}`,
+      now: () =>
+        `2026-08-27T13:00:${String(++nextTime).padStart(2, "0")}.000Z`,
+    });
     const coordinator = createConversationSyncCoordinator({
       conversationId,
-      eventStore: new InMemoryConversationEventStore(),
-      adapter: remoteSyncAdapter(updates),
+      eventStore: canonicalLog,
+      adapter: canonicalLog.createSyncAdapter(),
     });
     await coordinator.start();
-    const runtimeStore = createConversationStore();
-    const { runtime, destroy, sendMessage } = fakeRuntime<Request>(runtimeStore);
-    let selectedRenders = 0;
-    let primitiveRenders = 0;
     let observedStore: ReturnType<typeof useConversationStore> | undefined;
-    let actions: ReturnType<typeof useConversationActions<Request>> | undefined;
+    let actions: ReturnType<typeof useConversationActions<PairedRequest>> | undefined;
 
     function PairedConsumer() {
-      selectedRenders += 1;
       observedStore = useConversationStore();
-      actions = useConversationActions<Request>();
+      actions = useConversationActions<PairedRequest>();
       const count = useConversationSelector((state) => state.messages.length);
-      return <span data-testid="paired-sync-count">{count}</span>;
+      const revision = useConversationSelector((state) => state.revision);
+      const turnStatus = useConversationSelector(
+        (state) => state.turns.at(-1)?.status ?? "none",
+      );
+      const receiptCount = useConversationSelector(
+        (state) => state.usage_receipt_links.length,
+      );
+      return (
+        <>
+          <span data-testid="paired-sync-count">{count}</span>
+          <span data-testid="paired-sync-revision">{revision ?? 0}</span>
+          <span data-testid="paired-sync-turn-status">{turnStatus}</span>
+          <span data-testid="paired-sync-receipts">{receiptCount}</span>
+        </>
+      );
     }
 
     const view = render(
@@ -353,33 +586,36 @@ describe("ConversationProvider and hooks", () => {
         <PairedConsumer />
         <MessageList
           data-testid="paired-sync-messages"
-          render={(props, ref) => {
-            primitiveRenders += 1;
-            return <div {...props} ref={ref} />;
-          }}
+          render={(props, ref) => <div {...props} ref={ref} />}
         />
       </ConversationProvider>,
     );
     expect(observedStore).toBe(coordinator.store);
-    expect(selectedRenders).toBe(1);
-    expect(primitiveRenders).toBe(1);
+    expect(screen.getByTestId("paired-sync-count").textContent).toBe("0");
 
-    await act(() => runtimeStore.applyEvent(titleEvent(1, "Runtime-only update")));
-    expect(selectedRenders).toBe(1);
-    expect(primitiveRenders).toBe(1);
-
-    const remoteEvent = event(1, {
-      type: "message.created",
-      message_id: "message_paired_remote" as never,
-      role: "assistant",
-      content: [{ type: "text", text: "Paired authoritative message" }],
-    }, conversationId);
-    updates.push({
-      status: "events",
-      events: [remoteEvent],
-      revision: remoteEvent.revision,
-      latestRevision: remoteEvent.revision,
-      hasMore: false,
+    const otherDeviceEvent = parseConversationEvent({
+      version: CONVERSATION_EVENT_VERSION,
+      event_id: "event_other_device_1",
+      conversation_id: conversationId,
+      revision: 1,
+      occurred_at: "2026-08-27T12:59:59.000Z",
+      actor: { type: "user" },
+      source: {
+        type: "client",
+        client_id: "client_other_device",
+        device_id: "device_other",
+      },
+      payload: {
+        type: "message.created",
+        message_id: "message_other_device",
+        role: "user",
+        content: [{ type: "text", text: "Message from another device" }],
+      },
+    });
+    await canonicalLog.append({
+      conversationId,
+      expectedRevision: null,
+      events: [otherDeviceEvent],
     });
     await act(async () => {
       await vi.waitFor(() => {
@@ -389,23 +625,114 @@ describe("ConversationProvider and hooks", () => {
 
     expect(screen.getByTestId("paired-sync-count").textContent).toBe("1");
     expect(screen.getByTestId("paired-sync-messages").textContent).toContain(
-      "Paired authoritative message",
+      "Message from another device",
     );
-    expect(selectedRenders).toBe(2);
-    expect(primitiveRenders).toBe(2);
 
-    const input: ConversationRuntimeSendMessageInput<Request> = {
-      content: "Send through paired runtime",
-      request: { model: "test-model" },
+    const input: ConversationRuntimeSendMessageInput<PairedRequest> = {
+      content: "Local follow-up",
+      request: { model: "fixture-model" },
     };
-    void actions?.sendMessage(input);
-    expect(sendMessage).toHaveBeenCalledOnce();
-    expect(sendMessage).toHaveBeenCalledWith(input);
+    let sending!: ReturnType<ConversationRuntime<PairedRequest>["sendMessage"]>;
+    await act(async () => {
+      sending = actions!.sendMessage(input);
+      await controlled.paused;
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(coordinator.store.getSnapshot().revision).toBe(7);
+      });
+    });
+
+    expect(screen.getByTestId("paired-sync-messages").textContent).toContain(
+      "Local follow-up",
+    );
+    expect(screen.getByTestId("paired-sync-messages").textContent).toContain("Hello ");
+    expect(screen.getByTestId("paired-sync-turn-status").textContent).toBe("running");
+    expect(screen.getByTestId("paired-sync-receipts").textContent).toBe("0");
+
+    controlled.release();
+    await act(async () => {
+      await sending;
+      await vi.waitFor(() => {
+        expect(coordinator.store.getSnapshot().revision).toBe(10);
+      });
+    });
+
+    expect(startTurn).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("paired-sync-revision").textContent).toBe("10");
+    expect(screen.getByTestId("paired-sync-turn-status").textContent).toBe("completed");
+    expect(screen.getByTestId("paired-sync-receipts").textContent).toBe("1");
+    const renderedMessages = screen.getByTestId("paired-sync-messages").textContent ?? "";
+    expect(renderedMessages.split("Message from another device")).toHaveLength(2);
+    expect(renderedMessages.split("Local follow-up")).toHaveLength(2);
+    expect(renderedMessages.split("Hello from the canonical log")).toHaveLength(2);
+
+    const history = await canonicalLog.read({ conversationId, limit: 100 });
+    expect(history.entries.map(({ event }) => event.revision)).toEqual(
+      Array.from({ length: 10 }, (_, index) => index + 1),
+    );
+    expect(history.entries.map(({ event }) => event.payload.type)).toEqual([
+      "message.created",
+      "message.created",
+      "turn.started",
+      "turn.attempt_started",
+      "turn.status_changed",
+      "turn.status_changed",
+      "message.text_appended",
+      "message.text_appended",
+      "turn.completed",
+      "usage.receipt_linked",
+    ]);
+    expect(new Set(history.entries.map(({ event }) => event.event_id)).size).toBe(10);
+    const firstProjection = coordinator.store.getSnapshot();
+    expect(firstProjection.messages).toHaveLength(3);
+    expect(firstProjection.turns).toMatchObject([{ status: "completed", outcome: "stop" }]);
+    expect(firstProjection.usage_receipt_links).toMatchObject([{
+      turn_id: "turn_paired_2",
+      usage_receipt_id: "usage_paired_1",
+    }]);
+    expect(runtime.getSnapshot()).toEqual(firstProjection);
 
     view.unmount();
-    expect(destroy).not.toHaveBeenCalled();
-    expect(coordinator.store.getSnapshot().revision).toBe(1);
+    runtime.destroy();
     await coordinator.destroy();
+
+    const restartedTransport = offlinePairedTransport();
+    const restartedRuntime = await createConversationRuntime({
+      conversationId,
+      clientId: "client_paired_restart" as ConversationClientId,
+      transport: restartedTransport.transport,
+      eventStore: canonicalLog,
+    });
+    const restartedCoordinator = createConversationSyncCoordinator({
+      conversationId,
+      eventStore: canonicalLog,
+      adapter: canonicalLog.createSyncAdapter(),
+    });
+    await restartedCoordinator.start();
+
+    expect(restartedRuntime.getSnapshot()).toEqual(firstProjection);
+    expect(restartedCoordinator.store.getSnapshot()).toEqual(firstProjection);
+    expect(restartedTransport.startTurn).not.toHaveBeenCalled();
+
+    restartedRuntime.destroy();
+    await restartedCoordinator.destroy();
+  });
+
+  it("rejects paired stores and runtimes for different conversations before sending", () => {
+    const store = createConversationStore("conversation_store" as ConversationId);
+    const runtimeStore = createConversationStore("conversation_runtime" as ConversationId);
+    const { runtime, sendMessage } = fakeRuntime<unknown>(runtimeStore);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    expect(() =>
+      render(<ConversationProvider store={store} runtime={runtime} />)
+    ).toThrow(
+      /must belong to the same conversation; store belongs to conversation_store and runtime belongs to conversation_runtime/u,
+    );
+    expect(sendMessage).not.toHaveBeenCalled();
+
+    consoleError.mockRestore();
   });
 
   it("keeps action identity stable and preserves the runtime request type", async () => {

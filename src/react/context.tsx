@@ -122,6 +122,9 @@ export function ConversationProvider<TRequest = unknown>(
   const externalBinding = useMemo<ConversationBinding<unknown> | null>(() => {
     if (!hasValidExternalSource) return null;
     if (externalStore !== undefined) {
+      if (externalRuntime !== undefined) {
+        assertMatchingConversation(externalStore, externalRuntime);
+      }
       return Object.freeze({
         store: externalStore,
         runtime: externalRuntime as ConversationRuntime<unknown> | undefined ?? null,
@@ -209,6 +212,21 @@ function bindingFrom(
     return Object.freeze({ store: source.store, runtime: source });
   }
   return Object.freeze({ store: source, runtime: null });
+}
+
+function assertMatchingConversation(
+  store: ConversationReadableStore,
+  runtime: ConversationRuntime<unknown>,
+): void {
+  const storeConversationId = store.getSnapshot().conversation_id;
+  const runtimeConversationId = runtime.store.getSnapshot().conversation_id;
+  if (storeConversationId === runtimeConversationId) return;
+
+  throw new TypeError(
+    "ConversationProvider `store` and `runtime` must belong to the same " +
+      `conversation; store belongs to ${String(storeConversationId)} and ` +
+      `runtime belongs to ${String(runtimeConversationId)}.`,
+  );
 }
 
 function destroyBinding(binding: ConversationBinding<unknown>): void {
