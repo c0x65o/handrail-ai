@@ -60,6 +60,9 @@ const storeOnlyBundle = await bundle(
 if (!storeOnlyBundle.includes("IndexedDBConversationEventStore")) {
   throw new Error("Vite did not retain the requested IndexedDB browser export");
 }
+if (!storeOnlyBundle.includes("IndexedDBConversationSyncStateStore")) {
+  throw new Error("Vite did not retain the requested IndexedDB sync-state export");
+}
 for (const attachmentMarker of [
   "browser-intake:",
   "unsupported_type",

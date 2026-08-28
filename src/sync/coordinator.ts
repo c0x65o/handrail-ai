@@ -15,9 +15,16 @@ import {
   type ConversationStoreSelector,
   type ConversationStoreSelectorListener,
 } from "../conversation/store.js";
+import {
+  CONVERSATION_SYNC_STATE_SCHEMA_VERSION,
+  type ConversationSyncStateRecord,
+  type ConversationSyncStateStore,
+} from "./persistence.js";
 import type {
   ConversationSyncAdapter,
+  ConversationSyncEvents,
   ConversationSyncMutation,
+  ConversationSyncMutationAcknowledgement,
   ConversationSyncMutationEvent,
   ConversationSyncOperationFailure,
   ConversationSyncSnapshot,
@@ -81,6 +88,8 @@ export interface CreateConversationSyncCoordinatorOptions<
   readonly conversationId: ConversationId;
   readonly eventStore: ConversationEventStore;
   readonly adapter: ConversationSyncAdapter<TSnapshot>;
+  /** Persist the authoritative baseline and optimistic mutation queue. */
+  readonly stateStore?: ConversationSyncStateStore;
   /** Decode an application snapshot into the standard headless projection. */
   readonly decodeSnapshot?: (
     snapshot: ConversationSyncSnapshot<TSnapshot>,
@@ -118,6 +127,20 @@ export class ConversationSyncSnapshotError extends TypeError {
   constructor(message: string) {
     super(message);
     this.name = "ConversationSyncSnapshotError";
+  }
+}
+
+export class ConversationSyncStateRecordError extends TypeError {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConversationSyncStateRecordError";
+  }
+}
+
+export class ConversationSyncAdapterProtocolError extends TypeError {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConversationSyncAdapterProtocolError";
   }
 }
 
@@ -168,6 +191,7 @@ export function createConversationSyncCoordinator<
     conversationId,
     eventStore,
     adapter,
+    stateStore,
     readBatchSize,
     clock = DEFAULT_CLOCK,
     backoff = DEFAULT_BACKOFF,
@@ -187,6 +211,7 @@ export function createConversationSyncCoordinator<
   let operationBoundary: Promise<void> = Promise.resolve();
   let subscription: ConversationSyncSubscription | null = null;
   let reconnectAbort: AbortController | null = null;
+  let stateStoreGeneration: number | null = null;
   let generation = 0;
   let started = false;
   let destroyed = false;
@@ -269,6 +294,31 @@ export function createConversationSyncCoordinator<
     previous.destroy();
   };
 
+  const persistCoordinatorState = async (): Promise<void> => {
+    if (stateStore === undefined) return;
+    const expectedGeneration = stateStoreGeneration;
+    const saved = await stateStore.save({
+      expectedGeneration,
+      record: {
+        schemaVersion: CONVERSATION_SYNC_STATE_SCHEMA_VERSION,
+        conversationId,
+        authoritativeState: authoritativeStore.getSnapshot(),
+        authoritativeRevision: authoritativeStore.getSnapshot().revision,
+        pendingMutations: [...pending.values()],
+      },
+    });
+    const validated = validateSavedStateRecord(saved, conversationId);
+    if (
+      expectedGeneration !== null &&
+      validated.generation <= expectedGeneration
+    ) {
+      throw new ConversationSyncStateRecordError(
+        "Persisted conversation sync state did not advance its generation",
+      );
+    }
+    stateStoreGeneration = validated.generation;
+  };
+
   const rebuildView = async (): Promise<void> => {
     const optimistic = createConversationStore(
       conversationId,
@@ -288,30 +338,12 @@ export function createConversationSyncCoordinator<
     publishState();
   };
 
-  const persistAndApply = async (
+  const applyAuthoritativeEvents = async (
     events: readonly ConversationEvent[],
-  ): Promise<void> => {
-    if (events.length === 0) return;
+  ): Promise<boolean> => {
     const current = authoritativeStore.getSnapshot();
-    const seenEvents = new Set<string>(current.processed_event_ids);
-    const seenMutations = new Set<string>(current.processed_mutation_ids);
-    const fresh: ConversationEvent[] = [];
-    let expected = (current.revision ?? 0) + 1;
-
-    for (const candidate of events) {
-      const event = parseConversationEvent(candidate);
-      if (event.conversation_id !== conversationId) throw new RemoteRevisionGapError();
-      if (
-        seenEvents.has(event.event_id) ||
-        (event.mutation_id !== undefined && seenMutations.has(event.mutation_id))
-      ) continue;
-      if (event.revision !== expected) throw new RemoteRevisionGapError();
-      fresh.push(event);
-      seenEvents.add(event.event_id);
-      if (event.mutation_id !== undefined) seenMutations.add(event.mutation_id);
-      expected += 1;
-    }
-    if (fresh.length === 0) return;
+    const fresh = validateAuthoritativeEvents(events, current, conversationId);
+    if (fresh.length === 0) return false;
 
     if (localDurableRevision === current.revision) {
       await eventStore.append({
@@ -323,12 +355,20 @@ export function createConversationSyncCoordinator<
     }
     const applied = await authoritativeStore.applyEvents(fresh);
     if (applied.replay_error !== null) throw new RemoteRevisionGapError();
+    return true;
+  };
+
+  const persistAndApply = async (
+    events: readonly ConversationEvent[],
+  ): Promise<void> => {
+    if (!(await applyAuthoritativeEvents(events))) return;
+    await persistCoordinatorState();
     await rebuildView();
   };
 
-  const installSnapshot = async (
+  const decodeSyncSnapshot = (
     snapshot: ConversationSyncSnapshot<TSnapshot>,
-  ): Promise<void> => {
+  ): ConversationState => {
     if (snapshot.conversationId !== conversationId) {
       throw new ConversationSyncSnapshotError(
         "Sync snapshot belongs to another conversation",
@@ -338,9 +378,20 @@ export function createConversationSyncCoordinator<
       ? defaultDecodeSnapshot(snapshot)
       : options.decodeSnapshot(snapshot);
     validateDecodedSnapshot(decoded, snapshot.conversationId, snapshot.revision);
+    return decoded;
+  };
+
+  const installDecodedSnapshot = async (
+    decoded: ConversationState,
+  ): Promise<void> => {
     replaceAuthoritativeStore(createConversationStore(conversationId, decoded));
+    await persistCoordinatorState();
     await rebuildView();
   };
+
+  const installSnapshot = async (
+    snapshot: ConversationSyncSnapshot<TSnapshot>,
+  ): Promise<void> => installDecodedSnapshot(decodeSyncSnapshot(snapshot));
 
   const pullAndInstallSnapshot = async (): Promise<
     ConversationSyncOperationFailure | null
@@ -361,6 +412,10 @@ export function createConversationSyncCoordinator<
       if (result.status === "snapshot_required") return pullAndInstallSnapshot();
       if (result.status !== "events") return result;
       try {
+        validateConversationSyncEvents(
+          result,
+          authoritativeStore.getSnapshot().revision,
+        );
         await persistAndApply(result.events);
       } catch (error) {
         if (!(error instanceof RemoteRevisionGapError)) throw error;
@@ -370,9 +425,13 @@ export function createConversationSyncCoordinator<
     }
   };
 
-  const rejectPending = (failure: ConversationSyncOperationFailure): void => {
+  const rejectPending = async (
+    failure: ConversationSyncOperationFailure,
+  ): Promise<void> => {
     const rejected = [...pending.values()];
+    if (rejected.length === 0) return;
     pending.clear();
+    await persistCoordinatorState();
     for (const mutation of rejected) {
       try {
         onMutationRejected?.({ mutation, failure });
@@ -405,21 +464,49 @@ export function createConversationSyncCoordinator<
       }
       if (result.status !== "mutations") return result;
 
-      for (const acknowledgement of result.acknowledgements) {
-        if (!pending.has(acknowledgement.mutationId)) continue;
+      const acknowledgedMutationIds = validateAcknowledgementIdentities(
+        result.acknowledgements,
+        mutations,
+      );
+      const acknowledgementEvents = result.acknowledgements.flatMap(
+        ({ events }) => events,
+      );
+      try {
+        validateAppendMutationHead(
+          acknowledgementEvents,
+          result.latestRevision,
+          authoritativeStore.getSnapshot(),
+          conversationId,
+        );
+      } catch (error) {
+        if (!(error instanceof RemoteRevisionGapError)) throw error;
+        const snapshotResult = await adapter.pullSnapshot({ conversationId });
+        if (snapshotResult.status !== "snapshot") return snapshotResult;
+        const decoded = decodeSyncSnapshot(snapshotResult.snapshot);
         try {
-          await persistAndApply(acknowledgement.events);
-        } catch (error) {
-          if (!(error instanceof RemoteRevisionGapError)) throw error;
-          const failure = await pullAndInstallSnapshot();
-          if (failure !== null) return failure;
+          validateAppendMutationHead(
+            acknowledgementEvents,
+            result.latestRevision,
+            decoded,
+            conversationId,
+          );
+        } catch (recoveryError) {
+          if (!(recoveryError instanceof RemoteRevisionGapError)) {
+            throw recoveryError;
+          }
+          throw new ConversationSyncAdapterProtocolError(
+            "Conversation sync adapter acknowledgement events remain non-contiguous after snapshot recovery",
+          );
         }
-        pending.delete(acknowledgement.mutationId);
+        await installDecodedSnapshot(decoded);
       }
+
+      await applyAuthoritativeEvents(acknowledgementEvents);
+      for (const mutationId of acknowledgedMutationIds) {
+        pending.delete(mutationId);
+      }
+      await persistCoordinatorState();
       await rebuildView();
-      if (result.acknowledgements.length === 0) {
-        throw new Error("Conversation sync adapter acknowledged no queued mutations");
-      }
     }
     return null;
   };
@@ -439,7 +526,7 @@ export function createConversationSyncCoordinator<
     generation += 1;
     closeConnection();
     if (failure?.status === "unauthorized") {
-      rejectPending(failure);
+      await rejectPending(failure);
       await rebuildView();
     }
     publishState("error", error, state.reconnectAttempt);
@@ -492,6 +579,19 @@ export function createConversationSyncCoordinator<
     );
   };
 
+  const flushPendingOrFailProtocol = async (): Promise<
+    ConversationSyncOperationFailure | null
+  > => {
+    try {
+      return await flushPending();
+    } catch (error) {
+      if (error instanceof ConversationSyncAdapterProtocolError) {
+        await failPermanently(error);
+      }
+      throw error;
+    }
+  };
+
   const consume = async (
     activeSubscription: ConversationSyncSubscription,
     activeGeneration: number,
@@ -503,6 +603,10 @@ export function createConversationSyncCoordinator<
           if (!started || destroyed || activeGeneration !== generation) return;
           if (update.status === "events") {
             try {
+              validateConversationSyncEvents(
+                update,
+                authoritativeStore.getSnapshot().revision,
+              );
               await persistAndApply(update.events);
               if (update.hasMore) {
                 const failure = await catchUp();
@@ -569,7 +673,7 @@ export function createConversationSyncCoordinator<
     subscription = subscribed.subscription;
     publishState("online", null, 0);
     void consume(subscribed.subscription, activeGeneration);
-    const pushFailure = await flushPending();
+    const pushFailure = await flushPendingOrFailProtocol();
     if (pushFailure !== null) {
       if (pushFailure.status === "unauthorized") {
         await failPermanently(pushFailure, pushFailure);
@@ -584,13 +688,37 @@ export function createConversationSyncCoordinator<
     generation += 1;
     publishState("connecting", null, 0);
     try {
-      const replay = await replayConversation({
-        conversationId,
-        eventStore,
-        ...(readBatchSize === undefined ? {} : { readBatchSize }),
-      });
-      replaceAuthoritativeStore(replay.store);
+      const [replay, savedRecord] = await Promise.all([
+        replayConversation({
+          conversationId,
+          eventStore,
+          ...(readBatchSize === undefined ? {} : { readBatchSize }),
+        }),
+        stateStore?.load(conversationId) ?? Promise.resolve(null),
+      ]);
+      const saved = savedRecord === null
+        ? null
+        : validateSavedStateRecord(savedRecord, conversationId);
+      stateStoreGeneration = saved?.generation ?? null;
+      if (
+        saved !== null &&
+        revisionValue(saved.authoritativeRevision) >
+          revisionValue(replay.lastRevision)
+      ) {
+        replay.store.destroy();
+        replaceAuthoritativeStore(createConversationStore(
+          conversationId,
+          saved.authoritativeState,
+        ));
+      } else {
+        replaceAuthoritativeStore(replay.store);
+      }
       localDurableRevision = replay.lastRevision;
+      pending.clear();
+      for (const mutation of saved?.pendingMutations ?? []) {
+        pending.set(mutation.mutationId, mutation);
+      }
+      await persistCoordinatorState();
       await rebuildView();
       await connect(generation, false);
     } catch (error) {
@@ -616,9 +744,10 @@ export function createConversationSyncCoordinator<
         )
       ) return;
       pending.set(normalized.mutationId, normalized);
+      await persistCoordinatorState();
       await rebuildView();
       if (!started || state.status !== "online") return;
-      const failure = await flushPending();
+      const failure = await flushPendingOrFailProtocol();
       if (failure === null) return;
       if (failure.status === "unauthorized") {
         await failPermanently(failure, failure);
@@ -628,7 +757,7 @@ export function createConversationSyncCoordinator<
   const flush = (): Promise<void> => serialize(async () => {
     assertUsable();
     if (!started || state.status !== "online") return;
-    const failure = await flushPending();
+    const failure = await flushPendingOrFailProtocol();
     if (failure === null) return;
     if (failure.status === "unauthorized") {
       await failPermanently(failure, failure);
@@ -722,27 +851,27 @@ function normalizeMutation(
   mutation: ConversationSyncMutation,
   conversationId: ConversationId,
 ): ConversationSyncMutation {
-  if (mutation.events.length === 0) {
-    throw new TypeError("A conversation sync mutation must contain at least one event");
+  if (mutation.events.length !== 1) {
+    throw new TypeError("A conversation sync mutation must contain exactly one event");
   }
-  const events = mutation.events.map((candidate) => {
-    const parsed = parseConversationEvent(candidate);
-    if (parsed.payload.type === "usage.receipt_linked") {
-      throw new TypeError("Usage receipt links cannot be proposed by clients");
-    }
-    const event = parsed as ConversationSyncMutationEvent;
-    if (event.conversation_id !== conversationId) {
-      throw new TypeError("A queued mutation belongs to another conversation");
-    }
-    if (event.source.type !== "client") {
-      throw new TypeError("A queued mutation must contain client-authored events");
-    }
-    if (event.mutation_id !== mutation.mutationId) {
-      throw new TypeError("Every queued event must carry its mutation ID");
-    }
-    return event;
+  const parsed = parseConversationEvent(mutation.events[0]);
+  if (parsed.payload.type === "usage.receipt_linked") {
+    throw new TypeError("Usage receipt links cannot be proposed by clients");
+  }
+  const event = parsed as ConversationSyncMutationEvent;
+  if (event.conversation_id !== conversationId) {
+    throw new TypeError("A queued mutation belongs to another conversation");
+  }
+  if (event.source.type !== "client") {
+    throw new TypeError("A queued mutation must contain client-authored events");
+  }
+  if (event.mutation_id !== mutation.mutationId) {
+    throw new TypeError("Every queued event must carry its mutation ID");
+  }
+  return Object.freeze({
+    mutationId: mutation.mutationId,
+    events: Object.freeze([event] as const),
   });
-  return Object.freeze({ mutationId: mutation.mutationId, events: Object.freeze(events) });
 }
 
 function rebasePendingMutations(
@@ -752,10 +881,10 @@ function rebasePendingMutations(
   let nextRevision = (revision ?? 0) + 1;
   return mutations.map((mutation) => ({
     mutationId: mutation.mutationId,
-    events: mutation.events.map((event) => ({
-      ...event,
+    events: [{
+      ...mutation.events[0],
       revision: nextRevision++ as ConversationRevision,
-    })),
+    }],
   }));
 }
 
@@ -766,6 +895,194 @@ function rebasePendingEvents(
   return rebasePendingMutations(mutations, revision).flatMap((mutation) =>
     mutation.events.map((event) => event as ConversationEvent),
   );
+}
+
+function validateAcknowledgementIdentities(
+  acknowledgements: readonly ConversationSyncMutationAcknowledgement[],
+  submittedMutations: readonly ConversationSyncMutation[],
+): string[] {
+  if (acknowledgements.length === 0) {
+    throw new ConversationSyncAdapterProtocolError(
+      "Conversation sync adapter acknowledged no queued mutations",
+    );
+  }
+
+  const submittedMutationIds = new Set(
+    submittedMutations.map(({ mutationId }) => mutationId),
+  );
+  const acknowledgedMutationIds = new Set<string>();
+  for (const acknowledgement of acknowledgements) {
+    if (
+      acknowledgement.status !== "accepted" &&
+      acknowledgement.status !== "duplicate"
+    ) {
+      throw new ConversationSyncAdapterProtocolError(
+        "Conversation sync adapter returned an invalid mutation acknowledgement status",
+      );
+    }
+    if (acknowledgedMutationIds.has(acknowledgement.mutationId)) {
+      throw new ConversationSyncAdapterProtocolError(
+        `Conversation sync adapter acknowledged mutation ${acknowledgement.mutationId} more than once`,
+      );
+    }
+    if (!submittedMutationIds.has(acknowledgement.mutationId)) {
+      throw new ConversationSyncAdapterProtocolError(
+        `Conversation sync adapter acknowledged unknown mutation ${acknowledgement.mutationId}`,
+      );
+    }
+    acknowledgedMutationIds.add(acknowledgement.mutationId);
+  }
+  return [...acknowledgedMutationIds];
+}
+
+function validateAppendMutationHead(
+  events: readonly ConversationEvent[],
+  latestRevision: ConversationRevision,
+  current: ConversationState,
+  conversationId: ConversationId,
+): void {
+  if (latestRevision === null || !isConversationRevision(latestRevision)) {
+    throw new ConversationSyncAdapterProtocolError(
+      "Conversation sync adapter returned an invalid append latest revision",
+    );
+  }
+  const fresh = validateAuthoritativeEvents(events, current, conversationId);
+  const representedHead = fresh.at(-1)?.revision ?? current.revision;
+  if (latestRevision !== representedHead) {
+    throw new ConversationSyncAdapterProtocolError(
+      "Conversation sync adapter append latest revision does not match its authoritative events",
+    );
+  }
+}
+
+function validateAuthoritativeEvents(
+  events: readonly ConversationEvent[],
+  current: ConversationState,
+  conversationId: ConversationId,
+): ConversationEvent[] {
+  const seenEvents = new Set<string>(current.processed_event_ids);
+  const seenMutations = new Set<string>(current.processed_mutation_ids);
+  const fresh: ConversationEvent[] = [];
+  let expected = (current.revision ?? 0) + 1;
+
+  for (const candidate of events) {
+    const event = parseConversationEvent(candidate);
+    if (event.conversation_id !== conversationId) {
+      throw new RemoteRevisionGapError();
+    }
+    if (
+      seenEvents.has(event.event_id) ||
+      (event.mutation_id !== undefined && seenMutations.has(event.mutation_id))
+    ) continue;
+    if (event.revision !== expected) throw new RemoteRevisionGapError();
+    fresh.push(event);
+    seenEvents.add(event.event_id);
+    if (event.mutation_id !== undefined) seenMutations.add(event.mutation_id);
+    expected += 1;
+  }
+  return fresh;
+}
+
+function validateConversationSyncEvents(
+  result: ConversationSyncEvents,
+  requestedRevision: ConversationRevision | null,
+): void {
+  if (
+    !isConversationRevision(result.revision) ||
+    !isConversationRevision(result.latestRevision)
+  ) {
+    throw new RemoteRevisionGapError();
+  }
+
+  const batchRevision = result.events.at(-1)?.revision ?? requestedRevision;
+  const latestIsBeyondBatch =
+    revisionValue(result.latestRevision) > revisionValue(result.revision);
+  if (
+    result.revision !== batchRevision ||
+    revisionValue(result.latestRevision) < revisionValue(result.revision) ||
+    result.hasMore !== latestIsBeyondBatch
+  ) {
+    throw new RemoteRevisionGapError();
+  }
+}
+
+function isConversationRevision(
+  revision: unknown,
+): revision is ConversationRevision | null {
+  return (
+    revision === null ||
+    (Number.isSafeInteger(revision) && (revision as number) > 0)
+  );
+}
+
+function validateSavedStateRecord(
+  value: unknown,
+  conversationId: ConversationId,
+): ConversationSyncStateRecord {
+  try {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      throw new TypeError("record must be an object");
+    }
+    const record = value as Partial<ConversationSyncStateRecord>;
+    if (record.schemaVersion !== CONVERSATION_SYNC_STATE_SCHEMA_VERSION) {
+      throw new TypeError("schema version is not supported");
+    }
+    if (record.conversationId !== conversationId) {
+      throw new TypeError("record belongs to another conversation");
+    }
+    if (!Number.isSafeInteger(record.generation) || (record.generation ?? 0) < 1) {
+      throw new TypeError("generation must be a positive safe integer");
+    }
+    if (
+      record.authoritativeRevision !== null &&
+      (!Number.isSafeInteger(record.authoritativeRevision) ||
+        (record.authoritativeRevision ?? 0) < 1)
+    ) {
+      throw new TypeError("authoritative revision is invalid");
+    }
+    if (!Array.isArray(record.pendingMutations)) {
+      throw new TypeError("pending mutations must be an array");
+    }
+
+    const authoritativeState = deepFreeze(
+      JSON.parse(JSON.stringify(record.authoritativeState)),
+    ) as ConversationState;
+    validateDecodedSnapshot(
+      authoritativeState,
+      conversationId,
+      record.authoritativeRevision ?? null,
+    );
+
+    const pendingMutations = record.pendingMutations.map((mutation) =>
+      normalizeMutation(mutation, conversationId),
+    );
+    const mutationIds = new Set<string>();
+    for (const mutation of pendingMutations) {
+      if (mutationIds.has(mutation.mutationId)) {
+        throw new TypeError("pending mutation IDs must be unique");
+      }
+      mutationIds.add(mutation.mutationId);
+    }
+
+    return Object.freeze({
+      schemaVersion: CONVERSATION_SYNC_STATE_SCHEMA_VERSION,
+      conversationId,
+      generation: record.generation as number,
+      authoritativeState,
+      authoritativeRevision: record.authoritativeRevision ?? null,
+      pendingMutations: Object.freeze(pendingMutations),
+    });
+  } catch (error) {
+    if (error instanceof ConversationSyncStateRecordError) throw error;
+    const detail = error instanceof Error ? `: ${error.message}` : "";
+    throw new ConversationSyncStateRecordError(
+      `Persisted conversation sync state is invalid${detail}`,
+    );
+  }
+}
+
+function revisionValue(revision: ConversationRevision | null): number {
+  return revision ?? 0;
 }
 
 function defaultDecodeSnapshot<TSnapshot extends ConversationJsonValue>(

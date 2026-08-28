@@ -898,8 +898,8 @@ describe("createConversationRuntime", () => {
   it("passes an acknowledged opaque checkpoint unchanged to an automatic retry", async () => {
     const eventStore = new InMemoryConversationEventStore();
     const transport = new FakeTransport();
-    const firstCheckpoint = opaqueCheckpoint(1, "automatic-first");
-    const finalCheckpoint = opaqueCheckpoint(2, "automatic-final");
+    const firstCheckpoint = opaqueCheckpoint(6, "automatic-first");
+    const finalCheckpoint = opaqueCheckpoint(10, "automatic-final");
     transport.startObservations.push(observation([
       startedFrame(),
       deltaFrame(1, "Opaque"),
@@ -932,10 +932,38 @@ describe("createConversationRuntime", () => {
     expect(outcome.checkpoint).toEqual(finalCheckpoint);
   });
 
+  it("accepts a terminal checkpoint at its post-persistence durable revision", async () => {
+    const eventStore = new InMemoryConversationEventStore();
+    const transport = new FakeTransport();
+    const terminalCheckpoint = opaqueCheckpoint(6, "terminal-durable-head");
+    transport.startObservations.push(observation([
+      startedFrame(),
+      completedFrame(1),
+    ], "completed", { checkpoint: terminalCheckpoint }));
+    const runtime = await createConversationRuntime({
+      conversationId,
+      clientId,
+      transport,
+      eventStore,
+      ...deterministicSources(),
+    });
+
+    const outcome = await runtime.sendMessage({
+      content: "Acknowledge the terminal durable head",
+      request: { prompt: "Acknowledge the terminal durable head" },
+    });
+
+    expect(outcome).toMatchObject({
+      status: "completed",
+      checkpoint: terminalCheckpoint,
+    });
+    expect(runtime.getSnapshot().revision).toBe(6);
+  });
+
   it("hydrates an acknowledged opaque checkpoint for restoreActiveTurn", async () => {
     const eventStore = new InMemoryConversationEventStore();
     const transport = new FakeTransport();
-    const durableCheckpoint = opaqueCheckpoint(1, "restart-durable");
+    const durableCheckpoint = opaqueCheckpoint(6, "restart-durable");
     transport.startObservations.push(observation([
       startedFrame(),
       deltaFrame(1, "Before restart"),
@@ -959,7 +987,7 @@ describe("createConversationRuntime", () => {
     transport.resumeObservations.push(observation([
       deltaFrame(1, "Before restart"),
       completedFrame(2),
-    ], "completed", { checkpoint: opaqueCheckpoint(2, "restart-final") }));
+    ], "completed", { checkpoint: opaqueCheckpoint(10, "restart-final") }));
     const runtimeAfterRestart = await createConversationRuntime({
       conversationId,
       clientId,
@@ -970,6 +998,7 @@ describe("createConversationRuntime", () => {
 
     expect((await runtimeAfterRestart.restoreActiveTurn())?.status).toBe("completed");
     expect(transport.resumes[0]?.resumeFrom).toEqual(durableCheckpoint);
+    expect(transport.resumes[0]?.resumeFrom).not.toBe(durableCheckpoint);
   });
 
   it("does not advance the prior checkpoint when checkpoint persistence fails", async () => {
@@ -1024,7 +1053,7 @@ describe("createConversationRuntime", () => {
     for (const invalidCheckpoint of invalidCheckpoints) {
       const eventStore = new InMemoryConversationEventStore();
       const transport = new FakeTransport();
-      const priorCheckpoint = opaqueCheckpoint(1, "valid-prior");
+      const priorCheckpoint = opaqueCheckpoint(6, "valid-prior");
       transport.startObservations.push(observation([
         startedFrame(),
         deltaFrame(1, "Prior"),
@@ -1055,7 +1084,7 @@ describe("createConversationRuntime", () => {
       transport.resumeObservations.push(observation([
         deltaFrame(2, " effect"),
         completedFrame(3),
-      ], "completed", { checkpoint: opaqueCheckpoint(3, "valid-final") }));
+      ], "completed", { checkpoint: priorCheckpoint }));
       expect((await runtime.resumeTurn(first.turnId)).status).toBe("completed");
       expect(transport.resumes.map(({ resumeFrom }) => resumeFrom)).toEqual([
         priorCheckpoint,

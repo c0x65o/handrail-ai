@@ -12,6 +12,7 @@ import {
   type ConversationRevision,
   type ConversationSyncAdapter,
   type ConversationSyncEvents,
+  type ConversationSyncMutation,
   type ConversationSyncOperationFailure,
   type ConversationSyncSubscription,
   type ConversationSyncMutationEvent,
@@ -394,6 +395,29 @@ describe("ConversationSyncAdapter contract", () => {
     );
     expectJsonData(published);
     subscribed.subscription.close();
+  });
+
+  it("requires exactly one event per mutation", () => {
+    const proposed = event(2, "mutation-2");
+    const mutation = {
+      mutationId: proposed.mutation_id!,
+      events: [proposed],
+    } satisfies ConversationSyncMutation;
+
+    const zeroEventMutation = {
+      mutationId: proposed.mutation_id!,
+      // @ts-expect-error A mutation must identify exactly one event/fact.
+      events: [],
+    } satisfies ConversationSyncMutation;
+    const twoEventMutation = {
+      mutationId: proposed.mutation_id!,
+      // @ts-expect-error A mutation must not identify more than one event/fact.
+      events: [proposed, proposed],
+    } satisfies ConversationSyncMutation;
+
+    expect(mutation.events).toEqual([proposed]);
+    void zeroEventMutation;
+    void twoEventMutation;
   });
 
   it("exports implementable interfaces and every explicit failure outcome", () => {

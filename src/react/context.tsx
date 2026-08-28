@@ -9,12 +9,18 @@ import {
 import type { ConversationStore } from "../conversation/store.js";
 import type { ConversationRuntime } from "../runtime.js";
 
+/** The read capabilities required by React hooks and primitives. */
+export type ConversationReadableStore = Pick<
+  ConversationStore,
+  "getSnapshot" | "subscribe" | "select"
+>;
+
 export type ConversationProviderFactory<TRequest = unknown> = () =>
-  | ConversationStore
+  | ConversationReadableStore
   | ConversationRuntime<TRequest>;
 
 interface ConversationBinding<TRequest = unknown> {
-  readonly store: ConversationStore;
+  readonly store: ConversationReadableStore;
   readonly runtime: ConversationRuntime<TRequest> | null;
 }
 
@@ -25,7 +31,7 @@ interface ConversationProviderBaseProps {
 export interface ConversationStoreProviderProps
   extends ConversationProviderBaseProps {
   /** Externally owned. The provider never destroys this store. */
-  readonly store: ConversationStore;
+  readonly store: ConversationReadableStore;
   readonly runtime?: never;
   readonly create?: never;
 }
@@ -41,8 +47,10 @@ export interface ConversationRuntimeProviderProps<TRequest = unknown>
 export interface ConversationFactoryProviderProps<TRequest = unknown>
   extends ConversationProviderBaseProps {
   /**
-   * Creates a provider-owned store or runtime. The provider destroys it after
-   * its final unmount, including React StrictMode's development remount cycle.
+   * Creates a provider-owned store or runtime. The provider destroys mutable
+   * stores and runtimes after their final unmount, including React StrictMode's
+   * development remount cycle. Read-only stores have no lifecycle capability
+   * for the provider to invoke.
    */
   readonly create: ConversationProviderFactory<TRequest>;
   readonly store?: never;
@@ -172,7 +180,7 @@ function getOwnedBinding(
 }
 
 function bindingFrom(
-  source: ConversationStore | ConversationRuntime<unknown>,
+  source: ConversationReadableStore | ConversationRuntime<unknown>,
 ): ConversationBinding<unknown> {
   if ("store" in source) {
     return Object.freeze({ store: source.store, runtime: source });
@@ -183,7 +191,13 @@ function bindingFrom(
 function destroyBinding(binding: ConversationBinding<unknown>): void {
   if (binding.runtime !== null) {
     binding.runtime.destroy();
-  } else {
+  } else if (hasDestroyCapability(binding.store)) {
     binding.store.destroy();
   }
+}
+
+function hasDestroyCapability(
+  store: ConversationReadableStore,
+): store is ConversationReadableStore & Pick<ConversationStore, "destroy"> {
+  return "destroy" in store && typeof store.destroy === "function";
 }

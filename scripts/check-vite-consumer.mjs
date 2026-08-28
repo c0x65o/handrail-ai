@@ -49,6 +49,10 @@ if (!bundledCode.includes("IndexedDBConversationEventStore")) {
   throw new Error("Vite consumer bundle did not retain the opt-in browser entry point");
 }
 
+if (!bundledCode.includes("IndexedDBConversationSyncStateStore")) {
+  throw new Error("Vite consumer bundle did not retain the sync-state browser entry point");
+}
+
 if (!bundledCode.includes("reactSubpathElement")) {
   throw new Error("Vite consumer bundle did not retain the React subpath consumer");
 }

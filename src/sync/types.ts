@@ -89,14 +89,15 @@ export type ReadSinceResult =
 /**
  * One idempotent client-authored mutation.
  *
- * Every proposed event must carry this `mutationId` as its `mutation_id`.
+ * One mutation ID identifies exactly one event/fact, whose `mutation_id` must
+ * match this `mutationId`.
  * Proposed envelopes are untrusted input: an application-hosted adapter must
  * authenticate the caller, validate authorization and client event semantics,
  * and return the authoritative stored envelopes in its acknowledgement.
  */
 export interface ConversationSyncMutation {
   readonly mutationId: ConversationClientMutationId;
-  readonly events: readonly ConversationSyncMutationEvent[];
+  readonly events: readonly [ConversationSyncMutationEvent];
 }
 
 /**

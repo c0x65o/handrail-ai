@@ -18,7 +18,10 @@ import type {
   ConversationRuntimeSendMessageInput,
   ConversationRuntimeTurnResult,
 } from "../runtime.js";
-import { ConversationContext } from "./context.js";
+import {
+  ConversationContext,
+  type ConversationReadableStore,
+} from "./context.js";
 
 export interface ConversationActions<TRequest = unknown> {
   applyEvent(event: ConversationEvent): Promise<ConversationState>;
@@ -30,8 +33,13 @@ export interface ConversationActions<TRequest = unknown> {
   restoreActiveTurn(): Promise<ConversationRuntimeTurnResult | null>;
 }
 
+type ConversationMutableStore = ConversationReadableStore & Pick<
+  ConversationStore,
+  "applyEvent" | "applyEvents"
+>;
+
 /** Return the store supplied by the nearest ConversationProvider. */
-export function useConversationStore(): ConversationStore {
+export function useConversationStore(): ConversationReadableStore {
   return useConversationBinding("useConversationStore").store;
 }
 
@@ -89,13 +97,21 @@ export function useConversationSelector<Selected>(
 }
 
 /**
- * Return stable action callbacks for the nearest provider. Runtime-only
- * actions throw an actionable error when the provider was given only a store.
+ * Return stable action callbacks for the nearest provider. Actions throw an
+ * actionable error when the provider source lacks the required capability.
  */
 export function useConversationActions<TRequest = unknown>(): ConversationActions<TRequest> {
   const binding = useConversationBinding("useConversationActions");
   return useMemo(() => {
     const runtime = binding.runtime as ConversationRuntime<TRequest> | null;
+    const requireMutableStore = (): ConversationMutableStore => {
+      if (hasMutationCapabilities(binding.store)) return binding.store;
+      throw new Error(
+        "@handrail/ai/react: useConversationActions applyEvent/applyEvents " +
+          "require <ConversationProvider store={store}> with a mutable " +
+          "ConversationStore, a runtime, or an owned factory returning either.",
+      );
+    };
     const requireRuntime = (): ConversationRuntime<TRequest> => {
       if (runtime !== null) return runtime;
       throw new Error(
@@ -105,9 +121,9 @@ export function useConversationActions<TRequest = unknown>(): ConversationAction
     };
 
     return Object.freeze({
-      applyEvent: (event: ConversationEvent) => binding.store.applyEvent(event),
+      applyEvent: (event: ConversationEvent) => requireMutableStore().applyEvent(event),
       applyEvents: (events: readonly ConversationEvent[]) =>
-        binding.store.applyEvents(events),
+        requireMutableStore().applyEvents(events),
       sendMessage: (input: ConversationRuntimeSendMessageInput<TRequest>) =>
         requireRuntime().sendMessage(input),
       resumeTurn: (turnId: ConversationTurnId) =>
@@ -115,6 +131,13 @@ export function useConversationActions<TRequest = unknown>(): ConversationAction
       restoreActiveTurn: () => requireRuntime().restoreActiveTurn(),
     });
   }, [binding]);
+}
+
+function hasMutationCapabilities(
+  store: ConversationReadableStore,
+): store is ConversationMutableStore {
+  return "applyEvent" in store && typeof store.applyEvent === "function" &&
+    "applyEvents" in store && typeof store.applyEvents === "function";
 }
 
 function useConversationBinding(hookName: string) {

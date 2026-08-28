@@ -308,11 +308,12 @@ export async function createConversationRuntime<TRequest>(
     ...(options.deviceId === undefined ? {} : { device_id: options.deviceId }),
   });
 
-  const persist = async (
-    drafts: readonly EventDraft[],
+  const persistGenerated = async (
+    generateDrafts: (
+      durableRevision: ConversationRevision | null,
+    ) => readonly EventDraft[],
   ): Promise<readonly ConversationEvent[]> => {
     assertUsable();
-    if (drafts.length === 0) return [];
     let resolveBoundary!: () => void;
     const previousBoundary = mutationBoundary;
     mutationBoundary = new Promise<void>((resolve) => {
@@ -322,6 +323,8 @@ export async function createConversationRuntime<TRequest>(
     try {
       assertUsable();
       const expectedRevision = store.getSnapshot().revision;
+      const drafts = generateDrafts(expectedRevision);
+      if (drafts.length === 0) return [];
       const occurredAt = timestamp();
       const events = drafts.map((draft, index) =>
         parseConversationEvent({
@@ -360,6 +363,12 @@ export async function createConversationRuntime<TRequest>(
       resolveBoundary();
     }
   };
+
+  const persist = (
+    drafts: readonly EventDraft[],
+  ): Promise<readonly ConversationEvent[]> => drafts.length === 0
+    ? Promise.resolve([])
+    : persistGenerated(() => drafts);
 
   const result = (
     turnId: ConversationTurnId,
@@ -515,17 +524,23 @@ export async function createConversationRuntime<TRequest>(
           ? transportResult.error
           : undefined;
         if (transportResult?.status === "disconnected") {
-          let checkpoint: TurnResumePoint | null;
-          try {
-            checkpoint = validatedObservationCheckpoint(
-              transportResult.checkpoint,
-              protocol.checkpoint,
-              protocol.safeSequence,
-            );
-          } catch (cause) {
-            return result(turnId, "interrupted", runtimeFailure(cause));
-          }
-          if (checkpoint !== null && !checkpointsEqual(checkpoint, protocol.checkpoint)) {
+          const disconnectedResult = transportResult;
+          let validationFailure: unknown = null;
+          await persistGenerated((durableRevision) => {
+            let checkpoint: TurnResumePoint | null;
+            try {
+              checkpoint = validatedObservationCheckpoint(
+                disconnectedResult.checkpoint,
+                protocol.checkpoint,
+                durableRevision,
+              );
+            } catch (cause) {
+              validationFailure = cause;
+              return [];
+            }
+            if (checkpoint === null || checkpointsEqual(checkpoint, protocol.checkpoint)) {
+              return [];
+            }
             const turn = store.getSnapshot().turns.find(
               (candidate) => candidate.turn_id === turnId,
             );
@@ -534,18 +549,20 @@ export async function createConversationRuntime<TRequest>(
               status !== "queued" && status !== "running" &&
               status !== "waiting_for_tool_result"
             ) {
-              return result(turnId, "interrupted", {
-                code: "invalid_protocol",
-                message: "A transport checkpoint cannot be applied to a terminal turn",
-                retryable: false,
-              });
+              validationFailure = new TypeError(
+                "A transport checkpoint cannot be applied to a terminal turn",
+              );
+              return [];
             }
-            await persist([{
+            return [{
               actor: { type: "assistant" },
               source: runtimeSource(),
               metadata: metadataFor({ checkpoint }),
               payload: { type: "turn.status_changed", turn_id: turnId, status },
-            }]);
+            }];
+          });
+          if (validationFailure !== null) {
+            return result(turnId, "interrupted", runtimeFailure(validationFailure));
           }
         }
         return result(
@@ -571,28 +588,43 @@ export async function createConversationRuntime<TRequest>(
         });
       }
 
-      let checkpoint: TurnResumePoint | null;
-      try {
-        checkpoint = validatedObservationCheckpoint(
-          transportResult.checkpoint,
-          protocol.checkpoint,
-          frameState.terminal.sequence,
-        );
-      } catch (cause) {
-        return result(turnId, "interrupted", runtimeFailure(cause));
-      }
-
-      await persist(
-        draftsForTerminal(
+      const terminal = frameState.terminal;
+      const terminalResult = transportResult;
+      let validationFailure: unknown = null;
+      await persistGenerated((durableRevision) => {
+        const terminalDrafts = draftsForTerminal(
           frameState,
-          frameState.terminal,
+          terminal,
           runtimeSource(),
           requestedCancellationReasons.get(turnId),
-          checkpoint !== null && !checkpointsEqual(checkpoint, protocol.checkpoint)
-            ? checkpoint
-            : undefined,
-        ),
-      );
+        );
+        const postPersistenceRevision = (
+          (durableRevision ?? 0) + terminalDrafts.length
+        ) as ConversationRevision;
+        let checkpoint: TurnResumePoint | null;
+        try {
+          checkpoint = validatedObservationCheckpoint(
+            terminalResult.checkpoint,
+            protocol.checkpoint,
+            postPersistenceRevision,
+          );
+        } catch (cause) {
+          validationFailure = cause;
+          return [];
+        }
+        return checkpoint !== null && !checkpointsEqual(checkpoint, protocol.checkpoint)
+          ? draftsForTerminal(
+              frameState,
+              terminal,
+              runtimeSource(),
+              requestedCancellationReasons.get(turnId),
+              checkpoint,
+            )
+          : terminalDrafts;
+      });
+      if (validationFailure !== null) {
+        return result(turnId, "interrupted", runtimeFailure(validationFailure));
+      }
       protocol.safeSequence = frameState.terminal.sequence;
       switch (frameState.terminal.type) {
         case "response.completed":

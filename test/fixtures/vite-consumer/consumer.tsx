@@ -6,7 +6,10 @@ import {
   createConversationStore,
   parseChatRequest,
 } from "@handrail/ai";
-import { IndexedDBConversationEventStore } from "@handrail/ai/browser";
+import {
+  IndexedDBConversationEventStore,
+  IndexedDBConversationSyncStateStore,
+} from "@handrail/ai/browser";
 import "@handrail/ai/react";
 import {
   REACT_PRESENTATION_RECIPES,
@@ -19,6 +22,7 @@ export {
   AI_RUNTIME_PROTOCOL_VERSION,
   createConversationStore,
   IndexedDBConversationEventStore,
+  IndexedDBConversationSyncStateStore,
   parseChatRequest,
 };
 

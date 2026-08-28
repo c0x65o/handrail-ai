@@ -2,8 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   CONVERSATION_EVENT_VERSION,
+  CONVERSATION_SYNC_STATE_SCHEMA_VERSION,
+  ConversationSyncAdapterProtocolError,
   ConversationSyncCoordinatorDestroyedError,
+  ConversationSyncStateRecordError,
   InMemoryConversationEventStore,
+  InMemoryConversationSyncStateStore,
   createConversationSyncCoordinator,
   createInitialConversationState,
   parseConversationEvent,
@@ -22,6 +26,7 @@ import {
   type ConversationSyncClock,
   type ConversationSyncEvents,
   type ConversationSyncMutation,
+  type ConversationSyncStateStore,
   type ConversationSyncSubscription,
   type ConversationSyncUpdate,
   type PublishPresenceInput,
@@ -102,6 +107,8 @@ class FakeAuthoritativeAdapter
 {
   readonly events: ConversationEvent[] = [];
   snapshotPulls = 0;
+  readSinceCalls = 0;
+  mutationAppendCalls = 0;
   online = true;
   rejectAppends = false;
   compactedThrough: ConversationRevision | null = null;
@@ -132,6 +139,7 @@ class FakeAuthoritativeAdapter
   }
 
   async readSince(input: ReadSinceInput): Promise<ReadSinceResult> {
+    this.readSinceCalls += 1;
     if (!this.online) return unavailable();
     if (
       this.compactedThrough !== null &&
@@ -143,12 +151,13 @@ class FakeAuthoritativeAdapter
         latestRevision: this.latestRevision(),
       };
     }
-    return this.eventsSince(input.afterRevision);
+    return this.eventsSince(input.afterRevision, input.limit);
   }
 
   async appendMutations(
     input: AppendMutationsInput,
   ): Promise<AppendMutationsResult> {
+    this.mutationAppendCalls += 1;
     if (!this.online) return unavailable();
     if (this.rejectAppends) return { status: "unauthorized", message: "denied" };
     const known = input.mutations.map((mutation) =>
@@ -253,6 +262,10 @@ class FakeAuthoritativeAdapter
     this.broadcast(this.eventsSince(null));
   }
 
+  broadcastUpdate(update: ConversationSyncUpdate): void {
+    this.broadcast(update);
+  }
+
   broadcastOnly(event: ConversationEvent): void {
     this.broadcast({
       status: "events",
@@ -289,14 +302,20 @@ class FakeAuthoritativeAdapter
 
   private eventsSince(
     revision: ConversationRevision | null,
+    limit?: number,
   ): ConversationSyncEvents {
-    const events = this.events.filter((event) => event.revision > (revision ?? 0));
+    const available = this.events.filter(
+      (event) => event.revision > (revision ?? 0),
+    );
+    const events = limit === undefined ? available : available.slice(0, limit);
+    const batchRevision = events.at(-1)?.revision ?? revision;
+    const latestRevision = this.latestRevision();
     return {
       status: "events",
       events,
-      revision: events.at(-1)?.revision ?? revision,
-      latestRevision: this.latestRevision(),
-      hasMore: false,
+      revision: batchRevision,
+      latestRevision,
+      hasMore: (latestRevision ?? 0) > (batchRevision ?? 0),
     };
   }
 
@@ -349,10 +368,27 @@ function mutation(
   return { mutationId, events: [event] } as ConversationSyncMutation;
 }
 
+function titleEvent(
+  revision: number,
+  title: string,
+): ConversationEvent {
+  return parseConversationEvent({
+    version: CONVERSATION_EVENT_VERSION,
+    event_id: `title-${revision}-${title}`,
+    conversation_id: conversationId,
+    revision,
+    occurred_at: `2026-08-27T12:00:${String(revision).padStart(2, "0")}.000Z`,
+    actor: { type: "assistant" },
+    source: { type: "runtime" },
+    payload: { type: "conversation.title_updated", title },
+  });
+}
+
 function coordinator(
   adapter: FakeAuthoritativeAdapter,
   eventStore = new InMemoryConversationEventStore(),
   clock = new ManualClock(),
+  stateStore?: ConversationSyncStateStore,
 ) {
   return {
     clock,
@@ -363,11 +399,369 @@ function coordinator(
       eventStore,
       clock,
       backoff: () => 1,
+      ...(stateStore === undefined ? {} : { stateStore }),
     }),
   };
 }
 
 describe("createConversationSyncCoordinator", () => {
+  it.each([
+    {
+      name: "a final event revision that disagrees with the batch revision",
+      result: {
+        status: "events" as const,
+        events: [titleEvent(1, "Malformed")],
+        revision: 2 as ConversationRevision,
+        latestRevision: 2 as ConversationRevision,
+        hasMore: false,
+      },
+    },
+    {
+      name: "an empty stale batch that declares a newer head",
+      result: {
+        status: "events" as const,
+        events: [],
+        revision: null,
+        latestRevision: 1 as ConversationRevision,
+        hasMore: false,
+      },
+    },
+  ])("resnapshots once during catch-up for $name", async ({ result }) => {
+    const adapter = new FakeAuthoritativeAdapter();
+    vi.spyOn(adapter, "readSince").mockResolvedValueOnce(result);
+    const sync = coordinator(adapter).coordinator;
+    const onlineRevisions: Array<ConversationRevision | null> = [];
+    sync.subscribe((state) => {
+      if (state.status === "online") onlineRevisions.push(state.revision);
+    });
+
+    await sync.start();
+
+    expect(adapter.snapshotPulls).toBe(1);
+    expect(sync.getState()).toMatchObject({ status: "online", revision: null });
+    expect(sync.store.getSnapshot()).toMatchObject({
+      revision: null,
+      title: null,
+    });
+    expect(onlineRevisions).toEqual([null]);
+    await sync.destroy();
+  });
+
+  it("resnapshots once for inconsistent subscription hasMore metadata", async () => {
+    const adapter = new FakeAuthoritativeAdapter();
+    const sync = coordinator(adapter).coordinator;
+    const onlineRevisions: Array<ConversationRevision | null> = [];
+    sync.subscribe((state) => {
+      if (state.status === "online") onlineRevisions.push(state.revision);
+    });
+    await sync.start();
+
+    adapter.broadcastUpdate({
+      status: "events",
+      events: [titleEvent(1, "Malformed subscription")],
+      revision: 1 as ConversationRevision,
+      latestRevision: 1 as ConversationRevision,
+      hasMore: true,
+    });
+    await vi.waitFor(() => expect(adapter.snapshotPulls).toBe(1));
+    await sync.flush();
+
+    expect(sync.getState()).toMatchObject({ status: "online", revision: null });
+    expect(sync.store.getSnapshot()).toMatchObject({
+      revision: null,
+      title: null,
+    });
+    expect(onlineRevisions).toEqual([null]);
+    await sync.destroy();
+  });
+
+  it("accepts valid pagination and remains online at the authoritative head", async () => {
+    const adapter = new FakeAuthoritativeAdapter([
+      titleEvent(1, "First page"),
+      titleEvent(2, "Second page"),
+    ]);
+    const sync = createConversationSyncCoordinator({
+      conversationId,
+      adapter,
+      eventStore: new InMemoryConversationEventStore(),
+      readBatchSize: 1,
+    });
+
+    await sync.start();
+
+    expect(sync.getState()).toMatchObject({ status: "online", revision: 2 });
+    expect(sync.store.getSnapshot()).toMatchObject({
+      revision: 2,
+      title: "Second page",
+    });
+    expect(adapter.readSinceCalls).toBe(3);
+    expect(adapter.snapshotPulls).toBe(0);
+    await sync.destroy();
+  });
+
+  it("accepts a valid empty caught-up batch and remains online", async () => {
+    const adapter = new FakeAuthoritativeAdapter();
+    const sync = coordinator(adapter).coordinator;
+
+    await sync.start();
+
+    expect(sync.getState()).toMatchObject({ status: "online", revision: null });
+    expect(adapter.readSinceCalls).toBe(2);
+    expect(adapter.snapshotPulls).toBe(0);
+    await sync.destroy();
+  });
+
+  it.each([
+    { name: "zero-event", eventCount: 0 as const },
+    { name: "two-event", eventCount: 2 as const },
+  ])(
+    "rejects a $name mutation without changing coordinator state",
+    async ({ eventCount }) => {
+      const adapter = new FakeAuthoritativeAdapter();
+      const appendMutations = vi.spyOn(adapter, "appendMutations");
+      const stateStore = new InMemoryConversationSyncStateStore();
+      const saveState = vi.spyOn(stateStore, "save");
+      const sync = coordinator(
+        adapter,
+        new InMemoryConversationEventStore(),
+        new ManualClock(),
+        stateStore,
+      ).coordinator;
+      await sync.start();
+      const valid = mutation(`malformed-${eventCount}`, "a", "Do not queue");
+      const secondEvent = {
+        ...valid.events[0],
+        event_id: `event-malformed-${eventCount}-second`,
+        payload: {
+          ...valid.events[0].payload,
+          message_id: `message-malformed-${eventCount}-second`,
+        },
+      };
+      const malformed = {
+        mutationId: valid.mutationId,
+        events: eventCount === 0 ? [] : [valid.events[0], secondEvent],
+      } as unknown as ConversationSyncMutation;
+      const baselineState = sync.getState();
+      const baselineView = sync.store.getSnapshot();
+      const baselineSaveCount = saveState.mock.calls.length;
+
+      await expect(sync.queueMutation(malformed)).rejects.toThrow(TypeError);
+
+      expect(appendMutations).not.toHaveBeenCalled();
+      expect(sync.getState()).toBe(baselineState);
+      expect(sync.getState().pendingMutationCount).toBe(0);
+      expect(sync.store.getSnapshot()).toBe(baselineView);
+      expect(saveState).toHaveBeenCalledTimes(baselineSaveCount);
+      await sync.destroy();
+    },
+  );
+
+  it("queues and flushes a valid one-event mutation", async () => {
+    const adapter = new FakeAuthoritativeAdapter();
+    const appendMutations = vi.spyOn(adapter, "appendMutations");
+    const sync = coordinator(adapter).coordinator;
+    await sync.start();
+
+    await sync.queueMutation(mutation("one-event-control", "a", "Queue me"));
+    await sync.flush();
+
+    expect(appendMutations).toHaveBeenCalledOnce();
+    expect(sync.getState()).toMatchObject({
+      status: "online",
+      revision: 1,
+      pendingMutationCount: 0,
+    });
+    expect(sync.store.getSnapshot().messages).toHaveLength(1);
+    await sync.destroy();
+  });
+
+  it("rejects an unknown mutation acknowledgement after one append", async () => {
+    const adapter = new FakeAuthoritativeAdapter();
+    const eventStore = new InMemoryConversationEventStore();
+    const append = vi.spyOn(adapter, "appendMutations").mockResolvedValue({
+      status: "mutations",
+      acknowledgements: [{
+        status: "accepted",
+        mutationId: "unknown-mutation" as ConversationClientMutationId,
+        events: [],
+      }],
+      latestRevision: 1 as ConversationRevision,
+    });
+    const sync = coordinator(adapter, eventStore).coordinator;
+    await sync.start();
+
+    await expect(
+      sync.queueMutation(mutation("still-pending", "a", "Keep me")),
+    ).rejects.toThrow(ConversationSyncAdapterProtocolError);
+
+    expect(append).toHaveBeenCalledOnce();
+    expect(sync.getState()).toMatchObject({
+      status: "error",
+      revision: null,
+      pendingMutationCount: 1,
+    });
+    expect(sync.store.getSnapshot().messages).toHaveLength(1);
+    expect(sync.store.getSnapshot().processed_event_ids).toEqual([
+      "event-still-pending",
+    ]);
+    await expect(eventStore.getLatestRevision(conversationId)).resolves.toBeNull();
+    await sync.destroy();
+  });
+
+  it("rejects duplicate acknowledgement IDs before applying their events", async () => {
+    const adapter = new FakeAuthoritativeAdapter();
+    const eventStore = new InMemoryConversationEventStore();
+    const proposed = mutation("duplicate-ack", "a", "Keep one optimistic event");
+    const acknowledgement = {
+      status: "accepted" as const,
+      mutationId: proposed.mutationId,
+      events: proposed.events,
+    };
+    const append = vi.spyOn(adapter, "appendMutations").mockResolvedValue({
+      status: "mutations",
+      acknowledgements: [acknowledgement, acknowledgement],
+      latestRevision: 1 as ConversationRevision,
+    });
+    const sync = coordinator(adapter, eventStore).coordinator;
+    await sync.start();
+
+    await expect(sync.queueMutation(proposed)).rejects.toThrow(
+      ConversationSyncAdapterProtocolError,
+    );
+
+    expect(append).toHaveBeenCalledOnce();
+    expect(sync.getState()).toMatchObject({
+      status: "error",
+      revision: null,
+      pendingMutationCount: 1,
+    });
+    expect(sync.store.getSnapshot().messages).toHaveLength(1);
+    expect(sync.store.getSnapshot().processed_event_ids).toEqual([
+      "event-duplicate-ack",
+    ]);
+    await expect(eventStore.getLatestRevision(conversationId)).resolves.toBeNull();
+    await sync.destroy();
+  });
+
+  it("rejects a mismatched append latest revision without applying events", async () => {
+    const adapter = new FakeAuthoritativeAdapter();
+    const eventStore = new InMemoryConversationEventStore();
+    const proposed = mutation("wrong-head", "a", "Remain pending");
+    const append = vi.spyOn(adapter, "appendMutations").mockResolvedValue({
+      status: "mutations",
+      acknowledgements: [{
+        status: "accepted",
+        mutationId: proposed.mutationId,
+        events: proposed.events,
+      }],
+      latestRevision: 2 as ConversationRevision,
+    });
+    const sync = coordinator(adapter, eventStore).coordinator;
+    await sync.start();
+
+    await expect(sync.queueMutation(proposed)).rejects.toThrow(
+      ConversationSyncAdapterProtocolError,
+    );
+
+    expect(append).toHaveBeenCalledOnce();
+    expect(sync.getState()).toMatchObject({
+      status: "error",
+      revision: null,
+      pendingMutationCount: 1,
+    });
+    expect(sync.store.getSnapshot().messages).toHaveLength(1);
+    expect(sync.store.getSnapshot().processed_event_ids).toEqual([
+      "event-wrong-head",
+    ]);
+    await expect(eventStore.getLatestRevision(conversationId)).resolves.toBeNull();
+    await sync.destroy();
+  });
+
+  it.each(["accepted", "duplicate"] as const)(
+    "drains a valid %s acknowledgement exactly once",
+    async (status) => {
+      const adapter = new FakeAuthoritativeAdapter();
+      const eventStore = new InMemoryConversationEventStore();
+      const proposed = mutation(`${status}-ack`, "a", "Stored once");
+      const append = vi.spyOn(adapter, "appendMutations").mockResolvedValue({
+        status: "mutations",
+        acknowledgements: [{
+          status,
+          mutationId: proposed.mutationId,
+          events: proposed.events,
+        }],
+        latestRevision: 1 as ConversationRevision,
+      });
+      const sync = coordinator(adapter, eventStore).coordinator;
+      await sync.start();
+
+      await sync.queueMutation(proposed);
+      await sync.flush();
+
+      expect(append).toHaveBeenCalledOnce();
+      expect(sync.getState()).toMatchObject({
+        status: "online",
+        revision: 1,
+        pendingMutationCount: 0,
+      });
+      expect(sync.store.getSnapshot().messages).toHaveLength(1);
+      expect(sync.store.getSnapshot().processed_event_ids).toEqual([
+        `event-${status}-ack`,
+      ]);
+      await expect(eventStore.getLatestRevision(conversationId)).resolves.toBe(1);
+      await sync.destroy();
+    },
+  );
+
+  it("recovers a genuine acknowledgement event gap through one snapshot", async () => {
+    const adapter = new FakeAuthoritativeAdapter();
+    const initial = titleEvent(1, "Concurrent authority");
+    const proposed = mutation("gap-recovery", "a", "Recovered once");
+    const authoritativeEvent = parseConversationEvent({
+      ...proposed.events[0]!,
+      revision: 2,
+    });
+    const append = vi.spyOn(adapter, "appendMutations").mockResolvedValue({
+      status: "mutations",
+      acknowledgements: [{
+        status: "accepted",
+        mutationId: proposed.mutationId,
+        events: [authoritativeEvent],
+      }],
+      latestRevision: 2 as ConversationRevision,
+    });
+    const pullSnapshot = vi.spyOn(adapter, "pullSnapshot").mockResolvedValue({
+      status: "snapshot",
+      snapshot: {
+        conversationId,
+        revision: 2 as ConversationRevision,
+        state: cloneJson(project([initial, authoritativeEvent])),
+      },
+    });
+    const sync = coordinator(adapter).coordinator;
+    await sync.start();
+
+    await sync.queueMutation(proposed);
+
+    expect(append).toHaveBeenCalledOnce();
+    expect(pullSnapshot).toHaveBeenCalledOnce();
+    expect(sync.getState()).toMatchObject({
+      status: "online",
+      revision: 2,
+      pendingMutationCount: 0,
+    });
+    expect(sync.store.getSnapshot()).toMatchObject({
+      title: "Concurrent authority",
+      revision: 2,
+    });
+    expect(sync.store.getSnapshot().messages).toHaveLength(1);
+    expect(sync.store.getSnapshot().processed_event_ids).toEqual([
+      initial.event_id,
+      authoritativeEvent.event_id,
+    ]);
+    await sync.destroy();
+  });
+
   it("hydrates local durable state before catch-up and subscription", async () => {
     const initial = parseConversationEvent({
       version: 1,
@@ -444,6 +838,46 @@ describe("createConversationSyncCoordinator", () => {
     await setup.coordinator.destroy();
   });
 
+  it("restores an offline mutation and flushes it exactly once after recreation", async () => {
+    const adapter = new FakeAuthoritativeAdapter();
+    const eventStore = new InMemoryConversationEventStore();
+    const stateStore = new InMemoryConversationSyncStateStore();
+    const first = coordinator(
+      adapter,
+      eventStore,
+      new ManualClock(),
+      stateStore,
+    ).coordinator;
+    await first.start();
+    adapter.disconnect();
+    await vi.waitFor(() => expect(first.getState().status).toBe("reconnecting"));
+
+    await first.queueMutation(mutation("recreated", "a", "Still queued"));
+    expect(first.getState().pendingMutationCount).toBe(1);
+    await first.destroy();
+
+    adapter.online = true;
+    const second = coordinator(
+      adapter,
+      eventStore,
+      new ManualClock(),
+      stateStore,
+    ).coordinator;
+    await second.start();
+
+    expect(second.getState()).toMatchObject({
+      status: "online",
+      pendingMutationCount: 0,
+      revision: 1,
+    });
+    expect(second.store.getSnapshot().messages).toHaveLength(1);
+    expect(adapter.mutationAppendCalls).toBe(1);
+    expect(adapter.events.map(({ event_id }) => event_id)).toEqual([
+      "event-recreated",
+    ]);
+    await second.destroy();
+  });
+
   it("ignores duplicated remote delivery without duplicating rich projections", async () => {
     const adapter = new FakeAuthoritativeAdapter();
     const setup = coordinator(adapter);
@@ -512,6 +946,96 @@ describe("createConversationSyncCoordinator", () => {
     expect(adapter.snapshotPulls).toBe(2);
     expect(setup.coordinator.store.getSnapshot().title).toBe("After compaction");
     await setup.coordinator.destroy();
+  });
+
+  it("restores a compacted baseline when the local event log is stale", async () => {
+    const initial = parseConversationEvent({
+      version: CONVERSATION_EVENT_VERSION,
+      event_id: "compacted-initial",
+      conversation_id: conversationId,
+      revision: 1,
+      occurred_at: "2026-08-27T12:00:00.000Z",
+      actor: { type: "assistant" },
+      source: { type: "runtime" },
+      payload: { type: "conversation.title_updated", title: "Before" },
+    });
+    const adapter = new FakeAuthoritativeAdapter([initial]);
+    const eventStore = new InMemoryConversationEventStore();
+    await eventStore.append({
+      conversationId,
+      expectedRevision: null,
+      events: [initial],
+    });
+    const stateStore = new InMemoryConversationSyncStateStore();
+    const first = coordinator(
+      adapter,
+      eventStore,
+      new ManualClock(),
+      stateStore,
+    ).coordinator;
+    await first.start();
+
+    adapter.appendAuthoritative({
+      type: "conversation.title_updated",
+      title: "After compaction",
+    }, false);
+    adapter.compactedThrough = 2 as ConversationRevision;
+    adapter.requireSnapshot();
+    await vi.waitFor(() => {
+      expect(first.store.getSnapshot()).toMatchObject({
+        title: "After compaction",
+        revision: 2,
+      });
+    });
+    expect(adapter.snapshotPulls).toBe(1);
+    await first.destroy();
+
+    const second = coordinator(
+      adapter,
+      eventStore,
+      new ManualClock(),
+      stateStore,
+    ).coordinator;
+    await second.start();
+
+    expect(second.store.getSnapshot()).toMatchObject({
+      title: "After compaction",
+      revision: 2,
+    });
+    expect(adapter.snapshotPulls).toBe(1);
+    await second.destroy();
+  });
+
+  it.each([
+    ["unsupported schema", { schemaVersion: 99 }],
+    ["mismatched conversation", { conversationId: "conversation-other" }],
+  ])("rejects a persisted record with %s", async (_name, override) => {
+    const persisted = {
+      schemaVersion: CONVERSATION_SYNC_STATE_SCHEMA_VERSION,
+      conversationId,
+      generation: 1,
+      authoritativeState: createInitialConversationState(conversationId),
+      authoritativeRevision: null,
+      pendingMutations: [],
+      ...override,
+    };
+    const stateStore: ConversationSyncStateStore = {
+      load: async () => persisted as never,
+      save: async () => {
+        throw new Error("invalid records must not be saved");
+      },
+    };
+    const sync = createConversationSyncCoordinator({
+      conversationId,
+      adapter: new FakeAuthoritativeAdapter(),
+      eventStore: new InMemoryConversationEventStore(),
+      stateStore,
+    });
+
+    await expect(sync.start()).rejects.toBeInstanceOf(
+      ConversationSyncStateRecordError,
+    );
+    await sync.destroy();
   });
 
   it("drops non-retryable rejected mutations and reports the rejection", async () => {

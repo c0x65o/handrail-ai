@@ -7,15 +7,22 @@ import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 
 import {
   CONVERSATION_EVENT_VERSION,
+  InMemoryConversationEventStore,
   createConversationStore,
+  createConversationSyncCoordinator,
   parseConversationEvent,
   type ConversationEvent,
+  type ConversationId,
   type ConversationRuntime,
   type ConversationRuntimeSendMessageInput,
   type ConversationStore,
+  type ConversationSyncAdapter,
+  type ConversationSyncSubscription,
+  type ConversationSyncUpdate,
 } from "../src/index.js";
 import {
   ConversationProvider,
+  MessageList,
   useConversationActions,
   useConversationSelector,
   useConversationSnapshot,
@@ -23,6 +30,71 @@ import {
 } from "../src/react/index.js";
 
 afterEach(() => cleanup());
+
+class RemoteUpdateStream implements AsyncIterable<ConversationSyncUpdate> {
+  private readonly values: ConversationSyncUpdate[] = [];
+  private readonly readers: Array<(
+    result: IteratorResult<ConversationSyncUpdate>,
+  ) => void> = [];
+  private closed = false;
+
+  push(update: ConversationSyncUpdate): void {
+    const reader = this.readers.shift();
+    if (reader === undefined) this.values.push(update);
+    else reader({ done: false, value: update });
+  }
+
+  close(): void {
+    this.closed = true;
+    for (const reader of this.readers.splice(0)) {
+      reader({ done: true, value: undefined });
+    }
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<ConversationSyncUpdate> {
+    return {
+      next: async () => {
+        const value = this.values.shift();
+        if (value !== undefined) return { done: false, value };
+        if (this.closed) return { done: true, value: undefined };
+        return new Promise((resolve) => this.readers.push(resolve));
+      },
+    };
+  }
+}
+
+function remoteSyncAdapter(updates: RemoteUpdateStream): ConversationSyncAdapter {
+  const subscription: ConversationSyncSubscription = {
+    updates,
+    close: () => updates.close(),
+  };
+  return {
+    async pullSnapshot() {
+      return { status: "unauthorized", message: "No snapshot expected" };
+    },
+    async readSince() {
+      return {
+        status: "events",
+        events: [],
+        revision: null,
+        latestRevision: null,
+        hasMore: false,
+      };
+    },
+    async appendMutations() {
+      return { status: "unauthorized", message: "Read-only test adapter" };
+    },
+    async subscribeSince() {
+      return { status: "subscribed", subscription };
+    },
+    async publishPresence() {
+      return { status: "unauthorized", message: "Presence not used" };
+    },
+    async subscribePresence() {
+      return { status: "unauthorized", message: "Presence not used" };
+    },
+  };
+}
 
 function event(
   revision: number,
@@ -129,6 +201,95 @@ describe("ConversationProvider and hooks", () => {
     expect(screen.getByTestId("title").textContent).toBe("Streaming complete");
     expect(titleRenders).toBe(2);
     expect(snapshotRenders).toBe(3);
+  });
+
+  it("observes authoritative remote updates from a sync view store exactly once", async () => {
+    const conversationId = "conversation_react_sync" as ConversationId;
+    const updates = new RemoteUpdateStream();
+    const coordinator = createConversationSyncCoordinator({
+      conversationId,
+      eventStore: new InMemoryConversationEventStore(),
+      adapter: remoteSyncAdapter(updates),
+    });
+    await coordinator.start();
+    let selectedRenders = 0;
+    let primitiveRenders = 0;
+    let observedStore: ReturnType<typeof useConversationStore> | undefined;
+    let actions: ReturnType<typeof useConversationActions> | undefined;
+
+    function SelectedMessageCount() {
+      selectedRenders += 1;
+      observedStore = useConversationStore();
+      actions = useConversationActions();
+      const count = useConversationSelector((state) => state.messages.length);
+      return <span data-testid="sync-count">{count}</span>;
+    }
+
+    const view = render(
+      <ConversationProvider store={coordinator.store}>
+        <SelectedMessageCount />
+        <MessageList
+          data-testid="sync-messages"
+          render={(props, ref) => {
+            primitiveRenders += 1;
+            return <div {...props} ref={ref} />;
+          }}
+        />
+      </ConversationProvider>,
+    );
+    expect(observedStore).toBe(coordinator.store);
+    expect(selectedRenders).toBe(1);
+    expect(primitiveRenders).toBe(1);
+
+    const remoteEvent = event(1, {
+      type: "message.created",
+      message_id: "message_remote" as never,
+      role: "assistant",
+      content: [{ type: "text", text: "Authoritative remote message" }],
+    }, conversationId);
+    updates.push({
+      status: "events",
+      events: [remoteEvent],
+      revision: remoteEvent.revision,
+      latestRevision: remoteEvent.revision,
+      hasMore: false,
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(coordinator.store.getSnapshot().revision).toBe(1);
+      });
+    });
+
+    expect(screen.getByTestId("sync-count").textContent).toBe("1");
+    expect(screen.getByTestId("sync-messages").textContent).toContain(
+      "Authoritative remote message",
+    );
+    expect(selectedRenders).toBe(2);
+    expect(primitiveRenders).toBe(2);
+
+    expect(actions).toBeDefined();
+    expect(() => actions?.applyEvent(remoteEvent)).toThrow(/mutable ConversationStore/u);
+    expect(() => actions?.applyEvents([remoteEvent])).toThrow(/mutable ConversationStore/u);
+    expect(() => actions?.sendMessage({ content: "hello", request: undefined })).toThrow(
+      /runtime actions require/u,
+    );
+    expect(() => actions?.resumeTurn("turn_remote" as never)).toThrow(
+      /runtime actions require/u,
+    );
+    expect(() => actions?.restoreActiveTurn()).toThrow(/runtime actions require/u);
+
+    view.unmount();
+    const create = vi.fn(() => coordinator.store);
+    const ownedView = render(
+      <ConversationProvider create={create}>
+        <SelectedMessageCount />
+      </ConversationProvider>,
+    );
+    ownedView.unmount();
+    await act(async () => Promise.resolve());
+    expect(create).toHaveBeenCalledOnce();
+    expect(coordinator.store.getSnapshot().revision).toBe(1);
+    await coordinator.destroy();
   });
 
   it("keeps action identity stable and preserves the runtime request type", async () => {

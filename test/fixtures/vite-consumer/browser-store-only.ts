@@ -1,1 +1,4 @@
-export { IndexedDBConversationEventStore } from "@handrail/ai/browser";
+export {
+  IndexedDBConversationEventStore,
+  IndexedDBConversationSyncStateStore,
+} from "@handrail/ai/browser";

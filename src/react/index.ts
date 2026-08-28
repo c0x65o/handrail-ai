@@ -4,6 +4,7 @@ export {
   type ConversationFactoryProviderProps,
   type ConversationProviderFactory,
   type ConversationProviderProps,
+  type ConversationReadableStore,
   type ConversationRuntimeProviderProps,
   type ConversationStoreProviderProps,
 } from "./context.js";
