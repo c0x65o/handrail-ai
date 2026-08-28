@@ -93,6 +93,39 @@ describe("ChatDialog", () => {
     expect(document.activeElement).toBe(last);
   });
 
+  it("contains programmatic focus and removes containment on unmount", async () => {
+    const onOpenChange = vi.fn();
+    const outside = document.createElement("button");
+    outside.textContent = "Outside";
+    document.body.append(outside);
+
+    const { unmount } = render(
+      <ChatDialogRoot
+        open
+        onOpenChange={onOpenChange}
+        dismissOnOutsideInteraction={false}
+      >
+        <ChatDialogContent>
+          <ChatDialogTitle>Contained chat</ChatDialogTitle>
+          <button>First action</button>
+          <button>Second action</button>
+        </ChatDialogContent>
+      </ChatDialogRoot>,
+    );
+    const firstAction = screen.getByRole("button", { name: "First action" });
+    await waitFor(() => expect(document.activeElement).toBe(firstAction));
+
+    outside.focus();
+    expect(document.activeElement).toBe(firstAction);
+    expect(screen.getByRole("dialog", { name: "Contained chat" })).toBeTruthy();
+    expect(onOpenChange).not.toHaveBeenCalled();
+
+    unmount();
+    outside.focus();
+    expect(document.activeElement).toBe(outside);
+    outside.remove();
+  });
+
   it("dismisses on Escape and restores focus to the trigger", async () => {
     render(<ControlledDialog />);
     const trigger = screen.getByRole("button", { name: "Open dialog" });
@@ -278,6 +311,33 @@ describe("ChatDialog", () => {
 
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: "Outer chat" })).toBeNull();
+  });
+
+  it("contains escaped focus in the top nested dialog", async () => {
+    render(
+      <>
+        <button>Outside action</button>
+        <ChatDialogRoot open onOpenChange={() => undefined}>
+          <ChatDialogContent>
+            <ChatDialogTitle>Parent chat</ChatDialogTitle>
+            <button>Parent action</button>
+            <ChatDialogRoot open onOpenChange={() => undefined}>
+              <ChatDialogContent>
+                <ChatDialogTitle>Child chat</ChatDialogTitle>
+                <button>Child action</button>
+              </ChatDialogContent>
+            </ChatDialogRoot>
+          </ChatDialogContent>
+        </ChatDialogRoot>
+      </>,
+    );
+    const childAction = screen.getByRole("button", { name: "Child action" });
+    await waitFor(() => expect(document.activeElement).toBe(childAction));
+
+    screen.getByRole("button", { name: "Outside action" }).focus();
+    expect(document.activeElement).toBe(childAction);
+    expect(screen.getByRole("dialog", { name: "Parent chat" })).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "Child chat" })).toBeTruthy();
   });
 
   it("isolates simultaneous dialogs and removes listeners on unmount", async () => {
