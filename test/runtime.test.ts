@@ -2,15 +2,20 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   AI_RUNTIME_PROTOCOL_VERSION,
+  CONVERSATION_EVENT_VERSION,
   ConversationRuntimeBusyError,
   InMemoryConversationEventStore,
   createRetryPolicy,
   createConversationRuntime,
+  parseConversationEvent,
   parseNormalizedUsageReceipt,
   type AppendConversationEventsInput,
   type AppendConversationEventsResult,
   type AuthoritativeAttribution,
   type ConversationClientId,
+  type ConversationEvent,
+  type ConversationEventMetadata,
+  type ConversationEventPayload,
   type ConversationEventStore,
   type ConversationId,
   type ConversationRevision,
@@ -447,7 +452,225 @@ function deterministicSources() {
   };
 }
 
+function externalEvent(
+  revision: number,
+  payload: ConversationEventPayload,
+  metadata?: ConversationEventMetadata,
+): ConversationEvent {
+  return parseConversationEvent({
+    version: CONVERSATION_EVENT_VERSION,
+    event_id: `event_external_${revision}`,
+    conversation_id: conversationId,
+    revision,
+    occurred_at: `2026-08-27T13:00:${String(revision).padStart(2, "0")}.000Z`,
+    actor: { type: payload.type === "message.created" ? "user" : "assistant" },
+    source: payload.type === "message.created"
+      ? { type: "client", client_id: "client_external" }
+      : { type: "runtime" },
+    ...(metadata === undefined ? {} : { metadata }),
+    payload,
+  });
+}
+
 describe("createConversationRuntime", () => {
+  it("catches up externally appended canonical events before the next send batch", async () => {
+    const eventStore = new InMemoryConversationEventStore();
+    const transport = new FakeTransport();
+    transport.startObservations.push(observation([], "disconnected"));
+    const runtime = await createConversationRuntime({
+      conversationId,
+      clientId,
+      transport,
+      eventStore,
+      retryPolicy: createRetryPolicy({ maximumAttempts: 1 }),
+      replayBatchSize: 1,
+      ...deterministicSources(),
+    });
+    await eventStore.append({
+      conversationId,
+      expectedRevision: null,
+      events: [externalEvent(1, {
+        type: "conversation.metadata_updated",
+        metadata: { source: "external" },
+      })],
+    });
+
+    await expect(runtime.sendMessage({
+      content: "Catch up before sending",
+      request: { prompt: "Catch up before sending" },
+    })).resolves.toMatchObject({ status: "disconnected" });
+
+    const history = await eventStore.read({ conversationId, limit: 100 });
+    expect(runtime.getSnapshot().metadata).toEqual({ source: "external" });
+    expect(history.entries.filter(({ event }) =>
+      event.payload.type === "message.created" || event.payload.type === "turn.started"
+    ).map(({ event }) => event.revision)).toEqual([2, 3]);
+    expect(transport.starts).toHaveLength(1);
+  });
+
+  it("rejects send and continuation admission after catching up an external active turn", async () => {
+    const cases = [
+      {
+        name: "send",
+        initialEvents: [] as ConversationEvent[],
+        externalEvents: [
+          externalEvent(1, {
+            type: "message.created",
+            message_id: "message_external_send",
+            role: "user",
+            content: [{ type: "text", text: "Already active" }],
+          }),
+          externalEvent(2, {
+            type: "turn.started",
+            turn_id: "turn_external_send",
+            input_message_ids: ["message_external_send"],
+          }),
+        ],
+      },
+      {
+        name: "continuation",
+        initialEvents: [
+          externalEvent(1, {
+            type: "message.created",
+            message_id: "message_external",
+            role: "user",
+            content: [{ type: "text", text: "Use a tool" }],
+          }),
+          externalEvent(2, {
+            type: "turn.started",
+            turn_id: "turn_preceding",
+            input_message_ids: ["message_external"],
+          }),
+          externalEvent(3, {
+            type: "turn.completed",
+            turn_id: "turn_preceding",
+            outcome: "tool_calls",
+            output_message_ids: [],
+          }),
+        ],
+        externalEvents: [externalEvent(4, {
+          type: "turn.started",
+          turn_id: "turn_external_continuation",
+          input_message_ids: ["message_external"],
+        })],
+      },
+    ] as const;
+
+    for (const current of cases) {
+      const eventStore = new InMemoryConversationEventStore();
+      if (current.initialEvents.length > 0) {
+        await eventStore.append({
+          conversationId,
+          expectedRevision: null,
+          events: current.initialEvents,
+        });
+      }
+      const transport = new FakeTransport();
+      const runtime = await createConversationRuntime({
+        conversationId,
+        clientId,
+        transport,
+        eventStore,
+        ...deterministicSources(),
+      });
+      await eventStore.append({
+        conversationId,
+        expectedRevision: current.initialEvents.length === 0
+          ? null
+          : current.initialEvents.at(-1)!.revision,
+        events: current.externalEvents,
+      });
+
+      const admission = current.name === "send"
+        ? runtime.sendMessage({
+            content: "Must remain blocked",
+            request: { prompt: "Must remain blocked" },
+          })
+        : runtime.continueTurn!({
+            precedingTurnId: "turn_preceding" as never,
+            request: { prompt: "Must remain blocked" },
+          });
+      await expect(admission).rejects.toBeInstanceOf(ConversationRuntimeBusyError);
+      expect(runtime.getSnapshot().active_turn_id).toBe(`turn_external_${current.name}`);
+      expect(transport.starts).toHaveLength(0);
+      expect(transport.resumes).toHaveLength(0);
+    }
+  });
+
+  it("hydrates caught-up checkpoints and durable frame keys for resumable deduplication", async () => {
+    const eventStore = new InMemoryConversationEventStore();
+    const transport = new FakeTransport();
+    const runtime = await createConversationRuntime({
+      conversationId,
+      clientId,
+      transport,
+      eventStore,
+      ...deterministicSources(),
+    });
+    const checkpoint = opaqueCheckpoint(3, "external-catch-up");
+    await eventStore.append({
+      conversationId,
+      expectedRevision: null,
+      events: [
+        externalEvent(1, {
+          type: "message.created",
+          message_id: "message_external_resume",
+          role: "user",
+          content: [{ type: "text", text: "Resume externally" }],
+        }),
+        externalEvent(2, {
+          type: "turn.started",
+          turn_id: "turn_external_resume",
+          input_message_ids: ["message_external_resume"],
+        }, {
+          handrail_runtime: { transport_turn_id: "remote-turn-1" },
+        }),
+        externalEvent(3, {
+          type: "turn.status_changed",
+          turn_id: "turn_external_resume",
+          status: "running",
+        }, {
+          handrail_runtime: {
+            transport_turn_id: "remote-turn-1",
+            request_id: "remote-turn-1",
+            trace_id: "trace-runtime-1",
+            sequence: 0,
+            frame_type: "response.started",
+            resume_safe: true,
+            checkpoint: {
+              last_applied_event_id: checkpoint.lastAppliedEventId,
+              last_applied_cursor: checkpoint.lastAppliedCursor,
+              last_applied_revision: checkpoint.lastAppliedRevision,
+            },
+          },
+        }),
+      ],
+    });
+
+    await expect(runtime.sendMessage({
+      content: "Trigger catch-up",
+      request: { prompt: "Trigger catch-up" },
+    })).rejects.toBeInstanceOf(ConversationRuntimeBusyError);
+
+    transport.resumeObservations.push(observation([
+      startedFrame(),
+      completedFrame(1),
+    ], "completed"));
+    await expect(runtime.restoreActiveTurn()).resolves.toMatchObject({ status: "completed" });
+    expect(transport.resumes).toEqual([{
+      conversationId,
+      turnId: "remote-turn-1",
+      resumeFrom: checkpoint,
+    }]);
+    const history = await eventStore.read({ conversationId, limit: 100 });
+    expect(history.entries.filter(({ event }) => {
+      const metadata = event.metadata?.handrail_runtime;
+      return metadata !== null && typeof metadata === "object" &&
+        !Array.isArray(metadata) && metadata.request_id === "remote-turn-1" &&
+        metadata.sequence === 0;
+    })).toHaveLength(1);
+  });
+
   it("admits only one of two same-tick sends", async () => {
     const eventStore = new AdmissionEventStore();
     const transport = new FakeTransport();

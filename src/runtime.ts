@@ -24,7 +24,10 @@ import type {
   ConversationEventCursor,
   ConversationEventStore,
 } from "./conversation/event-store.js";
-import { replayConversation } from "./conversation/replay.js";
+import {
+  ConversationReplayFailure,
+  replayConversation,
+} from "./conversation/replay.js";
 import type { ConversationState } from "./conversation/state.js";
 import type { ConversationStore } from "./conversation/store.js";
 import {
@@ -265,6 +268,7 @@ export async function createConversationRuntime<TRequest>(
   const createId = options.createId ?? defaultId;
   const now = options.now ?? (() => new Date());
   const retryPolicy = options.retryPolicy ?? createRetryPolicy();
+  const catchUpBatchSize = options.replayBatchSize ?? 500;
   const protocolByTurn = new Map<string, TurnProtocolState>();
   const usageReceiptsByTurn = new Map<
     string,
@@ -313,6 +317,7 @@ export async function createConversationRuntime<TRequest>(
     generateDrafts: (
       durableRevision: ConversationRevision | null,
     ) => readonly EventDraft[],
+    beforeGenerate?: () => Promise<void>,
   ): Promise<readonly ConversationEvent[]> => {
     assertUsable();
     let resolveBoundary!: () => void;
@@ -322,6 +327,8 @@ export async function createConversationRuntime<TRequest>(
     });
     await previousBoundary;
     try {
+      assertUsable();
+      await beforeGenerate?.();
       assertUsable();
       const expectedRevision = store.getSnapshot().revision;
       const drafts = generateDrafts(expectedRevision);
@@ -388,7 +395,14 @@ export async function createConversationRuntime<TRequest>(
           throw new ConversationRuntimeBusyError();
         }
         return drafts;
-      });
+      }, () => catchUpRuntimeStore(
+        options.conversationId,
+        options.eventStore,
+        store,
+        protocolByTurn,
+        durableFrameKeys,
+        catchUpBatchSize,
+      ));
     } finally {
       turnAdmissionPending = false;
     }
@@ -1653,6 +1667,131 @@ async function hydrateRuntimeMetadata(
     }
     cursor = page.nextCursor;
   }
+}
+
+async function catchUpRuntimeStore(
+  conversationId: ConversationId,
+  eventStore: ConversationEventStore,
+  store: ConversationStore,
+  protocolByTurn: Map<string, TurnProtocolState>,
+  durableFrameKeys: Set<string>,
+  readBatchSize: number,
+): Promise<void> {
+  let lastSafeRevision = store.getSnapshot().revision;
+  let lastSafeCursor: ConversationEventCursor | null = null;
+  let readCursor: ConversationEventCursor | null = null;
+
+  for (;;) {
+    const page = await eventStore.read({
+      conversationId,
+      ...(readCursor !== null
+        ? { after: { cursor: readCursor } }
+        : lastSafeRevision === null
+          ? {}
+          : { after: { revision: lastSafeRevision } }),
+      limit: readBatchSize,
+    });
+    const events: ConversationEvent[] = [];
+    let pageRevision = lastSafeRevision;
+    let pageCursor = lastSafeCursor;
+
+    for (const entry of page.entries) {
+      let event: ConversationEvent;
+      try {
+        event = parseConversationEvent(entry.event);
+      } catch (cause) {
+        throw runtimeCatchUpFailure("corrupt_event", conversationId, {
+          lastSafeCursor,
+          lastSafeRevision,
+          eventCursor: entry.cursor,
+          cause,
+        });
+      }
+      if (event.conversation_id !== conversationId) {
+        throw runtimeCatchUpFailure("corrupt_event", conversationId, {
+          lastSafeCursor,
+          lastSafeRevision,
+          eventCursor: entry.cursor,
+          cause: new TypeError("Stored event belongs to another conversation"),
+        });
+      }
+      const expectedRevision = (pageRevision ?? 0) + 1;
+      if (event.revision !== expectedRevision) {
+        throw runtimeCatchUpFailure("revision_gap", conversationId, {
+          lastSafeCursor,
+          lastSafeRevision,
+          eventCursor: entry.cursor,
+          expectedRevision,
+          receivedRevision: event.revision,
+        });
+      }
+      events.push(event);
+      pageRevision = event.revision;
+      pageCursor = entry.cursor;
+    }
+
+    if (events.length > 0) {
+      const nextState = await store.applyEvents(events);
+      if (nextState.replay_error !== null || nextState.revision !== pageRevision) {
+        throw runtimeCatchUpFailure("corrupt_event", conversationId, {
+          lastSafeCursor,
+          lastSafeRevision,
+          eventCursor: pageCursor,
+          cause: nextState.replay_error ?? new TypeError(
+            "Canonical conversation events could not be projected contiguously",
+          ),
+        });
+      }
+      for (const event of events) {
+        rememberRuntimeMetadata(event, protocolByTurn, durableFrameKeys);
+      }
+      lastSafeRevision = pageRevision;
+      lastSafeCursor = pageCursor;
+      readCursor = pageCursor;
+    }
+
+    if (!page.hasMore) {
+      if (page.latestRevision !== lastSafeRevision) {
+        throw runtimeCatchUpFailure("revision_gap", conversationId, {
+          lastSafeCursor,
+          lastSafeRevision,
+          eventCursor: null,
+          expectedRevision: (lastSafeRevision ?? 0) + 1,
+          ...(page.latestRevision === null
+            ? {}
+            : { receivedRevision: page.latestRevision }),
+        });
+      }
+      return;
+    }
+    if (
+      page.entries.length === 0 ||
+      page.nextCursor === null ||
+      page.nextCursor !== pageCursor
+    ) {
+      throw runtimeCatchUpFailure("corrupt_event", conversationId, {
+        lastSafeCursor,
+        lastSafeRevision,
+        eventCursor: null,
+        cause: new TypeError("Event store returned a non-advancing runtime catch-up page"),
+      });
+    }
+    readCursor = page.nextCursor;
+  }
+}
+
+function runtimeCatchUpFailure(
+  code: "corrupt_event" | "revision_gap",
+  conversationId: ConversationId,
+  details: Omit<ConstructorParameters<typeof ConversationReplayFailure>[1],
+    "code" | "conversationId">,
+): ConversationReplayFailure {
+  return new ConversationReplayFailure(
+    code === "corrupt_event"
+      ? "The canonical conversation event log is corrupt"
+      : "The canonical conversation event log is not contiguous",
+    { code, conversationId, ...details },
+  );
 }
 
 function protocolState(
