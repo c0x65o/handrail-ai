@@ -1802,7 +1802,6 @@ async function catchUpRuntimeStore(
       }
       lastSafeRevision = pageRevision;
       lastSafeCursor = pageCursor;
-      readCursor = pageCursor;
     }
 
     if (!page.hasMore) {
