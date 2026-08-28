@@ -365,6 +365,10 @@ describe("createDirectProviderTransport", () => {
     const released = new Promise<void>((resolve) => {
       release = resolve;
     });
+    let markBuffered = (): void => undefined;
+    const buffered = new Promise<void>((resolve) => {
+      markBuffered = resolve;
+    });
     let providerSettled = false;
     const adapter = new FakeAdapter(async function* (invocation) {
       yield {
@@ -372,9 +376,20 @@ describe("createDirectProviderTransport", () => {
         type: "response.started",
         attribution: invocation.context.attribution,
       };
+      yield {
+        ...envelope(invocation, "response.text.delta", 1),
+        type: "response.text.delta",
+        delta: "queued before disconnect",
+      };
+      markBuffered();
       await released;
       yield {
-        ...envelope(invocation, "response.completed", 1),
+        ...envelope(invocation, "response.text.delta", 2),
+        type: "response.text.delta",
+        delta: "emitted after disconnect",
+      };
+      yield {
+        ...envelope(invocation, "response.completed", 3),
         type: "response.completed",
         outcome: "stop",
       };
@@ -383,6 +398,7 @@ describe("createDirectProviderTransport", () => {
     });
     const { transport, handle } = await start(adapter);
 
+    await buffered;
     handle.observation.disconnect();
     expect(await handle.observation.result).toEqual({
       status: "disconnected",
@@ -392,9 +408,11 @@ describe("createDirectProviderTransport", () => {
         lastAppliedRevision: null,
       },
     });
+    expect(await collect(handle.observation.events)).toEqual([]);
     expect(adapter.invocation?.signal.aborted).toBe(false);
     release();
     await viWaitFor(() => providerSettled);
+    expect(adapter.invocation?.signal.aborted).toBe(false);
 
     const cancellation = transport.capabilities.authoritativeCancellation;
     if (!cancellation.supported) throw new Error("cancellation should be supported");

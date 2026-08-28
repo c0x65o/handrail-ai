@@ -345,12 +345,13 @@ class DirectObservation implements DirectProviderTurnObservation {
   disconnect(): void {
     if (this.#closed || this.#disconnected) return;
     this.#disconnected = true;
+    this.#buffer.length = 0;
     this.#settle({ status: "disconnected", checkpoint: EMPTY_CHECKPOINT });
     this.#wake();
   }
 
   push(event: StreamEvent): void {
-    if (this.#closed) return;
+    if (this.#closed || this.#disconnected) return;
     this.#buffer.push(event);
     this.#wake();
   }

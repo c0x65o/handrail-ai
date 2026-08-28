@@ -464,9 +464,11 @@ export function createConversationSyncCoordinator<
       }
       if (result.status !== "mutations") return result;
 
+      const currentAuthoritative = authoritativeStore.getSnapshot();
       const acknowledgedMutationIds = validateAcknowledgementIdentities(
         result.acknowledgements,
         mutations,
+        currentAuthoritative,
       );
       const acknowledgementEvents = result.acknowledgements.flatMap(
         ({ events }) => events,
@@ -475,7 +477,7 @@ export function createConversationSyncCoordinator<
         validateAppendMutationHead(
           acknowledgementEvents,
           result.latestRevision,
-          authoritativeStore.getSnapshot(),
+          currentAuthoritative,
           conversationId,
         );
       } catch (error) {
@@ -900,6 +902,7 @@ function rebasePendingEvents(
 function validateAcknowledgementIdentities(
   acknowledgements: readonly ConversationSyncMutationAcknowledgement[],
   submittedMutations: readonly ConversationSyncMutation[],
+  current: ConversationState,
 ): string[] {
   if (acknowledgements.length === 0) {
     throw new ConversationSyncAdapterProtocolError(
@@ -910,6 +913,7 @@ function validateAcknowledgementIdentities(
   const submittedMutationIds = new Set(
     submittedMutations.map(({ mutationId }) => mutationId),
   );
+  const representedMutationIds = new Set(current.processed_mutation_ids);
   const acknowledgedMutationIds = new Set<string>();
   for (const acknowledgement of acknowledgements) {
     if (
@@ -928,6 +932,36 @@ function validateAcknowledgementIdentities(
     if (!submittedMutationIds.has(acknowledgement.mutationId)) {
       throw new ConversationSyncAdapterProtocolError(
         `Conversation sync adapter acknowledged unknown mutation ${acknowledgement.mutationId}`,
+      );
+    }
+    if (!Array.isArray(acknowledgement.events)) {
+      throw new ConversationSyncAdapterProtocolError(
+        `Conversation sync adapter acknowledgement for mutation ${acknowledgement.mutationId} is missing event proof`,
+      );
+    }
+    if (acknowledgement.status === "accepted" && acknowledgement.events.length !== 1) {
+      throw new ConversationSyncAdapterProtocolError(
+        `Conversation sync adapter accepted mutation ${acknowledgement.mutationId} without exactly one event proof`,
+      );
+    }
+    if (
+      acknowledgement.status === "duplicate" &&
+      (acknowledgement.events.length > 1 ||
+        (acknowledgement.events.length === 0 &&
+          !representedMutationIds.has(acknowledgement.mutationId)))
+    ) {
+      throw new ConversationSyncAdapterProtocolError(
+        `Conversation sync adapter returned unproven duplicate mutation ${acknowledgement.mutationId}`,
+      );
+    }
+    const proof = acknowledgement.events[0];
+    if (
+      acknowledgement.events.length === 1 &&
+      (proof === undefined || typeof proof !== "object" || proof === null ||
+        proof.mutation_id !== acknowledgement.mutationId)
+    ) {
+      throw new ConversationSyncAdapterProtocolError(
+        `Conversation sync adapter acknowledgement event does not prove mutation ${acknowledgement.mutationId}`,
       );
     }
     acknowledgedMutationIds.add(acknowledgement.mutationId);

@@ -643,6 +643,75 @@ describe("createConversationSyncCoordinator", () => {
     await sync.destroy();
   });
 
+  it("rejects an acknowledgement whose event proves another mutation", async () => {
+    const adapter = new FakeAuthoritativeAdapter();
+    const eventStore = new InMemoryConversationEventStore();
+    const proposed = mutation("proof-a", "a", "Keep A pending");
+    const other = mutation("proof-b", "b", "Do not apply B");
+    const append = vi.spyOn(adapter, "appendMutations").mockResolvedValue({
+      status: "mutations",
+      acknowledgements: [{
+        status: "accepted",
+        mutationId: proposed.mutationId,
+        events: other.events,
+      }],
+      latestRevision: 1 as ConversationRevision,
+    });
+    const sync = coordinator(adapter, eventStore).coordinator;
+    await sync.start();
+
+    await expect(sync.queueMutation(proposed)).rejects.toThrow(
+      ConversationSyncAdapterProtocolError,
+    );
+
+    expect(append).toHaveBeenCalledOnce();
+    expect(sync.getState()).toMatchObject({
+      status: "error",
+      revision: null,
+      pendingMutationCount: 1,
+    });
+    expect(sync.store.getSnapshot().processed_event_ids).toEqual([
+      proposed.events[0].event_id,
+    ]);
+    await expect(eventStore.getLatestRevision(conversationId)).resolves.toBeNull();
+    await sync.destroy();
+  });
+
+  it("rejects an empty duplicate not represented authoritatively", async () => {
+    const initial = titleEvent(1, "Unrelated authority");
+    const adapter = new FakeAuthoritativeAdapter([initial]);
+    const eventStore = new InMemoryConversationEventStore();
+    const proposed = mutation("unproven-duplicate", "a", "Keep me pending");
+    const append = vi.spyOn(adapter, "appendMutations").mockResolvedValue({
+      status: "mutations",
+      acknowledgements: [{
+        status: "duplicate",
+        mutationId: proposed.mutationId,
+        events: [],
+      }],
+      latestRevision: 1 as ConversationRevision,
+    });
+    const sync = coordinator(adapter, eventStore).coordinator;
+    await sync.start();
+
+    await expect(sync.queueMutation(proposed)).rejects.toThrow(
+      ConversationSyncAdapterProtocolError,
+    );
+
+    expect(append).toHaveBeenCalledOnce();
+    expect(sync.getState()).toMatchObject({
+      status: "error",
+      revision: 1,
+      pendingMutationCount: 1,
+    });
+    expect(sync.store.getSnapshot().processed_event_ids).toEqual([
+      initial.event_id,
+      proposed.events[0].event_id,
+    ]);
+    await expect(eventStore.getLatestRevision(conversationId)).resolves.toBe(1);
+    await sync.destroy();
+  });
+
   it("rejects a mismatched append latest revision without applying events", async () => {
     const adapter = new FakeAuthoritativeAdapter();
     const eventStore = new InMemoryConversationEventStore();
@@ -712,6 +781,61 @@ describe("createConversationSyncCoordinator", () => {
       await sync.destroy();
     },
   );
+
+  it("drains an empty duplicate already represented authoritatively", async () => {
+    const proposed = mutation("projected-duplicate", "a", "Stored already");
+    const authoritativeEvent = parseConversationEvent({
+      ...proposed.events[0],
+      revision: 1,
+    });
+    const adapter = new FakeAuthoritativeAdapter([authoritativeEvent]);
+    const eventStore = new InMemoryConversationEventStore();
+    await eventStore.append({
+      conversationId,
+      expectedRevision: null,
+      events: [authoritativeEvent],
+    });
+    const stateStore = new InMemoryConversationSyncStateStore();
+    await stateStore.save({
+      expectedGeneration: null,
+      record: {
+        schemaVersion: CONVERSATION_SYNC_STATE_SCHEMA_VERSION,
+        conversationId,
+        authoritativeState: createInitialConversationState(conversationId),
+        authoritativeRevision: null,
+        pendingMutations: [proposed],
+      },
+    });
+    const append = vi.spyOn(adapter, "appendMutations").mockResolvedValue({
+      status: "mutations",
+      acknowledgements: [{
+        status: "duplicate",
+        mutationId: proposed.mutationId,
+        events: [],
+      }],
+      latestRevision: 1 as ConversationRevision,
+    });
+    const sync = coordinator(
+      adapter,
+      eventStore,
+      new ManualClock(),
+      stateStore,
+    ).coordinator;
+
+    await sync.start();
+
+    expect(append).toHaveBeenCalledOnce();
+    expect(sync.getState()).toMatchObject({
+      status: "online",
+      revision: 1,
+      pendingMutationCount: 0,
+    });
+    expect(sync.store.getSnapshot().processed_mutation_ids).toEqual([
+      proposed.mutationId,
+    ]);
+    await expect(eventStore.getLatestRevision(conversationId)).resolves.toBe(1);
+    await sync.destroy();
+  });
 
   it("recovers a genuine acknowledgement event gap through one snapshot", async () => {
     const adapter = new FakeAuthoritativeAdapter();
