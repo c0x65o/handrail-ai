@@ -1,0 +1,621 @@
+import { Ajv2020, type ValidateFunction } from "ajv/dist/2020.js";
+
+import {
+  type ApplicationToolResult,
+  type JsonObject,
+  type JsonValue,
+  type ToolDefinition,
+  type ToolResultContentPart,
+} from "../protocol.js";
+import { ToolRegistry } from "./registry.js";
+
+export interface ApplicationToolCall {
+  readonly tool_call_id: string;
+  readonly name: string;
+  readonly arguments: unknown;
+}
+
+export interface ApplicationToolExecutorContext<TContext = unknown> {
+  readonly applicationContext: TContext;
+  readonly definition: ToolDefinition;
+  readonly signal: AbortSignal;
+  readonly toolCallId: string;
+}
+
+export type ApplicationToolOutput =
+  | JsonValue
+  | ToolResultContentPart
+  | readonly ToolResultContentPart[];
+
+export type ApplicationToolExecutor<TContext = unknown> = (
+  arguments_: JsonObject,
+  context: ApplicationToolExecutorContext<TContext>,
+) => ApplicationToolOutput | Promise<ApplicationToolOutput>;
+
+export type ApplicationToolPolicyDecision =
+  | { readonly outcome: "allow" }
+  | { readonly outcome: "deny" }
+  | { readonly outcome: "external_approval_required" };
+
+export interface ApplicationToolPolicyInput<TContext = unknown> {
+  readonly applicationContext: TContext;
+  readonly arguments: JsonObject;
+  readonly definition: ToolDefinition;
+  readonly signal: AbortSignal;
+  readonly toolCallId: string;
+}
+
+/** The application policy is the sole authorization boundary for discovered, valid calls. */
+export type ApplicationToolPolicy<TContext = unknown> = (
+  input: ApplicationToolPolicyInput<TContext>,
+) => ApplicationToolPolicyDecision | Promise<ApplicationToolPolicyDecision>;
+
+export interface ToolExecutionLedger {
+  /** Implementations must atomically retain and return the first promise for a call id. */
+  getOrCreate(
+    toolCallId: string,
+    execute: () => Promise<ApplicationToolResult>,
+  ): Promise<ApplicationToolResult>;
+}
+
+export class InMemoryToolExecutionLedger implements ToolExecutionLedger {
+  readonly #entries = new Map<string, Promise<ApplicationToolResult>>();
+
+  getOrCreate(
+    toolCallId: string,
+    execute: () => Promise<ApplicationToolResult>,
+  ): Promise<ApplicationToolResult> {
+    const existing = this.#entries.get(toolCallId);
+    if (existing !== undefined) return existing;
+
+    const pending = Promise.resolve().then(execute);
+    this.#entries.set(toolCallId, pending);
+    return pending;
+  }
+}
+
+export interface BoundedToolExecutorLimits {
+  readonly timeoutMs: number;
+  readonly maxConcurrency: number;
+  readonly maxResultBytes: number;
+  readonly maxResultNodes: number;
+  readonly maxResultDepth: number;
+}
+
+export const DEFAULT_BOUNDED_TOOL_EXECUTOR_LIMITS: Readonly<BoundedToolExecutorLimits> =
+  Object.freeze({
+    timeoutMs: 30_000,
+    maxConcurrency: 4,
+    maxResultBytes: 64 * 1_024,
+    maxResultNodes: 2_000,
+    maxResultDepth: 12,
+  });
+
+export interface BoundedToolExecutionRequest<TContext = unknown> {
+  readonly call: ApplicationToolCall;
+  /** Must be the current array returned by ToolRegistry.discover(). */
+  readonly discoveredTools: readonly ToolDefinition[];
+  readonly applicationContext: TContext;
+  readonly signal?: AbortSignal;
+}
+
+export interface BoundedToolExecutorOptions<TContext = unknown, TDiscoveryContext = unknown> {
+  readonly registry: ToolRegistry<ApplicationToolExecutor<TContext>, TDiscoveryContext>;
+  readonly policy: ApplicationToolPolicy<TContext>;
+  readonly ledger?: ToolExecutionLedger;
+  readonly limits?: Partial<BoundedToolExecutorLimits>;
+}
+
+class ExecutionCancelled extends Error {}
+class InvalidArguments extends Error {}
+class InvalidOutput extends Error {}
+class InvalidPolicyDecision extends Error {}
+
+type Release = () => void;
+
+interface Waiter {
+  readonly resolve: (release: Release) => void;
+  readonly reject: (error: ExecutionCancelled) => void;
+  readonly signal: AbortSignal;
+  readonly onAbort: () => void;
+}
+
+class ConcurrencyLimiter {
+  readonly #maximum: number;
+  readonly #waiters: Waiter[] = [];
+  #active = 0;
+
+  constructor(maximum: number) {
+    this.#maximum = maximum;
+  }
+
+  acquire(signal: AbortSignal): Promise<Release> {
+    if (signal.aborted) return Promise.reject(new ExecutionCancelled());
+    if (this.#active < this.#maximum) {
+      this.#active += 1;
+      return Promise.resolve(this.#releaseFunction());
+    }
+
+    return new Promise<Release>((resolve, reject) => {
+      const waiter: Waiter = {
+        resolve,
+        reject,
+        signal,
+        onAbort: () => {
+          const index = this.#waiters.indexOf(waiter);
+          if (index >= 0) this.#waiters.splice(index, 1);
+          reject(new ExecutionCancelled());
+        },
+      };
+      signal.addEventListener("abort", waiter.onAbort, { once: true });
+      this.#waiters.push(waiter);
+    });
+  }
+
+  #releaseFunction(): Release {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.#active -= 1;
+      this.#startNext();
+    };
+  }
+
+  #startNext(): void {
+    while (this.#active < this.#maximum) {
+      const waiter = this.#waiters.shift();
+      if (waiter === undefined) return;
+      waiter.signal.removeEventListener("abort", waiter.onAbort);
+      if (waiter.signal.aborted) {
+        waiter.reject(new ExecutionCancelled());
+        continue;
+      }
+      this.#active += 1;
+      waiter.resolve(this.#releaseFunction());
+    }
+  }
+}
+
+const JSON_SCHEMA_VALIDATOR = new Ajv2020({
+  allErrors: false,
+  strict: false,
+  validateFormats: false,
+});
+const COMPILED_SCHEMAS = new WeakMap<object, ValidateFunction>();
+const UTF8_ENCODER = new TextEncoder();
+
+const FORBIDDEN_OUTPUT_FIELDS = new Set([
+  "accesstoken",
+  "apikey",
+  "apitoken",
+  "authorization",
+  "bearertoken",
+  "client",
+  "clientsecret",
+  "cookie",
+  "credential",
+  "credentials",
+  "idtoken",
+  "managedtoken",
+  "nativeclient",
+  "password",
+  "passwd",
+  "privatekey",
+  "providerclient",
+  "proxyauthorization",
+  "refreshtoken",
+  "sdkclient",
+  "secret",
+  "secretkey",
+  "secrets",
+  "setcookie",
+  "signingkey",
+]);
+
+const CREDENTIAL_VALUE_PATTERNS = [
+  /\bbearer\s+[a-z0-9._~+/=-]{8,}/i,
+  /(?:^|[^a-z0-9])sk-[a-z0-9_-]{8,}\b/i,
+  /-----begin (?:rsa |ec |openssh )?private key-----/i,
+] as const;
+
+function normalizedFieldName(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function isArrayIndex(key: string, length: number): boolean {
+  if (!/^(?:0|[1-9][0-9]*)$/.test(key)) return false;
+  const index = Number(key);
+  return Number.isSafeInteger(index) && index >= 0 && index < length;
+}
+
+function defineJsonProperty(object: JsonObject, key: string, value: JsonValue): void {
+  Object.defineProperty(object, key, {
+    configurable: true,
+    enumerable: true,
+    value,
+    writable: true,
+  });
+}
+
+function positiveInteger(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError(`${name} must be a positive safe integer`);
+  }
+  return value;
+}
+
+function resolvedLimits(overrides: Partial<BoundedToolExecutorLimits> | undefined) {
+  const limits = { ...DEFAULT_BOUNDED_TOOL_EXECUTOR_LIMITS, ...overrides };
+  return Object.freeze({
+    timeoutMs: positiveInteger(limits.timeoutMs, "limits.timeoutMs"),
+    maxConcurrency: positiveInteger(limits.maxConcurrency, "limits.maxConcurrency"),
+    maxResultBytes: positiveInteger(limits.maxResultBytes, "limits.maxResultBytes"),
+    maxResultNodes: positiveInteger(limits.maxResultNodes, "limits.maxResultNodes"),
+    maxResultDepth: positiveInteger(limits.maxResultDepth, "limits.maxResultDepth"),
+  });
+}
+
+function safeIdentifier(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.length > 0 ? value.slice(0, 256) : fallback;
+}
+
+function result(
+  toolCallId: string,
+  name: string,
+  content: ToolResultContentPart[],
+  isError: boolean,
+): ApplicationToolResult {
+  content.forEach(Object.freeze);
+  Object.freeze(content);
+  return Object.freeze({ tool_call_id: toolCallId, name, content, is_error: isError });
+}
+
+function errorResult(toolCallId: string, name: string, message: string): ApplicationToolResult {
+  return result(toolCallId, name, [{ type: "text", text: message }], true);
+}
+
+function raceWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new ExecutionCancelled());
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new ExecutionCancelled());
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+function cloneJson(value: unknown, limits: BoundedToolExecutorLimits): JsonValue {
+  let nodes = 0;
+  const ancestors = new Set<object>();
+
+  const visit = (current: unknown, depth: number, inspectSensitiveData: boolean): JsonValue => {
+    nodes += 1;
+    if (nodes > limits.maxResultNodes || depth > limits.maxResultDepth) {
+      throw new InvalidOutput();
+    }
+    if (current === null || typeof current === "boolean") return current;
+    if (typeof current === "number") {
+      if (!Number.isFinite(current)) throw new InvalidOutput();
+      return current;
+    }
+    if (typeof current === "string") {
+      if (
+        inspectSensitiveData &&
+        CREDENTIAL_VALUE_PATTERNS.some((pattern) => pattern.test(current))
+      ) {
+        throw new InvalidOutput();
+      }
+      return current;
+    }
+    if (typeof current !== "object") throw new InvalidOutput();
+    if (ancestors.has(current)) throw new InvalidOutput();
+    ancestors.add(current);
+
+    let clone: JsonValue;
+    if (Array.isArray(current)) {
+      if (current.length > limits.maxResultNodes) throw new InvalidOutput();
+      const keys = Reflect.ownKeys(current);
+      if (
+        keys.some(
+          (key) => typeof key !== "string" || (key !== "length" && !isArrayIndex(key, current.length)),
+        )
+      ) {
+        throw new InvalidOutput();
+      }
+      for (let index = 0; index < current.length; index += 1) {
+        if (!Object.hasOwn(current, index)) throw new InvalidOutput();
+      }
+      clone = current.map((item) => visit(item, depth + 1, inspectSensitiveData));
+    } else {
+      const prototype = Object.getPrototypeOf(current);
+      if (prototype !== Object.prototype && prototype !== null) throw new InvalidOutput();
+      const ownKeys = Reflect.ownKeys(current);
+      if (ownKeys.some((key) => typeof key !== "string")) throw new InvalidOutput();
+
+      const objectClone: JsonObject = {};
+      for (const key of ownKeys as string[]) {
+        const descriptor = Object.getOwnPropertyDescriptor(current, key);
+        if (descriptor === undefined || !("value" in descriptor)) throw new InvalidOutput();
+        if (inspectSensitiveData && FORBIDDEN_OUTPUT_FIELDS.has(normalizedFieldName(key))) {
+          throw new InvalidOutput();
+        }
+        defineJsonProperty(
+          objectClone,
+          key,
+          visit(descriptor.value, depth + 1, inspectSensitiveData),
+        );
+      }
+      clone = objectClone;
+    }
+
+    ancestors.delete(current);
+    return clone;
+  };
+
+  const clone = visit(value, 0, true);
+  if (UTF8_ENCODER.encode(JSON.stringify(clone)).byteLength > limits.maxResultBytes) {
+    throw new InvalidOutput();
+  }
+  return clone;
+}
+
+function cloneArguments(value: unknown): JsonObject {
+  // Arguments receive a generous structural bound before schema validation. Output-sensitive
+  // field filtering is intentionally not used: the application policy owns authorization.
+  let nodes = 0;
+  const ancestors = new Set<object>();
+
+  const visit = (current: unknown, depth: number): JsonValue => {
+    nodes += 1;
+    if (nodes > 10_000 || depth > 20) throw new InvalidArguments();
+    if (current === null || typeof current === "boolean" || typeof current === "string") return current;
+    if (typeof current === "number") {
+      if (!Number.isFinite(current)) throw new InvalidArguments();
+      return current;
+    }
+    if (typeof current !== "object" || ancestors.has(current)) throw new InvalidArguments();
+    ancestors.add(current);
+
+    let clone: JsonValue;
+    if (Array.isArray(current)) {
+      if (current.length > 10_000) throw new InvalidArguments();
+      const keys = Reflect.ownKeys(current);
+      if (
+        keys.some(
+          (key) => typeof key !== "string" || (key !== "length" && !isArrayIndex(key, current.length)),
+        )
+      ) {
+        throw new InvalidArguments();
+      }
+      for (let index = 0; index < current.length; index += 1) {
+        if (!Object.hasOwn(current, index)) throw new InvalidArguments();
+      }
+      clone = current.map((item) => visit(item, depth + 1));
+    } else {
+      const prototype = Object.getPrototypeOf(current);
+      if (prototype !== Object.prototype && prototype !== null) throw new InvalidArguments();
+      const ownKeys = Reflect.ownKeys(current);
+      if (ownKeys.some((key) => typeof key !== "string")) throw new InvalidArguments();
+      const objectClone: JsonObject = {};
+      for (const key of ownKeys as string[]) {
+        const descriptor = Object.getOwnPropertyDescriptor(current, key);
+        if (descriptor === undefined || !("value" in descriptor)) throw new InvalidArguments();
+        defineJsonProperty(objectClone, key, visit(descriptor.value, depth + 1));
+      }
+      clone = objectClone;
+    }
+    ancestors.delete(current);
+    return clone;
+  };
+
+  const clone = visit(value, 0);
+  if (clone === null || typeof clone !== "object" || Array.isArray(clone)) {
+    throw new InvalidArguments();
+  }
+  return clone;
+}
+
+function validateArguments(definition: ToolDefinition, arguments_: JsonObject): void {
+  let validate = COMPILED_SCHEMAS.get(definition.input_schema);
+  if (validate === undefined) {
+    let compiled: ValidateFunction;
+    try {
+      compiled = JSON_SCHEMA_VALIDATOR.compile(definition.input_schema);
+    } catch {
+      throw new InvalidArguments();
+    }
+    COMPILED_SCHEMAS.set(definition.input_schema, compiled);
+    validate = compiled;
+  }
+  if (!validate(arguments_)) throw new InvalidArguments();
+}
+
+function resemblesContentPart(value: unknown): boolean {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const type = Object.getOwnPropertyDescriptor(value, "type");
+  return type !== undefined && "value" in type && (type.value === "text" || type.value === "json");
+}
+
+function normalizeOutput(
+  output: ApplicationToolOutput,
+  limits: BoundedToolExecutorLimits,
+): ToolResultContentPart[] {
+  try {
+    let candidate: unknown;
+    if (typeof output === "string") {
+      candidate = [{ type: "text", text: output }];
+    } else if (resemblesContentPart(output)) {
+      candidate = [output];
+    } else if (Array.isArray(output) && output.length > 0 && output.every(resemblesContentPart)) {
+      candidate = output;
+    } else {
+      candidate = [{ type: "json", value: output }];
+    }
+
+    const cloned = cloneJson(candidate, limits);
+    if (!Array.isArray(cloned) || cloned.length === 0) throw new InvalidOutput();
+
+    return cloned.map((part) => {
+      if (part === null || typeof part !== "object" || Array.isArray(part)) {
+        throw new InvalidOutput();
+      }
+      const keys = Object.keys(part);
+      if (part.type === "text") {
+        if (keys.length !== 2 || !keys.includes("text") || typeof part.text !== "string") {
+          throw new InvalidOutput();
+        }
+        return { type: "text", text: part.text };
+      }
+      if (part.type === "json") {
+        if (keys.length !== 2 || !keys.includes("value") || !("value" in part)) {
+          throw new InvalidOutput();
+        }
+        return { type: "json", value: part.value };
+      }
+      throw new InvalidOutput();
+    });
+  } catch {
+    throw new InvalidOutput();
+  }
+}
+
+export class BoundedToolExecutor<TContext = unknown, TDiscoveryContext = unknown> {
+  readonly #registry: ToolRegistry<ApplicationToolExecutor<TContext>, TDiscoveryContext>;
+  readonly #policy: ApplicationToolPolicy<TContext>;
+  readonly #ledger: ToolExecutionLedger;
+  readonly #limits: Readonly<BoundedToolExecutorLimits>;
+  readonly #limiter: ConcurrencyLimiter;
+
+  constructor(options: BoundedToolExecutorOptions<TContext, TDiscoveryContext>) {
+    this.#registry = options.registry;
+    this.#policy = options.policy;
+    this.#ledger = options.ledger ?? new InMemoryToolExecutionLedger();
+    this.#limits = resolvedLimits(options.limits);
+    this.#limiter = new ConcurrencyLimiter(this.#limits.maxConcurrency);
+  }
+
+  async execute(request: BoundedToolExecutionRequest<TContext>): Promise<ApplicationToolResult> {
+    const toolCallId = safeIdentifier(request.call.tool_call_id, "unknown_tool_call");
+    const name = safeIdentifier(request.call.name, "unknown_tool");
+    try {
+      return await this.#ledger.getOrCreate(toolCallId, () =>
+        this.#executeOnce(request, toolCallId, name),
+      );
+    } catch {
+      return errorResult(toolCallId, name, "Tool execution could not be recorded.");
+    }
+  }
+
+  async #executeOnce(
+    request: BoundedToolExecutionRequest<TContext>,
+    toolCallId: string,
+    name: string,
+  ): Promise<ApplicationToolResult> {
+    const controller = new AbortController();
+    let timedOut = false;
+    let phase: "arguments" | "policy" | "execution" = "arguments";
+    const onCallerAbort = () => controller.abort();
+    if (request.signal?.aborted) controller.abort();
+    else request.signal?.addEventListener("abort", onCallerAbort, { once: true });
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, this.#limits.timeoutMs);
+
+    try {
+      if (controller.signal.aborted) throw new ExecutionCancelled();
+      const registration = this.#registry.get(name);
+      if (
+        registration === undefined ||
+        !request.discoveredTools.includes(registration.definition)
+      ) {
+        return errorResult(toolCallId, name, "Tool is unavailable for this call.");
+      }
+
+      const arguments_ = cloneArguments(request.call.arguments);
+      validateArguments(registration.definition, arguments_);
+
+      phase = "policy";
+      const decision = await raceWithSignal(
+        Promise.resolve().then(() =>
+          this.#policy({
+            applicationContext: request.applicationContext,
+            arguments: arguments_,
+            definition: registration.definition,
+            signal: controller.signal,
+            toolCallId,
+          }),
+        ),
+        controller.signal,
+      );
+      if (decision?.outcome === "deny") {
+        return errorResult(
+          toolCallId,
+          name,
+          "Tool execution was denied by application policy.",
+        );
+      }
+      if (decision?.outcome === "external_approval_required") {
+        return errorResult(toolCallId, name, "Tool execution requires external approval.");
+      }
+      if (decision?.outcome !== "allow") throw new InvalidPolicyDecision();
+
+      phase = "execution";
+      const release = await this.#limiter.acquire(controller.signal);
+      const invocation = Promise.resolve()
+        .then(() =>
+          registration.executor(arguments_, {
+            applicationContext: request.applicationContext,
+            definition: registration.definition,
+            signal: controller.signal,
+            toolCallId,
+          }),
+        )
+        .then((output) => normalizeOutput(output, this.#limits));
+      void invocation.then(release, release);
+      const content = await raceWithSignal(invocation, controller.signal);
+      return result(toolCallId, name, content, false);
+    } catch (error: unknown) {
+      if (error instanceof ExecutionCancelled) {
+        return errorResult(
+          toolCallId,
+          name,
+          timedOut ? "Tool execution timed out." : "Tool execution was cancelled.",
+        );
+      }
+      if (error instanceof InvalidArguments || phase === "arguments") {
+        return errorResult(
+          toolCallId,
+          name,
+          "Tool arguments did not match the declared schema.",
+        );
+      }
+      if (error instanceof InvalidPolicyDecision) {
+        return errorResult(
+          toolCallId,
+          name,
+          "Tool authorization returned an invalid decision.",
+        );
+      }
+      if (phase === "policy") {
+        return errorResult(toolCallId, name, "Tool authorization could not be completed.");
+      }
+      if (error instanceof InvalidOutput) {
+        return errorResult(toolCallId, name, "Tool returned an invalid or unsafe result.");
+      }
+      return errorResult(toolCallId, name, "Tool execution failed.");
+    } finally {
+      clearTimeout(timeout);
+      request.signal?.removeEventListener("abort", onCallerAbort);
+    }
+  }
+}

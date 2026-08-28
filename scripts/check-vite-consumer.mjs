@@ -38,6 +38,10 @@ if (!bundledCode.includes("parseChatRequest")) {
   throw new Error("Vite consumer bundle did not retain the public protocol entry point");
 }
 
+if (!bundledCode.includes("IndexedDBConversationEventStore")) {
+  throw new Error("Vite consumer bundle did not retain the opt-in browser entry point");
+}
+
 const nodeRuntimeDependency = bundledCode.match(/\b(?:Buffer|process)\b|node:/u)?.[0];
 if (nodeRuntimeDependency) {
   throw new Error(

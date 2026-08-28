@@ -1,3 +1,5 @@
+import type { AttachmentUploadAdapter } from "../attachments/types.js";
+
 /**
  * A capability is usable only after its negotiated value has been narrowed to
  * `supported: true`. Unsupported capabilities intentionally expose no
@@ -145,7 +147,7 @@ export interface AuthoritativeTurnCancellation {
  * negotiates support and supplies the corresponding capability contract.
  */
 export interface ConversationTransportCapabilities<
-  TAttachmentUpload = unknown,
+  TAttachmentUpload = AttachmentUploadAdapter,
   TPresence = unknown,
   TSynchronization = unknown,
 > {
@@ -163,7 +165,7 @@ export interface ConversationTransportCapabilities<
 export interface ConversationTransport<
   TEvent = unknown,
   TStartRequest = unknown,
-  TAttachmentUpload = unknown,
+  TAttachmentUpload = AttachmentUploadAdapter,
   TPresence = unknown,
   TSynchronization = unknown,
 > {

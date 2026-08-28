@@ -3,3 +3,4 @@ export {
   AI_RUNTIME_PROTOCOL_VERSION,
   parseChatRequest,
 } from "@handrail/ai";
+export { IndexedDBConversationEventStore } from "@handrail/ai/browser";

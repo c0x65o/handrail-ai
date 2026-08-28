@@ -1,0 +1,339 @@
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
+
+import {
+  AI_RUNTIME_PROTOCOL_VERSION,
+  BoundedToolExecutor,
+  InMemoryToolExecutionLedger,
+  ToolRegistry,
+  parseChatRequest,
+  type ApplicationToolExecutor,
+  type ApplicationToolPolicy,
+  type ApplicationToolResult,
+  type BoundedToolExecutorLimits,
+  type ToolDefinition,
+} from "../src/index.js";
+
+interface TestContext {
+  readonly actor: string;
+}
+
+const context: TestContext = { actor: "test-user" };
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
+function definition(name = "lookup"): ToolDefinition {
+  return {
+    name,
+    description: `${name} test tool`,
+    input_schema: {
+      type: "object",
+      properties: {
+        query: { type: "string", minLength: 1 },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+  };
+}
+
+function assertProtocolResult(result: ApplicationToolResult, tool: ToolDefinition): void {
+  const parsed = parseChatRequest({
+    protocol_version: AI_RUNTIME_PROTOCOL_VERSION,
+    continuation_of: "request_before_tools",
+    messages: [{ role: "user", content: [{ type: "text", text: "run the tool" }] }],
+    tools: [tool],
+    tool_results: [result],
+    generation: { max_output_tokens: 100, temperature: 0 },
+    correlation_hints: {},
+  });
+  expect(parsed.tool_results[0]).toBe(result);
+  expect(result.content.length).toBeGreaterThan(0);
+}
+
+function setup(
+  applicationExecutor: ApplicationToolExecutor<TestContext>,
+  options: {
+    policy?: ApplicationToolPolicy<TestContext>;
+    limits?: Partial<BoundedToolExecutorLimits>;
+    ledger?: InMemoryToolExecutionLedger;
+    name?: string;
+  } = {},
+) {
+  const tool = definition(options.name);
+  const registry = new ToolRegistry<ApplicationToolExecutor<TestContext>, undefined>();
+  registry.register({ definition: tool, executor: applicationExecutor });
+  const policy =
+    options.policy ??
+    vi.fn<ApplicationToolPolicy<TestContext>>(() => ({
+      outcome: "allow",
+    }));
+  const bounded = new BoundedToolExecutor({
+    registry,
+    policy,
+    ...(options.limits === undefined ? {} : { limits: options.limits }),
+    ...(options.ledger === undefined ? {} : { ledger: options.ledger }),
+  });
+  const discoveredTools = registry.discover({ context: undefined });
+  const execute = (
+    toolCallId: string,
+    arguments_: unknown = { query: "weather" },
+    signal?: AbortSignal,
+  ) =>
+    bounded.execute({
+      call: { tool_call_id: toolCallId, name: tool.name, arguments: arguments_ },
+      discoveredTools,
+      applicationContext: context,
+      ...(signal === undefined ? {} : { signal }),
+    });
+  return { bounded, discoveredTools, execute, policy, registry, tool };
+}
+
+describe("BoundedToolExecutor", () => {
+  it("executes a discovered tool and returns a bounded protocol result", async () => {
+    const applicationExecutor = vi.fn<ApplicationToolExecutor<TestContext>>(
+      async (arguments_, executionContext) => ({
+        answer: typeof arguments_.query === "string" ? arguments_.query : "",
+        actor: executionContext.applicationContext.actor,
+      }),
+    );
+    const { execute, policy, tool } = setup(applicationExecutor);
+
+    const output = await execute("call_valid");
+
+    expect(output).toEqual({
+      tool_call_id: "call_valid",
+      name: "lookup",
+      content: [{ type: "json", value: { answer: "weather", actor: "test-user" } }],
+      is_error: false,
+    });
+    expect(policy).toHaveBeenCalledOnce();
+    expect(applicationExecutor).toHaveBeenCalledOnce();
+    expect(applicationExecutor.mock.calls[0]?.[1].signal).toBeInstanceOf(AbortSignal);
+    assertProtocolResult(output, tool);
+  });
+
+  it("rejects unknown and undiscovered tools before policy or execution", async () => {
+    const applicationExecutor = vi.fn<ApplicationToolExecutor<TestContext>>(async () => "unused");
+    const { bounded, policy, tool } = setup(applicationExecutor);
+
+    const undiscovered = await bounded.execute({
+      call: { tool_call_id: "call_undiscovered", name: tool.name, arguments: { query: "x" } },
+      discoveredTools: [],
+      applicationContext: context,
+    });
+    const unknownTool = definition("missing");
+    const unknown = await bounded.execute({
+      call: { tool_call_id: "call_unknown", name: "missing", arguments: { query: "x" } },
+      discoveredTools: [unknownTool],
+      applicationContext: context,
+    });
+
+    expect(undiscovered.is_error).toBe(true);
+    expect(unknown.is_error).toBe(true);
+    expect(undiscovered.content).toEqual([
+      { type: "text", text: "Tool is unavailable for this call." },
+    ]);
+    expect(policy).not.toHaveBeenCalled();
+    expect(applicationExecutor).not.toHaveBeenCalled();
+    assertProtocolResult(undiscovered, tool);
+    assertProtocolResult(unknown, unknownTool);
+  });
+
+  it("validates arguments against the registered JSON Schema before authorization", async () => {
+    const applicationExecutor = vi.fn<ApplicationToolExecutor<TestContext>>(async () => "unused");
+    const { execute, policy, tool } = setup(applicationExecutor);
+
+    const output = await execute("call_invalid_arguments", { query: 42 });
+
+    expect(output.content).toEqual([
+      { type: "text", text: "Tool arguments did not match the declared schema." },
+    ]);
+    expect(output.is_error).toBe(true);
+    expect(policy).not.toHaveBeenCalled();
+    expect(applicationExecutor).not.toHaveBeenCalled();
+    assertProtocolResult(output, tool);
+  });
+
+  it("uses application policy as the authorization boundary for denial", async () => {
+    const applicationExecutor = vi.fn<ApplicationToolExecutor<TestContext>>(async () => "unused");
+    const policy = vi.fn<ApplicationToolPolicy<TestContext>>(() => ({ outcome: "deny" }));
+    const { execute, tool } = setup(applicationExecutor, { policy });
+
+    const output = await execute("call_denied");
+
+    expect(policy).toHaveBeenCalledOnce();
+    expect(policy.mock.calls[0]?.[0].arguments).toEqual({ query: "weather" });
+    expect(applicationExecutor).not.toHaveBeenCalled();
+    expect(output.content).toEqual([
+      { type: "text", text: "Tool execution was denied by application policy." },
+    ]);
+    assertProtocolResult(output, tool);
+  });
+
+  it("pauses external-approval-required calls without invoking the tool", async () => {
+    const applicationExecutor = vi.fn<ApplicationToolExecutor<TestContext>>(async () => "unused");
+    const policy = vi.fn<ApplicationToolPolicy<TestContext>>(() => ({
+      outcome: "external_approval_required",
+    }));
+    const { execute, tool } = setup(applicationExecutor, { policy });
+
+    const output = await execute("call_approval");
+
+    expect(policy).toHaveBeenCalledOnce();
+    expect(applicationExecutor).not.toHaveBeenCalled();
+    expect(output.content).toEqual([
+      { type: "text", text: "Tool execution requires external approval." },
+    ]);
+    assertProtocolResult(output, tool);
+  });
+
+  it("times out, aborts the application signal, and returns without exposing internals", async () => {
+    let applicationSignal: AbortSignal | undefined;
+    const applicationExecutor: ApplicationToolExecutor<TestContext> = async (_, executionContext) => {
+      applicationSignal = executionContext.signal;
+      return await new Promise(() => undefined);
+    };
+    const { execute, tool } = setup(applicationExecutor, { limits: { timeoutMs: 10 } });
+
+    const output = await execute("call_timeout");
+
+    expect(applicationSignal?.aborted).toBe(true);
+    expect(output.content).toEqual([{ type: "text", text: "Tool execution timed out." }]);
+    assertProtocolResult(output, tool);
+  });
+
+  it("honors caller cancellation and propagates it to the application executor", async () => {
+    let applicationSignal: AbortSignal | undefined;
+    const started = deferred<void>();
+    const applicationExecutor: ApplicationToolExecutor<TestContext> = async (_, executionContext) => {
+      applicationSignal = executionContext.signal;
+      started.resolve(undefined);
+      return await new Promise(() => undefined);
+    };
+    const abort = new AbortController();
+    const { execute, tool } = setup(applicationExecutor);
+
+    const pending = execute("call_abort", { query: "x" }, abort.signal);
+    await started.promise;
+    abort.abort(new Error("private cancellation detail"));
+    const output = await pending;
+
+    expect(applicationSignal?.aborted).toBe(true);
+    expect(output.content).toEqual([{ type: "text", text: "Tool execution was cancelled." }]);
+    expect(JSON.stringify(output)).not.toContain("private cancellation detail");
+    assertProtocolResult(output, tool);
+  });
+
+  it("never exceeds the configured application-tool concurrency", async () => {
+    let active = 0;
+    let maximum = 0;
+    const releases: Array<() => void> = [];
+    const applicationExecutor: ApplicationToolExecutor<TestContext> = async () => {
+      active += 1;
+      maximum = Math.max(maximum, active);
+      await new Promise<void>((resolve) => {
+        releases.push(() => {
+          active -= 1;
+          resolve();
+        });
+      });
+      return "done";
+    };
+    const { execute, tool } = setup(applicationExecutor, { limits: { maxConcurrency: 2 } });
+
+    const pending = [1, 2, 3, 4].map((index) => execute(`call_concurrency_${index}`));
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    releases.splice(0, 2).forEach((release) => release());
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    releases.splice(0, 2).forEach((release) => release());
+    const outputs = await Promise.all(pending);
+
+    expect(maximum).toBe(2);
+    outputs.forEach((output) => assertProtocolResult(output, tool));
+  });
+
+  it("rejects oversized, deeply nested, circular, credential, and native-client output", async () => {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    const cases: Array<{ id: string; output: unknown; limits?: Partial<BoundedToolExecutorLimits> }> = [
+      { id: "oversized", output: "x".repeat(500), limits: { maxResultBytes: 100 } },
+      { id: "deep", output: { one: { two: { three: true } } }, limits: { maxResultDepth: 3 } },
+      { id: "circular", output: circular },
+      { id: "credential", output: { api_key: "sk-secretvalue123" } },
+      { id: "native", output: { client: { endpoint: "private" } } },
+    ];
+
+    for (const testCase of cases) {
+      const applicationExecutor = async () => testCase.output as never;
+      const { execute, tool } = setup(applicationExecutor, {
+        ...(testCase.limits === undefined ? {} : { limits: testCase.limits }),
+      });
+      const output = await execute(`call_${testCase.id}`);
+      expect(output.content, testCase.id).toEqual([
+        { type: "text", text: "Tool returned an invalid or unsafe result." },
+      ]);
+      expect(JSON.stringify(output)).not.toContain("secretvalue");
+      assertProtocolResult(output, tool);
+    }
+  });
+
+  it("redacts thrown secret-bearing errors and arbitrary error properties", async () => {
+    const applicationExecutor: ApplicationToolExecutor<TestContext> = async () => {
+      throw Object.assign(new Error("Bearer secret-token-value"), {
+        apiKey: "sk-secretvalue123",
+        nativeClient: { token: "also-private" },
+      });
+    };
+    const { execute, tool } = setup(applicationExecutor);
+
+    const output = await execute("call_throw");
+    const serialized = JSON.stringify(output);
+
+    expect(output.content).toEqual([{ type: "text", text: "Tool execution failed." }]);
+    expect(serialized).not.toContain("secret-token-value");
+    expect(serialized).not.toContain("secretvalue");
+    expect(serialized).not.toContain("also-private");
+    expect(serialized).not.toContain("stack");
+    assertProtocolResult(output, tool);
+  });
+
+  it("suppresses concurrent and completed duplicate tool_call_id execution", async () => {
+    const completion = deferred<string>();
+    const applicationExecutor = vi.fn<ApplicationToolExecutor<TestContext>>(
+      async () => completion.promise,
+    );
+    const ledger = new InMemoryToolExecutionLedger();
+    const { execute, policy, tool } = setup(applicationExecutor, { ledger });
+
+    const first = execute("call_duplicate");
+    const concurrent = execute("call_duplicate");
+    await vi.waitFor(() => expect(applicationExecutor).toHaveBeenCalledOnce());
+    completion.resolve("cached");
+    const [firstOutput, concurrentOutput] = await Promise.all([first, concurrent]);
+    const completedOutput = await execute("call_duplicate");
+
+    expect(applicationExecutor).toHaveBeenCalledOnce();
+    expect(policy).toHaveBeenCalledOnce();
+    expect(concurrentOutput).toBe(firstOutput);
+    expect(completedOutput).toBe(firstOutput);
+    assertProtocolResult(firstOutput, tool);
+  });
+
+  it("exports the public executor, policy, ledger, call, and limit contracts", () => {
+    expectTypeOf<BoundedToolExecutor<TestContext>>().toBeObject();
+    expectTypeOf<InMemoryToolExecutionLedger>().toMatchTypeOf<{
+      getOrCreate: (
+        id: string,
+        execute: () => Promise<ApplicationToolResult>,
+      ) => Promise<ApplicationToolResult>;
+    }>();
+  });
+});
