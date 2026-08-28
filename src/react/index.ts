@@ -17,3 +17,15 @@ export {
   type ChatDialogTitleProps,
   type ChatDialogTriggerProps,
 } from "./dialog.js";
+export {
+  ChatTabsContent,
+  ChatTabsList,
+  ChatTabsRoot,
+  ChatTabsTrigger,
+  type ChatTabsActivationMode,
+  type ChatTabsContentProps,
+  type ChatTabsListProps,
+  type ChatTabsOrientation,
+  type ChatTabsRootProps,
+  type ChatTabsTriggerProps,
+} from "./tabs.js";

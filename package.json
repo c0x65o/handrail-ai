@@ -1,6 +1,6 @@
 {
   "name": "@handrail/ai",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Provider-neutral TypeScript primitives and runtime tooling for building AI applications with Handrail.",
   "license": "UNLICENSED",
   "type": "module",
@@ -22,10 +22,20 @@
       "import": "./dist/react/index.js",
       "default": "./dist/react/index.js"
     },
+    "./server/managed": {
+      "types": "./dist/server/managed.d.ts",
+      "import": "./dist/server/managed.js",
+      "default": "./dist/server/managed.js"
+    },
     "./providers/openai": {
       "types": "./dist/providers/openai.d.ts",
       "import": "./dist/providers/openai.js",
       "default": "./dist/providers/openai.js"
+    },
+    "./providers/anthropic": {
+      "types": "./dist/providers/anthropic.d.ts",
+      "import": "./dist/providers/anthropic.js",
+      "default": "./dist/providers/anthropic.js"
     }
   },
   "files": [

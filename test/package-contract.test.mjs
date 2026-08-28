@@ -22,6 +22,14 @@ test("declares the React subpath as an optional peer boundary", () => {
   assert.equal(packageJson.sideEffects, false);
 });
 
+test("declares managed runtime support as an explicit trusted-server boundary", () => {
+  assert.deepEqual(packageJson.exports["./server/managed"], {
+    types: "./dist/server/managed.d.ts",
+    import: "./dist/server/managed.js",
+    default: "./dist/server/managed.js",
+  });
+});
+
 test("declares OpenAI as an explicit opt-in provider boundary", () => {
   assert.deepEqual(packageJson.exports["./providers/openai"], {
     types: "./dist/providers/openai.d.ts",
@@ -29,6 +37,15 @@ test("declares OpenAI as an explicit opt-in provider boundary", () => {
     default: "./dist/providers/openai.js",
   });
   assert.equal(packageJson.dependencies.openai, undefined);
+});
+
+test("declares Anthropic as an explicit opt-in provider boundary", () => {
+  assert.deepEqual(packageJson.exports["./providers/anthropic"], {
+    types: "./dist/providers/anthropic.d.ts",
+    import: "./dist/providers/anthropic.js",
+    default: "./dist/providers/anthropic.js",
+  });
+  assert.equal(packageJson.dependencies["@anthropic-ai/sdk"], undefined);
 });
 
 test("resolves every public ESM export from the built package", async () => {
@@ -82,8 +99,12 @@ test("dry pack contains only intended package assets", () => {
     "dist/browser/index.d.ts",
     "dist/react/index.js",
     "dist/react/index.d.ts",
+    "dist/server/managed.js",
+    "dist/server/managed.d.ts",
     "dist/providers/openai.js",
     "dist/providers/openai.d.ts",
+    "dist/providers/anthropic.js",
+    "dist/providers/anthropic.d.ts",
   ]) {
     assert.ok(packedFiles.has(expected), `missing packed file ${expected}`);
   }

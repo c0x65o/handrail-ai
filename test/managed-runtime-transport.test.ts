@@ -1,0 +1,558 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  AI_RUNTIME_PROTOCOL_VERSION,
+  type AuthoritativeAttribution,
+  type ChatRequest,
+  type StreamEvent,
+} from "../src/protocol.js";
+import * as browserEntry from "../src/browser/index.js";
+import * as coreEntry from "../src/index.js";
+import {
+  createManagedRuntimeTransport,
+  type ManagedRuntimeFetch,
+} from "../src/server/managed.js";
+
+const encoder = new TextEncoder();
+
+const attribution: AuthoritativeAttribution = {
+  organization: { id: "org_managed", source: "server_derived", trust: "authoritative" },
+  project: { id: "project_managed", source: "server_derived", trust: "authoritative" },
+  service_environment: {
+    id: "env_managed",
+    source: "server_derived",
+    trust: "authoritative",
+  },
+  known_user: { id: "user_managed", source: "server_derived", trust: "authoritative" },
+  session: { id: "session_managed", source: "server_derived", trust: "authoritative" },
+  automation: { id: null, source: "server_derived", trust: "authoritative" },
+};
+
+const request: ChatRequest = {
+  protocol_version: AI_RUNTIME_PROTOCOL_VERSION,
+  continuation_of: null,
+  messages: [{ role: "user", content: [{ type: "text", text: "Hello" }] }],
+  tools: [
+    {
+      name: "lookup_weather",
+      description: "Look up weather",
+      input_schema: { type: "object", properties: { city: { type: "string" } } },
+    },
+  ],
+  tool_results: [],
+  generation: { max_output_tokens: 64, temperature: 0.2 },
+  correlation_hints: {},
+};
+
+function envelope(type: StreamEvent["type"], sequence: number) {
+  return {
+    type,
+    protocol_version: AI_RUNTIME_PROTOCOL_VERSION,
+    request_id: "req_managed",
+    trace_id: "trace_managed",
+    sequence,
+  } as const;
+}
+
+const started: StreamEvent = {
+  ...envelope("response.started", 0),
+  type: "response.started",
+  attribution,
+};
+
+const completed: StreamEvent = {
+  ...envelope("response.completed", 1),
+  type: "response.completed",
+  outcome: "stop",
+};
+
+function sseFrame(
+  event: unknown,
+  options: { eventName?: string; id?: string; newline?: "\n" | "\r\n"; multiline?: boolean } = {},
+): string {
+  const value = event as { type: string; request_id: string; sequence: number };
+  const newline = options.newline ?? "\n";
+  const json = options.multiline
+    ? JSON.stringify(event, null, 2)
+        .split("\n")
+        .map((line) => `data: ${line}`)
+        .join(newline)
+    : `data: ${JSON.stringify(event)}`;
+  return [
+    `event: ${options.eventName ?? value.type}`,
+    `id: ${options.id ?? `${value.request_id}:${value.sequence}`}`,
+    json,
+    "",
+    "",
+  ].join(newline);
+}
+
+function bytesStream(
+  chunks: readonly Uint8Array[],
+  options: { failAfter?: boolean; stayOpen?: boolean } = {},
+): ReadableStream<Uint8Array> {
+  let index = 0;
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (index < chunks.length) {
+        controller.enqueue(chunks[index]!);
+        index += 1;
+        return;
+      }
+      if (options.failAfter) {
+        controller.error(new Error("private network diagnostic"));
+      } else if (!options.stayOpen) {
+        controller.close();
+      }
+    },
+  });
+}
+
+function streamResponse(
+  source: string | readonly Uint8Array[],
+  options: { failAfter?: boolean; stayOpen?: boolean } = {},
+): Response {
+  const chunks = typeof source === "string" ? [encoder.encode(source)] : source;
+  return new Response(bytesStream(chunks, options), {
+    status: 200,
+    headers: { "content-type": "text/event-stream; charset=utf-8" },
+  });
+}
+
+function problemResponse(status: number, code: string): Response {
+  return new Response(
+    JSON.stringify({
+      type: `https://docs.handrail.dev/ai-runtime/errors/${code}`,
+      title: "Safe title",
+      status,
+      category: "request",
+      code,
+      message: "Safe message",
+      request_id: "req_problem",
+      trace_id: "trace_problem",
+      retryable: status === 429 || status >= 500,
+    }),
+    { status, headers: { "content-type": "application/problem+json" } },
+  );
+}
+
+function transportFor(fetch: ManagedRuntimeFetch, timeoutMs = 2_000) {
+  return createManagedRuntimeTransport({
+    baseUrl: "https://runtime.example.test/base/path",
+    getHeaders: async () => ({ authorization: "Bearer managed-secret-token" }),
+    fetch,
+    timeoutMs,
+    createUsageReceiptIdentity: () => ({
+      usage_receipt_id: "usage_managed",
+      logical_request_id: "logical_managed",
+      attempt: { id: "attempt_managed", index: 0 },
+      continuation: { id: "continuation_managed", index: 0 },
+      provider_id: "handrail-runtime",
+      model_id: "runtime-selected-v1",
+    }),
+  });
+}
+
+async function startTurn(transport: ReturnType<typeof transportFor>) {
+  return transport.startTurn({
+    conversationId: "conversation_managed",
+    mutationId: "mutation_managed",
+    idempotencyKey: "managed.key-1",
+    request,
+  });
+}
+
+async function collect(events: AsyncIterable<StreamEvent>): Promise<StreamEvent[]> {
+  const output: StreamEvent[] = [];
+  for await (const event of events) output.push(event);
+  return output;
+}
+
+describe("ManagedRuntimeTransport", () => {
+  it("is available only from the explicit trusted-server entry", () => {
+    expect("createManagedRuntimeTransport" in coreEntry).toBe(false);
+    expect("ManagedRuntimeTransport" in coreEntry).toBe(false);
+    expect("createManagedRuntimeTransport" in browserEntry).toBe(false);
+    expect("ManagedRuntimeTransport" in browserEntry).toBe(false);
+  });
+
+  it("parses split UTF-8, CRLF, comments, multiline data, and multiple frames per chunk", async () => {
+    const events: StreamEvent[] = [
+      started,
+      {
+        ...envelope("response.text.delta", 1),
+        type: "response.text.delta",
+        delta: "Hello 🌍",
+      },
+      {
+        ...envelope("response.tool_call", 2),
+        type: "response.tool_call",
+        tool_call_id: "call_weather",
+        name: "lookup_weather",
+        arguments: { city: "Chicago" },
+      },
+      {
+        ...envelope("response.usage", 3),
+        type: "response.usage",
+        usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
+      },
+      {
+        ...envelope("response.usage", 4),
+        type: "response.usage",
+        usage: { input_tokens: 10, output_tokens: 4, total_tokens: 14 },
+      },
+      {
+        ...envelope("response.completed", 5),
+        type: "response.completed",
+        outcome: "tool_calls",
+      },
+    ];
+    const wire =
+      ": initial keepalive\r\n\r\n" +
+      events
+        .map((event, index) =>
+          sseFrame(event, { newline: "\r\n", multiline: index === 0 || index === 3 }),
+        )
+        .join(": between frames\r\n\r\n");
+    const bytes = encoder.encode(wire);
+    const globeStart = wire.indexOf("🌍");
+    const globeByte = encoder.encode(wire.slice(0, globeStart)).byteLength;
+    const chunks = [
+      bytes.slice(0, 7),
+      bytes.slice(7, globeByte + 1),
+      bytes.slice(globeByte + 1, globeByte + 3),
+      bytes.slice(globeByte + 3),
+    ];
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const transport = transportFor(async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return streamResponse(chunks);
+    });
+
+    const result = await startTurn(transport);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.turnId).toBe("req_managed");
+    expect(result.value.attribution).toEqual(attribution);
+    expect(await collect(result.value.observation.events)).toEqual(events);
+    expect(await result.value.observation.result).toMatchObject({
+      status: "completed",
+      usage: { input_tokens: 10, output_tokens: 4, total_tokens: 14 },
+      usageReceipt: {
+        source: "runtime",
+        terminal_status: "completed",
+        provider_cost: { status: "unavailable" },
+        tokens: {
+          input_tokens: { status: "reported", value: 10 },
+          cached_input_tokens: { status: "unavailable" },
+          output_tokens: { status: "reported", value: 4 },
+          reasoning_tokens: { status: "unavailable" },
+          total_tokens: { status: "reported", value: 14 },
+        },
+      },
+    });
+    expect(calls[0]?.url).toBe(
+      "https://runtime.example.test/api/ai-runtime/v1/chat",
+    );
+    expect(new Headers(calls[0]?.init.headers).get("accept")).toBe("text/event-stream");
+    expect(new Headers(calls[0]?.init.headers).get("content-type")).toBe(
+      "application/json",
+    );
+    expect(new Headers(calls[0]?.init.headers).get("idempotency-key")).toBe(
+      "managed.key-1",
+    );
+  });
+
+  it.each([
+    {
+      terminal: {
+        ...envelope("response.cancelled", 1),
+        type: "response.cancelled" as const,
+        reason: "policy_revoked" as const,
+      },
+      status: "cancelled",
+    },
+    {
+      terminal: {
+        ...envelope("response.error", 1),
+        type: "response.error" as const,
+        error: {
+          category: "upstream" as const,
+          code: "upstream_unavailable" as const,
+          message: "The AI service is temporarily unavailable.",
+          retryable: true,
+        },
+      },
+      status: "failed",
+    },
+  ])("handles the $terminal.type terminal event", async ({ terminal, status }) => {
+    const transport = transportFor(async () =>
+      streamResponse(sseFrame(started) + sseFrame(terminal)),
+    );
+    const result = await startTurn(transport);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect((await collect(result.value.observation.events)).at(-1)).toEqual(terminal);
+    expect((await result.value.observation.result).status).toBe(status);
+  });
+
+  it.each([
+    ["missing SSE id", "event: response.completed\ndata: {}\n\n"],
+    ["malformed JSON", "event: response.completed\nid: req_managed:1\ndata: {\n\n"],
+    ["event/type mismatch", sseFrame(completed, { eventName: "response.cancelled" })],
+    ["event/id mismatch", sseFrame(completed, { id: "req_managed:99" })],
+    [
+      "sequence gap",
+      sseFrame({ ...completed, sequence: 2 }, { id: "req_managed:2" }),
+    ],
+    [
+      "sequence duplicate",
+      sseFrame({ ...completed, sequence: 0 }, { id: "req_managed:0" }),
+    ],
+    ["duplicate started", sseFrame(started)],
+    [
+      "decreasing usage",
+      sseFrame({
+        ...envelope("response.usage", 1),
+        type: "response.usage",
+        usage: { input_tokens: 5, output_tokens: 5, total_tokens: 10 },
+      }) +
+        sseFrame({
+          ...envelope("response.usage", 2),
+          type: "response.usage",
+          usage: { input_tokens: 4, output_tokens: 5, total_tokens: 9 },
+        }),
+    ],
+    ["event after terminal", sseFrame(completed) + sseFrame({ ...completed, sequence: 2 })],
+  ])("fails safely for %s", async (_name, invalidTail) => {
+    const transport = transportFor(async () =>
+      streamResponse(sseFrame(started) + invalidTail),
+    );
+    const result = await startTurn(transport);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    await collect(result.value.observation.events);
+    expect(await result.value.observation.result).toMatchObject({
+      status: "failed",
+      error: { code: "internal_error", retryable: false },
+      usageReceipt: null,
+    });
+  });
+
+  it("rejects a missing response.started before exposing a turn", async () => {
+    const transport = transportFor(async () => streamResponse(sseFrame(completed)));
+    await expect(startTurn(transport)).resolves.toMatchObject({
+      ok: false,
+      error: { code: "internal_error" },
+    });
+  });
+
+  it("settles abrupt EOF without a terminal event as disconnected", async () => {
+    const transport = transportFor(async () => streamResponse(sseFrame(started)));
+    const result = await startTurn(transport);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(await collect(result.value.observation.events)).toEqual([started]);
+    expect(await result.value.observation.result).toMatchObject({
+      status: "disconnected",
+      usageReceipt: null,
+    });
+  });
+
+  it("maps bounded valid problem responses without returning their bodies", async () => {
+    const cases = [
+      [409, "idempotency_conflict", "conflict"],
+      [401, "unauthenticated", "unauthenticated"],
+      [403, "forbidden", "forbidden"],
+      [429, "rate_limited", "rate_limited"],
+      [503, "upstream_unavailable", "unavailable"],
+    ] as const;
+    for (const [status, problemCode, transportCode] of cases) {
+      const transport = transportFor(async () => problemResponse(status, problemCode));
+      const result = await startTurn(transport);
+      expect(result).toMatchObject({ ok: false, error: { code: transportCode } });
+      expect(JSON.stringify(result)).not.toContain("Safe message");
+    }
+  });
+
+  it("rejects malformed or unbounded problem responses safely", async () => {
+    for (const response of [
+      new Response("not json", {
+        status: 400,
+        headers: { "content-type": "application/problem+json" },
+      }),
+      new Response("x".repeat(65_537), {
+        status: 400,
+        headers: { "content-type": "application/problem+json" },
+      }),
+      new Response("{}", { status: 400, headers: { "content-type": "text/plain" } }),
+    ]) {
+      const transport = transportFor(async () => response);
+      await expect(startTurn(transport)).resolves.toMatchObject({
+        ok: false,
+        error: { code: "internal_error" },
+      });
+    }
+  });
+
+  it("times out bounded request setup and maps a broken stream as unavailable", async () => {
+    const timeoutTransport = transportFor(
+      () => new Promise<Response>(() => undefined),
+      100,
+    );
+    await expect(startTurn(timeoutTransport)).resolves.toMatchObject({
+      ok: false,
+      error: { code: "timeout", retryable: true },
+    });
+
+    const brokenTransport = transportFor(async () =>
+      streamResponse(sseFrame(started), { failAfter: true }),
+    );
+    const result = await startTurn(brokenTransport);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    await collect(result.value.observation.events);
+    expect(await result.value.observation.result).toMatchObject({
+      status: "failed",
+      error: { code: "unavailable", retryable: true },
+    });
+  });
+
+  it("disconnects only the local observation and advertises unsupported capabilities", async () => {
+    let signal: AbortSignal | undefined;
+    const transport = transportFor(async (_url, init) => {
+      signal = init?.signal ?? undefined;
+      return streamResponse(sseFrame(started), { stayOpen: true });
+    });
+    const result = await startTurn(transport);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const iterator = result.value.observation.events[Symbol.asyncIterator]();
+    expect((await iterator.next()).value).toEqual(started);
+    result.value.observation.disconnect();
+    expect(await result.value.observation.result).toMatchObject({
+      status: "disconnected",
+    });
+    expect(signal?.aborted).toBe(true);
+    expect(transport.capabilities).toEqual({
+      authoritativeCancellation: { supported: false },
+      attachmentUpload: { supported: false },
+      presence: { supported: false },
+      synchronization: { supported: false },
+    });
+  });
+
+  it("never emits or returns supplied token and header material", async () => {
+    const token = "Bearer managed-secret-token";
+    const leaked = {
+      ...envelope("response.error", 1),
+      type: "response.error" as const,
+      error: {
+        category: "internal" as const,
+        code: "internal_error" as const,
+        message: token,
+        retryable: false,
+      },
+    };
+    const transport = transportFor(async () =>
+      streamResponse(sseFrame(started) + sseFrame(leaked)),
+    );
+    const result = await startTurn(transport);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const events = await collect(result.value.observation.events);
+    const observationResult = await result.value.observation.result;
+    expect(events).toEqual([started]);
+    expect(JSON.stringify({ events, observationResult })).not.toContain(token);
+    expect(observationResult).toMatchObject({
+      status: "failed",
+      error: { code: "internal_error" },
+    });
+  });
+
+  it("replays the byte-identical snapshot and key while suppressing applied frames", async () => {
+    const replayEvents: StreamEvent[] = [
+      started,
+      {
+        ...envelope("response.text.delta", 1),
+        type: "response.text.delta",
+        delta: "persisted",
+      },
+      {
+        ...envelope("response.usage", 2),
+        type: "response.usage",
+        usage: { input_tokens: 4, output_tokens: 1, total_tokens: 5 },
+      },
+      {
+        ...envelope("response.completed", 3),
+        type: "response.completed",
+        outcome: "stop",
+      },
+    ];
+    const calls: RequestInit[] = [];
+    const transport = transportFor(async (_url, init = {}) => {
+      calls.push(init);
+      return streamResponse(replayEvents.map((event) => sseFrame(event)).join(""));
+    });
+    const first = await startTurn(transport);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    await collect(first.value.observation.events);
+    await first.value.observation.result;
+
+    const resumed = await transport.resumeTurn({
+      conversationId: first.value.conversationId,
+      turnId: first.value.turnId,
+      resumeFrom: {
+        lastAppliedEventId: "req_managed:1",
+        lastAppliedCursor: "req_managed:1",
+        lastAppliedRevision: 1,
+      },
+    });
+    expect(resumed.ok).toBe(true);
+    if (!resumed.ok) return;
+    expect((await collect(resumed.value.events)).map((event) => event.sequence)).toEqual([
+      2, 3,
+    ]);
+    expect((await resumed.value.result).status).toBe("completed");
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.body).toBe(calls[1]?.body);
+    expect(typeof calls[0]?.body).toBe("string");
+    expect(new Headers(calls[0]?.headers).get("idempotency-key")).toBe(
+      new Headers(calls[1]?.headers).get("idempotency-key"),
+    );
+  });
+
+  it("validates requests, idempotency keys, and resume checkpoints before POST", async () => {
+    let calls = 0;
+    const transport = transportFor(async () => {
+      calls += 1;
+      return streamResponse(sseFrame(started) + sseFrame(completed));
+    });
+    const invalidKey = await transport.startTurn({
+      conversationId: "conversation_managed",
+      mutationId: "mutation_managed",
+      idempotencyKey: "contains a space",
+      request,
+    });
+    expect(invalidKey).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    expect(calls).toBe(0);
+
+    const first = await startTurn(transport);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    await collect(first.value.observation.events);
+    await first.value.observation.result;
+    const resumed = await transport.resumeTurn({
+      conversationId: first.value.conversationId,
+      turnId: first.value.turnId,
+      resumeFrom: {
+        lastAppliedEventId: "other_turn:0",
+        lastAppliedCursor: "req_managed:0",
+        lastAppliedRevision: 0,
+      },
+    });
+    expect(resumed).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    expect(calls).toBe(1);
+  });
+});

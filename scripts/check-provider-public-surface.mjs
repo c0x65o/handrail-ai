@@ -23,6 +23,8 @@ assert(files.length > 0, "build declarations before checking the public surface"
 const runtimeNeutralFiles = files.filter(
   (path) =>
     !/[\\/]react[\\/]/u.test(path) &&
+    !/[\\/]server[\\/]/u.test(path) &&
+    !/[\\/]transports[\\/](?:managed-runtime|sse)\.d\.ts$/u.test(path) &&
     !/[\\/]providers[\\/](?!index\.d\.ts$)[^\\/]+\.d\.ts$/u.test(path),
 );
 const runtimeNeutralDeclarations = runtimeNeutralFiles
@@ -31,6 +33,14 @@ const runtimeNeutralDeclarations = runtimeNeutralFiles
 const packageEntry = readFileSync(join(distDirectory, "index.d.ts"), "utf8");
 const openAIEntry = readFileSync(
   join(distDirectory, "providers", "openai.d.ts"),
+  "utf8",
+);
+const anthropicEntry = readFileSync(
+  join(distDirectory, "providers", "anthropic.d.ts"),
+  "utf8",
+);
+const managedEntry = readFileSync(
+  join(distDirectory, "server", "managed.d.ts"),
   "utf8",
 );
 
@@ -49,13 +59,24 @@ assert.match(
   /export declare (?:class OpenAIProviderAdapter|function createOpenAIProviderAdapter)/,
   "the opt-in OpenAI entry must export its provider adapter",
 );
+assert.match(
+  anthropicEntry,
+  /export declare (?:class AnthropicProviderAdapter|function createAnthropicProviderAdapter)/,
+  "the opt-in Anthropic entry must export its provider adapter",
+);
+assert.match(
+  managedEntry,
+  /export \* from ["']\.\.\/transports\/managed-runtime\.js["'];/,
+  "the trusted-server managed entry must export ManagedRuntimeTransport",
+);
 assert.doesNotMatch(
   packageEntry,
-  /providers\/openai/,
-  "the core package entry must not export the OpenAI adapter",
+  /providers\/(?:openai|anthropic)/,
+  "the core package entry must not export concrete provider adapters",
 );
 
-const declarationsCheckedForSdkImports = `${runtimeNeutralDeclarations}\n${openAIEntry}`;
+const declarationsCheckedForSdkImports =
+  `${runtimeNeutralDeclarations}\n${openAIEntry}\n${anthropicEntry}\n${managedEntry}`;
 const externalImports = [
   ...declarationsCheckedForSdkImports.matchAll(/from ["']([^"']+)["']/g),
 ]
@@ -95,5 +116,5 @@ for (const marker of forbiddenMarkers) {
 }
 
 stdout.write(
-  `checked ${runtimeNeutralFiles.length} neutral and ${files.length - runtimeNeutralFiles.length} opt-in provider declaration files\n`,
+  `checked ${runtimeNeutralFiles.length} neutral and ${files.length - runtimeNeutralFiles.length} opt-in declaration files\n`,
 );
