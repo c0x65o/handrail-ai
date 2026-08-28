@@ -1,64 +1,226 @@
 # @handrail/ai
 
-Provider-neutral TypeScript primitives and runtime tooling for building AI
-applications with Handrail.
+`@handrail/ai` is a headless-first TypeScript SDK for provider-neutral chat
+state, durable event replay, streaming transports, bounded application tools,
+image attachment references, retries and cancellation, and normalized usage
+output. UI is optional: the core runtime has no React or styling dependency.
 
-This package is currently scaffolded for development. Its public protocol,
-provider adapter, managed client, and tool-loop APIs will be added separately.
+Node.js 20 or newer is required for package tooling and trusted-server use.
 
-## Normalized usage receipts
+## Supported entry points
 
-`NormalizedUsageReceipt` is a browser-safe telemetry and authoritative
-attribution output contract. A receipt identifies one provider invocation while
-retaining the conversation, turn, logical request, retry attempt, and tool
-continuation identities needed for safe deduplication. Token quantities and
-exact base-10 provider costs explicitly distinguish reported, estimated, and
-unavailable values; a known zero is never represented as unknown.
+| Import | Purpose | Runtime boundary |
+| --- | --- | --- |
+| `@handrail/ai` | Protocol, conversation runtime/store, event-store and sync contracts, direct transport, tools, presence, retry, and usage APIs | Runtime-neutral core; direct-provider construction is trusted-server only |
+| `@handrail/ai/browser` | IndexedDB event store and browser image intake/upload helpers | Browser only |
+| `@handrail/ai/react` | Optional unstyled React bindings and accessible composable primitives | Browser/React; React is an optional peer |
+| `@handrail/ai/server/managed` | Optional Handrail AI Runtime v1 streaming transport | Trusted server only |
+| `@handrail/ai/providers/openai` | OpenAI provider adapter | Trusted server only |
+| `@handrail/ai/providers/anthropic` | Anthropic provider adapter | Trusted server only |
+| `@handrail/ai/providers/gemini` | Gemini provider adapter | Trusted server only |
+| `@handrail/ai/providers/xai` | xAI provider adapter | Trusted server only |
 
-Receipts do not price or settle usage. Pricing, ledgers, credits, billing
-mutation, metering settlement, databases, Handrail control-plane calls, and
-production-runtime changes are reserved for a later convergence loop.
+The provider subpaths accept application-injected request functions rather than
+installing provider SDKs. This keeps the application in control of provider SDK
+versions, server configuration, and credential resolution.
 
-## Image attachment references
+## Headless quickstart
 
-Chat messages may mix text with provider-neutral image references:
+Supply a `ConversationTransport` and a `ConversationEventStore`, then create one
+runtime per conversation. `createConversationRuntime` hydrates its store by
+replaying durable history before it resolves; it does not start a network
+observation. The process-local store below is suitable for examples and tests.
+Use an application-owned durable adapter in production (or
+`IndexedDBConversationEventStore` from `@handrail/ai/browser` for local browser
+persistence).
 
 ```ts
-const message = {
-  role: "user",
-  content: [
-    { type: "text", text: "What is shown here?" },
-    {
-      type: "image",
-      attachment: {
-        attachment_id: "att_01K3QW8KJQH9T0A7N4R2M6P5XC",
-        content_ref: "ref_upload_01K3QW8Q2Q4JE8H5J3RB9SNMVA",
-        media_type: "image/png",
-        byte_size: 248_123,
-        filename: "photo.png",
-      },
-      alt_text: "A parcel beside the front door",
-    },
-  ],
-};
+import {
+  InMemoryConversationEventStore,
+  createConversationRuntime,
+  type ConversationClientId,
+  type ConversationId,
+  type ConversationState,
+  type ConversationTransport,
+} from "@handrail/ai";
+
+declare const transport: ConversationTransport<unknown, AppRequest>;
+declare const request: AppRequest;
+declare function render(state: ConversationState): void;
+declare function showCount(count: number): void;
+interface AppRequest { readonly prompt: string }
+
+const runtime = await createConversationRuntime({
+  conversationId: "conversation-42" as ConversationId,
+  clientId: "web-7" as ConversationClientId,
+  eventStore: new InMemoryConversationEventStore(),
+  transport,
+});
+
+const unobserve = runtime.observe((state) => render(state));
+const unselect = runtime.store.select(
+  (state) => state.messages.length,
+  (messageCount) => showCount(messageCount),
+);
+
+try {
+  await runtime.restoreActiveTurn();
+  await runtime.sendMessage({ content: "Hello", request });
+} finally {
+  unselect();
+  unobserve();
+  runtime.destroy();
+}
 ```
 
-`content_ref` is an opaque identifier matching the exported
-`AI_RUNTIME_CONTENT_REFERENCE_GRAMMAR`; it is not a URL or embedded image. A
-trusted host or transport resolves it before constructing provider-native
-input. The durable protocol never carries binary data, browser file objects,
-signed URLs, provider SDK blocks, or secrets. Supported MIME types and all
-image byte/count limits are exported alongside the protocol.
+The complete credential-free example at
+[`examples/headless-runtime.ts`](./examples/headless-runtime.ts) is checked
+against the built package declarations. It also demonstrates:
 
-## Requirements
+- an injected fake streaming transport and event store;
+- automatic hydration, `restoreActiveTurn`, and explicit `resumeTurn`;
+- `observe`, `getSnapshot`, and selector subscriptions;
+- text plus an opaque image attachment reference;
+- `ToolRegistry`, `BoundedToolExecutor`, and `runToolLoop` with explicit limits,
+  application policy, and an idempotent execution ledger;
+- `stopObserving` versus authoritative `cancelTurn`;
+- cleanup and deduplicated `NormalizedUsageReceipt` consumption.
 
-- Node.js 20 or newer
+`sendMessage` durably records the local message and attachment facts, while its
+`request` is the provider-neutral transport input. The checked example keeps
+the protocol image's `content_ref` opaque and records only attachment metadata
+in conversation history.
+
+## Direct/BYOK and managed operation
+
+Both credential modes belong on an application-owned trusted server. Browser
+and mobile code must call that application server. Never put provider
+credentials, managed tokens, or authorization headers in client code, public
+configuration, logs, telemetry, source control, or client-visible responses.
+
+### Direct/BYOK on a trusted server
+
+Create one of the four provider adapters on the trusted server, then inject it
+into `createDirectProviderTransport`. The host supplies authoritative request,
+trace, tenant attribution, and usage-attempt identities. It also resolves
+opaque attachment references before provider-native input is constructed.
+
+The checked
+[`examples/trusted-server-transports.ts`](./examples/trusted-server-transports.ts)
+accepts a `ProviderAdapter` from the host and builds the direct transport
+without a live provider call or credential literal. Provider-specific adapter
+factories are available from the four `@handrail/ai/providers/*` entry points
+listed above.
+
+The direct transport supports authoritative cancellation for active turns in
+the current server process. It deliberately has no provider replay store, so a
+host requiring reconnect or cross-process resume must supply that durable
+server boundary rather than treating local disconnection as provider
+cancellation.
+
+### Optional managed runtime on a trusted server
+
+`createManagedRuntimeTransport` from `@handrail/ai/server/managed` calls the
+public Handrail AI Runtime v1 endpoint. Its `fetch` and per-request `getHeaders`
+dependencies must be injected by trusted-server infrastructure so rotation and
+authorization policy stay outside browser/mobile bundles. The checked trusted
+server example accepts both dependencies instead of embedding either.
+
+The current managed transport keeps resume snapshots in process and negotiates
+authoritative cancellation, attachment upload, presence, and synchronization
+as unsupported. Applications must inspect `transport.capabilities` and provide
+host adapters where required; unsupported capabilities must not be inferred
+from method names or UI state.
+
+## Lifecycle and consistency contracts
+
+### Durable history and multi-device synchronization
+
+Conversation events are durable, ordered facts. A `ConversationEventStore`
+must atomically append contiguous revisions, reject conflicting writes, and
+return the original fact for an identical retry. Checkpoints compact replay;
+they do not replace the canonical event log. The reference in-memory adapter is
+not durable.
+
+Multi-device persistence and delivery remain host responsibilities. Implement
+`ConversationEventStore` against application storage and, when devices need to
+converge, provide a `ConversationSyncAdapter` to exchange canonical event
+envelopes. Retry with stable event IDs, client mutation IDs, idempotency keys,
+and logical request/attempt identities. Replayed or redelivered facts must be
+idempotent; never retry a side effect under a fresh identity merely because a
+connection ended.
+
+Presence and typing are ephemeral signals. They are intentionally outside the
+durable log and may expire, coalesce, or disappear across disconnects. Do not
+reconstruct authoritative messages or turn state from presence records.
+
+### Disconnect, resume, retry, and cancellation
+
+- `stopObserving(turnId)` interrupts only this runtime's local stream
+  observation. Durable history is unchanged and the remote turn may continue.
+- `resumeTurn(turnId)` reconnects from the latest durable checkpoint when the
+  transport can replay that turn. `restoreActiveTurn()` finds the durable
+  nonterminal turn after hydration and attempts the same recovery.
+- Runtime retries are bounded and reuse the original idempotency identity.
+  Transports and servers must make duplicate start/resume operations safe.
+- `cancelTurn(turnId, reason)` requests authoritative cancellation only when
+  the negotiated capability supports it. Check its structured result:
+  `unsupported` and `failed` both mean the remote operation may still run.
+- `destroy()` disconnects observations, releases subscriptions, and makes the
+  runtime unusable. It is cleanup, not an authoritative remote cancellation.
+
+### Attachments
+
+An image `content_ref` is an opaque identifier matching
+`AI_RUNTIME_CONTENT_REFERENCE_GRAMMAR`; it is neither a URL nor image bytes.
+The durable conversation log stores safe attachment metadata, not binary data,
+browser `File` objects, signed URLs, provider-native blocks, or secrets. A host
+owns intake, upload, authorization, retention, and resolution to provider input.
+The browser entry point supplies intake/upload helpers, but support is usable
+only when a negotiated transport or application adapter supplies the matching
+capability. MIME, byte, and count limits are exported with the protocol.
+
+### Tools
+
+Tool discovery does not authorize execution. `ToolRegistry` exposes only
+definitions selected for the current context; `BoundedToolExecutor` separately
+applies schema validation, application policy, time/concurrency/result limits,
+and a `ToolExecutionLedger`. Production ledgers must make a repeated tool-call
+ID return the first execution promise/result. `runToolLoop` adds bounded
+continuations and records public lifecycle evidence, but the application still
+owns tool side effects and external approval.
+
+### Normalized usage outputs
+
+`NormalizedUsageReceipt` represents one provider invocation and preserves the
+conversation, turn, logical request, retry attempt, and tool-continuation
+identities needed for deduplication. Deduplicate by `usage_receipt_id`. Token
+and exact base-10 cost fields distinguish `reported`, `estimated`, and
+`unavailable`; a known zero is not unknown, and cost strings must not be
+converted to floating point.
+
+Receipts are telemetry and attribution outputs, not settlement. Pricing,
+metering settlement, credits, billing, ledgers, databases, and Handrail
+control-plane policy remain owned by a later Handrail convergence loop and are
+not implemented as authoritative behavior in this package.
+
+## Host-supplied boundaries
+
+The SDK intentionally does not supply an application database, cross-device
+event service, production tool ledger, file/object storage, attachment access
+policy, provider credential store, managed-token issuer, pricing catalog,
+billing system, or Handrail control-plane client. React presentation is
+optional and unstyled. MCP tools may be adapted through a separately versioned
+connector; this package does not absorb ownership of that connector.
 
 ## Development
 
 ```sh
 npm install
 npm run build
+npm run check:examples
+npm run check:package-contract
+npm run check:vite-consumer
 npm run typecheck
 npm test
 npm run lint

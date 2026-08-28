@@ -146,11 +146,11 @@ export interface ConversationRuntime<TRequest> {
     input: ConversationRuntimeSendMessageInput<TRequest>,
   ): Promise<ConversationRuntimeTurnResult>;
   /** Starts a message-free protocol continuation while retaining logical input messages. */
-  continueTurn(
+  continueTurn?(
     input: ConversationRuntimeContinueTurnInput<TRequest>,
   ): Promise<ConversationRuntimeTurnResult>;
   /** Atomically persists public tool-loop lifecycle evidence. */
-  recordToolLoopEvents(events: readonly ConversationRuntimeToolLoopEvent[]): Promise<void>;
+  recordToolLoopEvents?(events: readonly ConversationRuntimeToolLoopEvent[]): Promise<void>;
   resumeTurn(turnId: ConversationTurnId): Promise<ConversationRuntimeTurnResult>;
   /** Interrupt only this runtime's current observation; durable history is unchanged. */
   stopObserving(turnId: ConversationTurnId): boolean;
@@ -745,6 +745,21 @@ export async function createConversationRuntime<TRequest>(
     input: ConversationRuntimeContinueTurnInput<TRequest>,
   ): Promise<ConversationRuntimeTurnResult> => {
     assertUsable();
+    const existing = store.getSnapshot().turns.find(
+      (turn) => turn.continuation_of_turn_id === input.precedingTurnId,
+    );
+    if (existing !== undefined) {
+      if (!isTerminalTurnStatus(existing.status)) return resumeTurn(existing.turn_id);
+      return result(
+        existing.turn_id,
+        existing.status === "completed"
+          ? "completed"
+          : existing.status === "cancelled"
+            ? "cancelled"
+            : "failed",
+        existing.error === null ? undefined : existing.error,
+      );
+    }
     if (store.getSnapshot().active_turn_id !== null) {
       throw new ConversationRuntimeBusyError();
     }
@@ -766,12 +781,13 @@ export async function createConversationRuntime<TRequest>(
     const idempotencyKey = createId("idempotency");
     await persist([{
       actor: { type: "assistant" },
-      source: runtimeSource(),
+      source: clientSource(),
       mutationId,
       payload: {
         type: "turn.started",
         turn_id: turnId,
         input_message_ids: [...preceding.input_message_ids],
+        continuation_of_turn_id: input.precedingTurnId,
       },
     }]);
     return startPersistedTurn(turnId, mutationId, idempotencyKey, input.request);

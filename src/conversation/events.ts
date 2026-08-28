@@ -154,6 +154,7 @@ export interface TurnStartedPayload {
   type: "turn.started";
   turn_id: ConversationTurnId;
   input_message_ids: ConversationMessageId[];
+  continuation_of_turn_id?: ConversationTurnId;
 }
 
 export type ConversationTurnStatus =
@@ -954,9 +955,16 @@ function validatePayload(
       return;
     case "turn.started":
       requiredKeys(object, ["turn_id", "input_message_ids"], path);
-      allowedKeys(object, ["type", "turn_id", "input_message_ids"], path);
+      allowedKeys(
+        object,
+        ["type", "turn_id", "input_message_ids", "continuation_of_turn_id"],
+        path,
+      );
       identifier(object.turn_id, `${path}.turn_id`);
       identifierArray(object.input_message_ids, `${path}.input_message_ids`);
+      if (Object.hasOwn(object, "continuation_of_turn_id")) {
+        identifier(object.continuation_of_turn_id, `${path}.continuation_of_turn_id`);
+      }
       return;
     case "turn.status_changed":
       requiredKeys(object, ["turn_id", "status"], path);

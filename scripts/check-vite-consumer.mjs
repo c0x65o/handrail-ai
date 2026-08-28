@@ -53,6 +53,23 @@ if (!bundledCode.includes("reactSubpathElement")) {
   throw new Error("Vite consumer bundle did not retain the React subpath consumer");
 }
 
+for (const recipe of [
+  "ChatDialogRecipe",
+  "ChatTabsRecipe",
+  "ChatDrawerRecipe",
+  "ChatLauncherRecipe",
+  "FullPageChatRecipe",
+  "CustomHooksChatRecipe",
+]) {
+  if (!bundledCode.includes(recipe)) {
+    throw new Error(`Vite consumer bundle did not retain the ${recipe} presentation`);
+  }
+}
+
+if (!bundledCode.includes("renderReactPresentationRecipes")) {
+  throw new Error("Vite consumer bundle did not render the React presentation recipes");
+}
+
 const nodeRuntimeDependency = bundledCode.match(
   /\bBuffer\s*\.|\bprocess\.env\b|(?:from\s*|import\s*\()?["']node:/u,
 )?.[0];

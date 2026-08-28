@@ -1,6 +1,6 @@
 {
   "name": "@handrail/ai",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Provider-neutral TypeScript primitives and runtime tooling for building AI applications with Handrail.",
   "license": "UNLICENSED",
   "type": "module",
@@ -59,6 +59,7 @@
   },
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json",
+    "check:examples": "npm run build && node scripts/check-readme-examples.mjs",
     "check:package-contract": "npm run build && node --test test/package-contract.test.mjs",
     "check:public-surface": "node scripts/check-provider-public-surface.mjs",
     "check:vite-consumer": "npm run build && node scripts/check-vite-consumer.mjs && node scripts/check-browser-attachments-vite.mjs",

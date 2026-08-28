@@ -66,6 +66,29 @@ export {
   type ChatDrawerTriggerProps,
 } from "./drawer.js";
 export {
+  ChatLauncherBadge,
+  ChatLauncherClose,
+  ChatLauncherDescription,
+  ChatLauncherPanel,
+  ChatLauncherPortal,
+  ChatLauncherRoot,
+  ChatLauncherStatus,
+  ChatLauncherTitle,
+  ChatLauncherTrigger,
+  type ChatLauncherBadgeProps,
+  type ChatLauncherCloseProps,
+  type ChatLauncherConnectionStatus,
+  type ChatLauncherDescriptionProps,
+  type ChatLauncherPanelProps,
+  type ChatLauncherPortalProps,
+  type ChatLauncherRootProps,
+  type ChatLauncherState,
+  type ChatLauncherStatusProps,
+  type ChatLauncherTitleProps,
+  type ChatLauncherTriggerProps,
+  type ChatLauncherTurnStatus,
+} from "./launcher.js";
+export {
   ChatTabsContent,
   ChatTabsList,
   ChatTabsRoot,
@@ -77,3 +100,4 @@ export {
   type ChatTabsRootProps,
   type ChatTabsTriggerProps,
 } from "./tabs.js";
+export * from "./primitives.js";

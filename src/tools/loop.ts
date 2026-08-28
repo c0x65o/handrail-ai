@@ -3,6 +3,7 @@ import {
   parseChatRequest,
   type ApplicationToolResult,
   type ChatRequest,
+  type JsonValue,
   type ToolDefinition,
 } from "../protocol.js";
 import type {
@@ -115,9 +116,20 @@ function resultFromDurableCall(call: ConversationToolCallRecord): ApplicationToo
     name: call.name,
     content: call.result.content.map((part) => part.type === "text"
       ? { type: "text", text: part.text }
-      : { type: "json", value: part.value }),
+      : { type: "json", value: cloneProtocolJson(part.value) }),
     is_error: call.result.is_error,
   };
+}
+
+function cloneProtocolJson(value: unknown): JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") return value;
+  if (Array.isArray(value)) return value.map(cloneProtocolJson);
+  const clone: { [key: string]: JsonValue } = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    clone[key] = cloneProtocolJson(item);
+  }
+  return clone;
 }
 
 function frozenProgress(
@@ -143,11 +155,32 @@ export async function runToolLoop<TContext = unknown, TDiscoveryContext = unknow
   options: RunToolLoopOptions<TContext, TDiscoveryContext>,
 ): Promise<ToolLoopResult> {
   const bounded = limits(options.limits);
+  const recordEvents = options.runtime.recordToolLoopEvents;
+  const continueTurn = options.runtime.continueTurn;
+  if (recordEvents === undefined || continueTurn === undefined) {
+    throw new TypeError("runToolLoop requires ConversationRuntime tool-loop integration hooks");
+  }
   const now = options.now ?? (() => Date.now());
-  const startedAtMs = options.progress?.startedAtMs ?? now();
-  let iterations = options.progress?.iterations ?? 0;
-  let totalToolCalls = options.progress?.totalToolCalls ?? 0;
   let turn = await options.initialTurn;
+  const initialSnapshot = options.runtime.getSnapshot();
+  const initialTurnRecord = initialSnapshot.turns.find((item) => item.turn_id === turn.turnId);
+  const sameLogicalInput = initialTurnRecord === undefined
+    ? new Set<string>()
+    : new Set(initialSnapshot.turns
+        .filter((item) =>
+          JSON.stringify(item.input_message_ids) === JSON.stringify(initialTurnRecord.input_message_ids))
+        .map((item) => item.turn_id));
+  const durableDiscovered = initialSnapshot.tool_calls.filter(
+    (call) => sameLogicalInput.has(call.turn_id) && call.discovered_at !== null,
+  );
+  const firstDiscoveredAt = durableDiscovered
+    .map((call) => Date.parse(call.discovered_at!))
+    .filter(Number.isFinite)
+    .sort((left, right) => left - right)[0];
+  const startedAtMs = options.progress?.startedAtMs ?? firstDiscoveredAt ?? now();
+  let iterations = options.progress?.iterations ??
+    new Set(durableDiscovered.map((call) => call.turn_id)).size;
+  let totalToolCalls = options.progress?.totalToolCalls ?? durableDiscovered.length;
   let request = parseChatRequest(options.request);
   const receipts = new Map<string, NormalizedUsageReceipt>();
   for (const receipt of options.progress?.usageReceipts ?? []) {
@@ -180,7 +213,7 @@ export async function runToolLoop<TContext = unknown, TDiscoveryContext = unknow
       (item) => item.turn_id === turn.turnId && item.budget === budget,
     );
     if (!alreadyRecorded) {
-      await options.runtime.recordToolLoopEvents([{
+      await recordEvents([{
         type: "tool_loop.budget_exhausted",
         turn_id: turn.turnId,
         budget,
@@ -222,24 +255,35 @@ export async function runToolLoop<TContext = unknown, TDiscoveryContext = unknow
         retryable: false,
       }) });
     }
+    const priorExhaustion = snapshot.tool_loop_budget_exhaustions.find(
+      (item) => item.turn_id === turn.turnId,
+    );
+    if (priorExhaustion !== undefined) {
+      return Object.freeze({
+        ...base(),
+        status: "budget_exhausted",
+        budget: priorExhaustion.budget,
+        limit: priorExhaustion.limit,
+      });
+    }
     const undiscovered = calls.filter((call) => call.discovered_at === null);
     if (undiscovered.length > 0) {
-      await options.runtime.recordToolLoopEvents(undiscovered.map((call) => ({
+      await recordEvents(undiscovered.map((call) => ({
         type: "tool_call.discovered" as const,
         turn_id: turn.turnId,
         tool_call_id: call.tool_call_id,
       })));
     }
 
-    if (iterations >= bounded.maxIterations) {
+    const newlyCounted = calls.filter((call) => call.discovered_at === null).length;
+    if (newlyCounted > 0 && iterations >= bounded.maxIterations) {
       return exhaust("iterations", bounded.maxIterations);
     }
-    const newlyCounted = calls.filter((call) => call.discovered_at === null).length;
     if (totalToolCalls + newlyCounted > bounded.maxTotalToolCalls) {
       return exhaust("total_tool_calls", bounded.maxTotalToolCalls);
     }
     totalToolCalls += newlyCounted;
-    iterations += 1;
+    if (newlyCounted > 0) iterations += 1;
 
     const results = new Map<string, ApplicationToolResult>();
     for (const call of calls) {
@@ -275,7 +319,7 @@ export async function runToolLoop<TContext = unknown, TDiscoveryContext = unknow
           signal: controller.signal,
           ...(call.started_at === null
             ? { onExecutionStarted: async () => {
-                await options.runtime.recordToolLoopEvents([{
+                await recordEvents([{
                   type: "tool_call.started",
                   turn_id: turn.turnId,
                   tool_call_id: call.tool_call_id,
@@ -329,7 +373,7 @@ export async function runToolLoop<TContext = unknown, TDiscoveryContext = unknow
         turn_id: turn.turnId,
         tool_call_id: id as never,
       }));
-    await options.runtime.recordToolLoopEvents([...resultEvents, ...approvalEvents]);
+    await recordEvents([...resultEvents, ...approvalEvents]);
 
     if (approvals.size > 0) {
       return Object.freeze({
@@ -353,7 +397,7 @@ export async function runToolLoop<TContext = unknown, TDiscoveryContext = unknow
     });
     if (aborted()) return Object.freeze({ ...base(), status: "cancelled" });
     request = continuation;
-    turn = await options.runtime.continueTurn({
+    turn = await continueTurn({
       precedingTurnId: turn.turnId,
       request: continuation,
     });

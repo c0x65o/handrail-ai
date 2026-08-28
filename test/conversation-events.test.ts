@@ -96,6 +96,21 @@ const payloads: Fixture[] = [
     arguments: { order_id: "A-104" },
   },
   {
+    type: "tool_call.discovered",
+    turn_id: "turn_01",
+    tool_call_id: "call_01",
+  },
+  {
+    type: "tool_call.started",
+    turn_id: "turn_01",
+    tool_call_id: "call_01",
+  },
+  {
+    type: "tool_call.approval_required",
+    turn_id: "turn_01",
+    tool_call_id: "call_01",
+  },
+  {
     type: "tool_call.result_recorded",
     turn_id: "turn_01",
     tool_call_id: "call_01",
@@ -106,6 +121,12 @@ const payloads: Fixture[] = [
       },
     ],
     is_error: false,
+  },
+  {
+    type: "tool_loop.budget_exhausted",
+    turn_id: "turn_01",
+    budget: "total_tool_calls",
+    limit: 12,
   },
   {
     type: "usage.receipt_linked",

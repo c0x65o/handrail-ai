@@ -330,7 +330,8 @@ function isConversationState(
   const requiredKeys = [
     "conversation_id", "revision", "last_event_id", "processed_event_ids",
     "processed_mutation_ids", "messages", "attachments", "turns",
-    "active_turn_id", "tool_calls", "usage_receipt_links", "metadata",
+    "active_turn_id", "tool_calls", "tool_loop_budget_exhaustions",
+    "usage_receipt_links", "metadata",
     "title", "replay_error",
   ];
   if (!hasExactKeys(value, requiredKeys)) return false;
@@ -357,6 +358,7 @@ function isConversationState(
   if (!recordArray(value.attachments, isAttachmentRecord)) return false;
   if (!recordArray(value.turns, isTurn)) return false;
   if (!recordArray(value.tool_calls, isToolCall)) return false;
+  if (!recordArray(value.tool_loop_budget_exhaustions, isToolLoopBudgetExhaustion)) return false;
   if (!recordArray(value.usage_receipt_links, isUsageLink)) return false;
   if (!(value.active_turn_id === null || isIdentifier(value.active_turn_id))) return false;
   if (
@@ -386,6 +388,7 @@ function isAttachmentRecord(value: Record<string, unknown>): boolean {
 
 function isTurn(value: Record<string, unknown>): boolean {
   return isIdentifier(value.turn_id) &&
+    (value.continuation_of_turn_id === null || isIdentifier(value.continuation_of_turn_id)) &&
     ["queued", "running", "waiting_for_tool_result", "completed", "cancelled", "failed"]
       .includes(String(value.status)) &&
     identifierArray(value.input_message_ids) !== null &&
@@ -403,8 +406,18 @@ function isToolCall(value: Record<string, unknown>): boolean {
     (value.name === null || typeof value.name === "string") &&
     (value.arguments === null || isJsonObject(value.arguments)) &&
     (value.requested_at === null || typeof value.requested_at === "string") &&
+    (value.discovered_at === null || typeof value.discovered_at === "string") &&
+    (value.started_at === null || typeof value.started_at === "string") &&
+    (value.approval_required_at === null || typeof value.approval_required_at === "string") &&
     isNullableAttribution(value.attribution) &&
     (value.result === null || isToolResult(value.result));
+}
+
+function isToolLoopBudgetExhaustion(value: Record<string, unknown>): boolean {
+  return isIdentifier(value.turn_id) &&
+    ["iterations", "total_tool_calls", "wall_clock"].includes(String(value.budget)) &&
+    Number.isSafeInteger(value.limit) && (value.limit as number) > 0 &&
+    typeof value.exhausted_at === "string" && isAttribution(value.attribution);
 }
 
 function isToolResult(value: unknown): boolean {

@@ -165,12 +165,14 @@ export function reduceConversationEvent(
         return updateTurn(accepted, index, freeze({
           ...turn,
           input_message_ids: freeze([...payload.input_message_ids]),
+          continuation_of_turn_id: payload.continuation_of_turn_id ?? null,
           started_at: event.occurred_at,
           attribution,
         }), payload.turn_id);
       }
       return appendTurn(accepted, freeze({
         turn_id: payload.turn_id,
+        continuation_of_turn_id: payload.continuation_of_turn_id ?? null,
         status: "queued",
         input_message_ids: freeze([...payload.input_message_ids]),
         output_message_ids: freeze([]),
@@ -581,6 +583,7 @@ function emptyTurn(
 ): ConversationTurnRecord {
   return freeze({
     ...values,
+    continuation_of_turn_id: null,
     input_message_ids: freeze([]),
     output_message_ids: freeze([]),
     outcome: null,
@@ -648,6 +651,7 @@ function terminateTurn(
   }
   return appendTurn(state, freeze({
     turn_id: turnId,
+    continuation_of_turn_id: null,
     input_message_ids: freeze([]),
     started_at: null,
     terminal_at: terminalAt,

@@ -8,6 +8,11 @@ import {
 } from "@handrail/ai";
 import { IndexedDBConversationEventStore } from "@handrail/ai/browser";
 import "@handrail/ai/react";
+import {
+  REACT_PRESENTATION_RECIPES,
+  createReactPresentationFixture,
+  type ReactPresentationRecipeProps,
+} from "../../../examples/react-presentations.js";
 
 export {
   AI_RUNTIME_PROTOCOL_LIMITS,
@@ -22,3 +27,12 @@ export const reactSubpathElement = createElement(
   null,
   "@handrail/ai/react resolved",
 );
+
+/** Vite compiles actual elements for all six checked, consumer-owned recipes. */
+export function renderReactPresentationRecipes(props: ReactPresentationRecipeProps) {
+  return REACT_PRESENTATION_RECIPES.map((Recipe, index) =>
+    createElement(Recipe, { ...props, key: index })
+  );
+}
+
+export { createReactPresentationFixture };

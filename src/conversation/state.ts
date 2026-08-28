@@ -94,6 +94,7 @@ export type ConversationTurnRetryRecord =
 
 export interface ConversationTurnRecord {
   readonly turn_id: ConversationTurnId;
+  readonly continuation_of_turn_id: ConversationTurnId | null;
   readonly status: ConversationTurnStateStatus;
   readonly input_message_ids: readonly ConversationMessageId[];
   readonly output_message_ids: readonly ConversationMessageId[];
