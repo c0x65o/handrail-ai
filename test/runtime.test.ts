@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   AI_RUNTIME_PROTOCOL_VERSION,
   CONVERSATION_EVENT_VERSION,
+  ConversationEventStoreConflictError,
   ConversationRuntimeBusyError,
   InMemoryConversationEventStore,
   createRetryPolicy,
@@ -15,7 +16,7 @@ import {
   type ConversationClientId,
   type ConversationEvent,
   type ConversationEventMetadata,
-  type ConversationEventPayload,
+  type ConversationEventStoreConflictCode,
   type ConversationEventStore,
   type ConversationId,
   type ConversationRevision,
@@ -437,6 +438,74 @@ class AdmissionEventStore implements ConversationEventStore {
   }
 }
 
+class RevisionConflictInjectingEventStore implements ConversationEventStore {
+  readonly inner = new InMemoryConversationEventStore();
+  targetedAppendAttempts = 0;
+  injectionCount = 0;
+
+  constructor(
+    private readonly isTarget: (input: AppendConversationEventsInput) => boolean,
+    private readonly maximumInjections = 1,
+  ) {}
+
+  async append(input: AppendConversationEventsInput): Promise<AppendConversationEventsResult> {
+    if (this.isTarget(input)) {
+      this.targetedAppendAttempts += 1;
+      if (this.injectionCount < this.maximumInjections) {
+        const currentRevision = await this.inner.getLatestRevision(input.conversationId);
+        const injectedRevision = ((currentRevision ?? 0) + 1) as ConversationRevision;
+        await this.inner.append({
+          conversationId: input.conversationId,
+          expectedRevision: currentRevision,
+          events: [externalEvent(injectedRevision, {
+            type: "conversation.metadata_updated",
+            metadata: { injected_revision: injectedRevision },
+          })],
+        });
+        this.injectionCount += 1;
+      }
+    }
+    return this.inner.append(input);
+  }
+
+  read(input: ReadConversationEventsInput): Promise<ReadConversationEventsResult> {
+    return this.inner.read(input);
+  }
+
+  getLatestRevision(id: ConversationId): Promise<ConversationRevision | null> {
+    return this.inner.getLatestRevision(id);
+  }
+}
+
+class ForcedAppendConflictEventStore implements ConversationEventStore {
+  readonly inner = new InMemoryConversationEventStore();
+  appendAttempts = 0;
+
+  constructor(readonly code: ConversationEventStoreConflictCode) {}
+
+  append(input: AppendConversationEventsInput): Promise<AppendConversationEventsResult> {
+    this.appendAttempts += 1;
+    return Promise.reject(new ConversationEventStoreConflictError(
+      `Injected ${this.code}`,
+      {
+        code: this.code,
+        conversationId: input.conversationId,
+        expectedRevision: input.expectedRevision,
+        actualRevision: null,
+        identifier: null,
+      },
+    ));
+  }
+
+  read(input: ReadConversationEventsInput): Promise<ReadConversationEventsResult> {
+    return this.inner.read(input);
+  }
+
+  getLatestRevision(id: ConversationId): Promise<ConversationRevision | null> {
+    return this.inner.getLatestRevision(id);
+  }
+}
+
 function deterministicSources() {
   let id = 0;
   let tick = 0;
@@ -454,7 +523,7 @@ function deterministicSources() {
 
 function externalEvent(
   revision: number,
-  payload: ConversationEventPayload,
+  payload: Record<string, unknown>,
   metadata?: ConversationEventMetadata,
 ): ConversationEvent {
   return parseConversationEvent({
@@ -506,6 +575,134 @@ describe("createConversationRuntime", () => {
       event.payload.type === "message.created" || event.payload.type === "turn.started"
     ).map(({ event }) => event.revision)).toEqual([2, 3]);
     expect(transport.starts).toHaveLength(1);
+  });
+
+  it("rebases user admission once when a canonical event wins the append race", async () => {
+    const eventStore = new RevisionConflictInjectingEventStore((input) =>
+      input.events.some((event) => event.payload.type === "turn.started")
+    );
+    const transport = new FakeTransport();
+    transport.startObservations.push(observation([], "disconnected"));
+    const runtime = await createConversationRuntime({
+      conversationId,
+      clientId,
+      transport,
+      eventStore,
+      retryPolicy: createRetryPolicy({ maximumAttempts: 1 }),
+      ...deterministicSources(),
+    });
+
+    await expect(runtime.sendMessage({
+      content: "Admit exactly once",
+      request: { prompt: "Admit exactly once" },
+    })).resolves.toMatchObject({ status: "disconnected" });
+
+    const history = await eventStore.read({ conversationId, limit: 100 });
+    const payloadTypes = history.entries.map(({ event }) => event.payload.type);
+    expect(eventStore.targetedAppendAttempts).toBe(2);
+    expect(eventStore.injectionCount).toBe(1);
+    expect(payloadTypes.filter((type) => type === "message.created")).toHaveLength(1);
+    expect(payloadTypes.filter((type) => type === "turn.started")).toHaveLength(1);
+    expect(history.entries.map(({ event }) => event.revision)).toEqual(
+      Array.from({ length: history.entries.length }, (_, index) => index + 1),
+    );
+    expect(history.entries.find(({ event }) => event.payload.type === "message.created")?.event)
+      .toMatchObject({ revision: 2, mutation_id: expect.any(String) });
+    expect(transport.starts).toHaveLength(1);
+  });
+
+  it("rebases a streamed delta without duplicating text or restarting transport", async () => {
+    const eventStore = new RevisionConflictInjectingEventStore((input) =>
+      input.events.some((event) => event.payload.type === "message.text_appended")
+    );
+    const transport = new FakeTransport();
+    transport.startObservations.push(observation([
+      startedFrame(),
+      deltaFrame(1, "Streamed once"),
+      completedFrame(2),
+    ], "completed"));
+    const runtime = await createConversationRuntime({
+      conversationId,
+      clientId,
+      transport,
+      eventStore,
+      retryPolicy: createRetryPolicy({ maximumAttempts: 1 }),
+      ...deterministicSources(),
+    });
+
+    const outcome = await runtime.sendMessage({
+      content: "Keep the transport running",
+      request: { prompt: "Keep the transport running" },
+    });
+
+    const history = await eventStore.read({ conversationId, limit: 100 });
+    const deltaEvents = history.entries.filter(
+      ({ event }) => event.payload.type === "message.text_appended",
+    );
+    const assistantMessages = runtime.getSnapshot().messages.filter(
+      (message) => message.role === "assistant",
+    );
+    expect(outcome.status).toBe("completed");
+    expect(eventStore.targetedAppendAttempts).toBe(2);
+    expect(eventStore.injectionCount).toBe(1);
+    expect(deltaEvents).toHaveLength(1);
+    expect(assistantMessages).toMatchObject([{
+      content: [{ type: "text", text: "Streamed once" }],
+    }]);
+    expect(history.entries.map(({ event }) => event.revision)).toEqual(
+      Array.from({ length: history.entries.length }, (_, index) => index + 1),
+    );
+    expect(outcome.checkpoint.lastAppliedRevision).toBe(history.latestRevision);
+    expect(runtime.getSnapshot().revision).toBe(history.latestRevision);
+    expect(transport.starts).toHaveLength(1);
+  });
+
+  it.each(["idempotency_conflict", "invalid_append"] as const)(
+    "does not retry an injected %s",
+    async (code) => {
+      const eventStore = new ForcedAppendConflictEventStore(code);
+      const transport = new FakeTransport();
+      const runtime = await createConversationRuntime({
+        conversationId,
+        clientId,
+        transport,
+        eventStore,
+        ...deterministicSources(),
+      });
+
+      await expect(runtime.sendMessage({
+        content: "Do not retry",
+        request: { prompt: "Do not retry" },
+      })).rejects.toMatchObject({ code });
+      expect(eventStore.appendAttempts).toBe(1);
+      expect(transport.starts).toHaveLength(0);
+    },
+  );
+
+  it("surfaces the final revision conflict after the bounded append ceiling", async () => {
+    const eventStore = new RevisionConflictInjectingEventStore(
+      (input) => input.events.some((event) => event.payload.type === "turn.started"),
+      Number.POSITIVE_INFINITY,
+    );
+    const transport = new FakeTransport();
+    const runtime = await createConversationRuntime({
+      conversationId,
+      clientId,
+      transport,
+      eventStore,
+      ...deterministicSources(),
+    });
+
+    await expect(runtime.sendMessage({
+      content: "Bound the canonical race",
+      request: { prompt: "Bound the canonical race" },
+    })).rejects.toMatchObject({ code: "revision_conflict" });
+
+    const history = await eventStore.read({ conversationId, limit: 100 });
+    expect(eventStore.targetedAppendAttempts).toBe(3);
+    expect(eventStore.injectionCount).toBe(3);
+    expect(history.entries.map(({ event }) => event.revision)).toEqual([1, 2, 3]);
+    expect(transport.starts).toHaveLength(0);
   });
 
   it("rejects send and continuation admission after catching up an external active turn", async () => {
@@ -605,6 +802,7 @@ describe("createConversationRuntime", () => {
       clientId,
       transport,
       eventStore,
+      replayBatchSize: 1,
       ...deterministicSources(),
     });
     const checkpoint = opaqueCheckpoint(3, "external-catch-up");

@@ -20,9 +20,10 @@ import {
   type ConversationTurnCancellationReason,
   type ConversationTurnId,
 } from "./conversation/events.js";
-import type {
-  ConversationEventCursor,
-  ConversationEventStore,
+import {
+  ConversationEventStoreConflictError,
+  type ConversationEventCursor,
+  type ConversationEventStore,
 } from "./conversation/event-store.js";
 import {
   ConversationReplayFailure,
@@ -54,6 +55,13 @@ import {
   parseNormalizedUsageReceipt,
   type NormalizedUsageReceipt,
 } from "./usage.js";
+
+/*
+ * Runtime append retries are deliberately separate from provider retries. A
+ * revision race can be rebased without restarting transport, but a constantly
+ * changing canonical log must still reject in bounded time.
+ */
+const MAX_RUNTIME_APPEND_REVISION_RETRIES = 2;
 
 const RUNTIME_METADATA_KEY = "handrail_runtime";
 
@@ -330,43 +338,68 @@ export async function createConversationRuntime<TRequest>(
       assertUsable();
       await beforeGenerate?.();
       assertUsable();
-      const expectedRevision = store.getSnapshot().revision;
-      const drafts = generateDrafts(expectedRevision);
-      if (drafts.length === 0) return [];
-      const occurredAt = timestamp();
-      const events = drafts.map((draft, index) =>
-        parseConversationEvent({
-          version: CONVERSATION_EVENT_VERSION,
-          event_id: createId("event") as ConversationEventId,
-          conversation_id: options.conversationId,
-          revision: ((expectedRevision ?? 0) + index + 1) as ConversationRevision,
-          occurred_at: occurredAt,
-          actor: draft.actor,
-          source: draft.source,
-          ...(draft.mutationId === undefined
-            ? {}
-            : { mutation_id: draft.mutationId }),
-          ...(draft.metadata === undefined ? {} : { metadata: draft.metadata }),
-          payload: draft.payload,
-        }),
-      );
-      const appended = await options.eventStore.append({
-        conversationId: options.conversationId,
-        expectedRevision,
-        events,
-      });
-      assertUsable();
-      const storedEvents = appended.entries.map((entry) => entry.event);
-      const nextState = await store.applyEvents(storedEvents);
-      if (nextState.replay_error !== null) {
-        throw new TypeError("Persisted conversation events could not be projected contiguously");
+      let revisionConflictRetries = 0;
+      for (;;) {
+        const expectedRevision = store.getSnapshot().revision;
+        const drafts = generateDrafts(expectedRevision);
+        if (drafts.length === 0) return [];
+        const occurredAt = timestamp();
+        const events = drafts.map((draft, index) =>
+          parseConversationEvent({
+            version: CONVERSATION_EVENT_VERSION,
+            event_id: createId("event") as ConversationEventId,
+            conversation_id: options.conversationId,
+            revision: ((expectedRevision ?? 0) + index + 1) as ConversationRevision,
+            occurred_at: occurredAt,
+            actor: draft.actor,
+            source: draft.source,
+            ...(draft.mutationId === undefined
+              ? {}
+              : { mutation_id: draft.mutationId }),
+            ...(draft.metadata === undefined ? {} : { metadata: draft.metadata }),
+            payload: draft.payload,
+          }),
+        );
+        try {
+          const appended = await options.eventStore.append({
+            conversationId: options.conversationId,
+            expectedRevision,
+            events,
+          });
+          assertUsable();
+          const storedEvents = appended.entries.map((entry) => entry.event);
+          const nextState = await store.applyEvents(storedEvents);
+          if (nextState.replay_error !== null) {
+            throw new TypeError(
+              "Persisted conversation events could not be projected contiguously",
+            );
+          }
+          for (const event of storedEvents) rememberRuntimeMetadata(
+            event,
+            protocolByTurn,
+            durableFrameKeys,
+          );
+          return storedEvents;
+        } catch (cause) {
+          if (
+            !(cause instanceof ConversationEventStoreConflictError) ||
+            cause.code !== "revision_conflict" ||
+            revisionConflictRetries >= MAX_RUNTIME_APPEND_REVISION_RETRIES
+          ) {
+            throw cause;
+          }
+          revisionConflictRetries += 1;
+          await catchUpRuntimeStore(
+            options.conversationId,
+            options.eventStore,
+            store,
+            protocolByTurn,
+            durableFrameKeys,
+            catchUpBatchSize,
+          );
+          assertUsable();
+        }
       }
-      for (const event of storedEvents) rememberRuntimeMetadata(
-        event,
-        protocolByTurn,
-        durableFrameKeys,
-      );
-      return storedEvents;
     } finally {
       resolveBoundary();
     }
@@ -1693,7 +1726,7 @@ async function catchUpRuntimeStore(
     });
     const events: ConversationEvent[] = [];
     let pageRevision = lastSafeRevision;
-    let pageCursor = lastSafeCursor;
+    let pageCursor: ConversationEventCursor | null = lastSafeCursor;
 
     for (const entry of page.entries) {
       let event: ConversationEvent;
