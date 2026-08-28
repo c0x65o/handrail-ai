@@ -12,7 +12,8 @@
       "@handrail/ai/server/managed": ["./src/server/managed.ts"],
       "@handrail/ai/providers/openai": ["./src/providers/openai.ts"],
       "@handrail/ai/providers/anthropic": ["./src/providers/anthropic.ts"],
-      "@handrail/ai/providers/gemini": ["./src/providers/gemini.ts"]
+      "@handrail/ai/providers/gemini": ["./src/providers/gemini.ts"],
+      "@handrail/ai/providers/xai": ["./src/providers/xai.ts"]
     },
     "jsx": "react-jsx",
     "strict": true,

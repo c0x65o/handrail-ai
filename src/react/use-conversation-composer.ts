@@ -1,0 +1,668 @@
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type ClipboardEvent,
+  type CompositionEvent,
+  type DragEvent,
+  type FormEvent,
+  type KeyboardEvent,
+} from "react";
+
+import type { AttachmentUploadFailure, AttachmentUploadItem } from "../attachments/types.js";
+import type { AttachmentUploader } from "../attachments/uploader.js";
+import {
+  intakeClipboardImages,
+  intakeDroppedImages,
+  intakeFileInputImages,
+  type BrowserAttachmentSource,
+  type BrowserImageIntakeOptions,
+  type BrowserImageIntakeRejection,
+  type BrowserImagePreview,
+} from "../browser/attachments.js";
+import type {
+  ConversationAttachmentId,
+  ConversationAttachmentReference,
+  ConversationId,
+} from "../conversation/events.js";
+import type { PresenceController } from "../presence/controller.js";
+import {
+  AI_RUNTIME_IMAGE_MIME_TYPES,
+  AI_RUNTIME_PROTOCOL_LIMITS,
+  type AttachmentReference,
+  type ImageMimeType,
+} from "../protocol.js";
+import type {
+  ConversationRuntimeError,
+  ConversationRuntimeTurnResult,
+} from "../runtime.js";
+import { useConversationActions, useConversationSelector } from "./hooks.js";
+
+export type ConversationComposerEnterBehavior = "newline" | "send";
+
+export interface ConversationComposerImageIntakeOptions {
+  readonly acceptedMediaTypes?: readonly ImageMimeType[];
+  readonly maxFileBytes?: number;
+  readonly maxSelectionCount?: number;
+  readonly previews?: BrowserImageIntakeOptions["previews"];
+}
+
+export interface ConversationComposerSubmission {
+  readonly text: string;
+  readonly attachments: readonly AttachmentReference[];
+}
+
+export interface UseConversationComposerOptions<TRequest = undefined> {
+  /** May be shared: the hook removes only upload items created by this instance. */
+  readonly uploader: AttachmentUploader<BrowserAttachmentSource>;
+  /** Optional ephemeral controller. It remains host-owned. */
+  readonly presence?: Pick<
+    PresenceController,
+    "noteActivity" | "setTyping" | "stopTyping" | "switchConversation"
+  >;
+  /** Static transport request used when createRequest is omitted. */
+  readonly request?: TRequest;
+  /** Build the transport request from the exact draft and ready references submitted. */
+  readonly createRequest?: (submission: ConversationComposerSubmission) => TRequest;
+  /** Defaults to newline, so Enter-to-send is always an explicit opt-in. */
+  readonly enterBehavior?: ConversationComposerEnterBehavior;
+  /** Overrides the provider store identity for lifecycle switching. */
+  readonly conversationId?: ConversationId;
+  readonly imageIntake?: ConversationComposerImageIntakeOptions;
+  /** Narrow cancellation seam; no runtime cancellation contract is assumed here. */
+  readonly onCancel?: () => void | Promise<void>;
+  readonly initialDraft?: string;
+}
+
+export type ConversationComposerAttachmentStatus =
+  | AttachmentUploadItem["status"]
+  | "missing";
+
+export interface ConversationComposerAttachment {
+  readonly id: string;
+  readonly fingerprint: string;
+  /** The composer-local browser file/blob selected by the user. */
+  readonly source: BrowserAttachmentSource;
+  readonly filename?: string;
+  readonly mediaType: ImageMimeType;
+  readonly byteSize: number;
+  readonly previewUrl?: string;
+  readonly status: ConversationComposerAttachmentStatus;
+  readonly progress: {
+    readonly uploadedBytes: number;
+    readonly totalBytes: number;
+  };
+  readonly reference?: AttachmentReference;
+  readonly error?: AttachmentUploadFailure;
+}
+
+export type ConversationComposerError =
+  | {
+      readonly source: "intake";
+      readonly code: BrowserImageIntakeRejection["reason"] | "intake_failed";
+      readonly message: string;
+      readonly retryable: false;
+      readonly fingerprint?: string;
+      readonly filename?: string;
+    }
+  | {
+      readonly source: "upload";
+      readonly code: AttachmentUploadFailure["code"] | "cancelled" | "missing";
+      readonly message: string;
+      readonly retryable: boolean;
+      readonly attachmentId: string;
+    }
+  | {
+      readonly source: "send";
+      readonly code: string;
+      readonly message: string;
+      readonly retryable: boolean;
+      readonly retryAfterMs?: number;
+    }
+  | {
+      readonly source: "cancel";
+      readonly code: "cancel_failed";
+      readonly message: string;
+      readonly retryable: true;
+    };
+
+export interface ConversationComposerTextareaProps {
+  readonly value: string;
+  readonly onChange: (event: ChangeEvent<HTMLTextAreaElement>) => void;
+  readonly onPaste: (event: ClipboardEvent<HTMLTextAreaElement>) => void;
+  readonly onBlur: () => void;
+  readonly onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
+  readonly onCompositionStart: (event: CompositionEvent<HTMLTextAreaElement>) => void;
+  readonly onCompositionEnd: (event: CompositionEvent<HTMLTextAreaElement>) => void;
+}
+
+export interface ConversationComposerFileInputProps {
+  readonly accept: string;
+  readonly multiple: true;
+  readonly onChange: (event: ChangeEvent<HTMLInputElement>) => void;
+}
+
+export interface ConversationComposerDropProps {
+  readonly onDrop: (event: DragEvent<HTMLElement>) => void;
+}
+
+export interface ConversationComposerResult {
+  readonly draft: string;
+  readonly setDraft: (draft: string) => void;
+  readonly attachments: readonly ConversationComposerAttachment[];
+  readonly errors: readonly ConversationComposerError[];
+  readonly canSend: boolean;
+  readonly isSending: boolean;
+  readonly submit: (
+    event?: FormEvent<Element>,
+  ) => Promise<ConversationRuntimeTurnResult | null>;
+  readonly cancel: () => Promise<boolean>;
+  readonly stop: () => Promise<boolean>;
+  readonly retryAttachment: (attachmentId: string) => boolean;
+  readonly removeAttachment: (attachmentId: string) => boolean;
+  readonly getTextareaProps: () => ConversationComposerTextareaProps;
+  readonly getFileInputProps: () => ConversationComposerFileInputProps;
+  readonly getDropProps: () => ConversationComposerDropProps;
+}
+
+interface OwnedAttachment {
+  readonly id: string;
+  readonly fingerprint: string;
+  readonly source: BrowserAttachmentSource;
+  readonly filename?: string;
+  readonly mediaType: ImageMimeType;
+  readonly byteSize: number;
+  readonly preview?: BrowserImagePreview;
+}
+
+const INTAKE_MESSAGES: Record<BrowserImageIntakeRejection["reason"], string> = {
+  unsupported_type: "The selected file is not a supported image type.",
+  too_large: "The selected image is too large.",
+  count_overflow: "The image selection limit has been reached.",
+  duplicate: "The selected image is already attached.",
+  empty_file: "The selected image is empty.",
+};
+
+function compactHash(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = Math.imul(hash ^ value.charCodeAt(index), 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function durableAttachment(reference: AttachmentReference): ConversationAttachmentReference {
+  return {
+    attachment_id: reference.attachment_id as ConversationAttachmentId,
+    media_type: reference.media_type,
+    ...(reference.filename === undefined ? {} : { filename: reference.filename }),
+    size_bytes: reference.byte_size,
+  };
+}
+
+function sendError(error: ConversationRuntimeError): ConversationComposerError {
+  return {
+    source: "send",
+    code: error.code,
+    message: error.message,
+    retryable: error.retryable,
+    ...(error.retryAfterMs === undefined ? {} : { retryAfterMs: error.retryAfterMs }),
+  };
+}
+
+/**
+ * Coordinate draft, browser image intake, uploads, typing, and submission
+ * without rendering markup or imposing presentation semantics.
+ */
+export function useConversationComposer<TRequest = undefined>(
+  options: UseConversationComposerOptions<TRequest>,
+): ConversationComposerResult {
+  const actions = useConversationActions<TRequest>();
+  const storeConversationId = useConversationSelector((state) => state.conversation_id);
+  const activeTurnId = useConversationSelector((state) => state.active_turn_id);
+  const reactId = useId();
+  const scope = useMemo(() => compactHash(reactId), [reactId]);
+  const {
+    uploader,
+    presence,
+    request,
+    createRequest,
+    enterBehavior = "newline",
+    onCancel,
+  } = options;
+  const conversationId = options.conversationId ?? storeConversationId;
+  const acceptedMediaTypes = options.imageIntake?.acceptedMediaTypes ??
+    AI_RUNTIME_IMAGE_MIME_TYPES;
+  const maxFileBytes = options.imageIntake?.maxFileBytes ??
+    AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMaxBytes;
+  const maxSelectionCount = options.imageIntake?.maxSelectionCount ??
+    AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentsPerMessage;
+  const previews = options.imageIntake?.previews ?? true;
+
+  const [draft, setDraftState] = useState(options.initialDraft ?? "");
+  const [owned, setOwned] = useState<readonly OwnedAttachment[]>([]);
+  const [snapshot, setSnapshot] = useState(() => uploader.getSnapshot());
+  const [operationErrors, setOperationErrors] = useState<
+    readonly ConversationComposerError[]
+  >([]);
+  const [isSending, setIsSending] = useState(false);
+  const sendingRef = useRef(false);
+  const composing = useRef(false);
+  const draftRef = useRef(draft);
+  const ownedRef = useRef(owned);
+  const uploaderRef = useRef(uploader);
+  const presenceRef = useRef(presence);
+  const lifecycleRef = useRef({
+    conversationId,
+    uploader,
+    presence,
+    initialized: false,
+  });
+
+  draftRef.current = draft;
+  ownedRef.current = owned;
+  uploaderRef.current = uploader;
+  presenceRef.current = presence;
+
+  useEffect(() => {
+    setSnapshot(uploader.getSnapshot());
+    return uploader.subscribe(setSnapshot);
+  }, [uploader]);
+
+  const releaseOwned = useCallback(
+    (
+      entries: readonly OwnedAttachment[],
+      targetUploader = uploaderRef.current,
+    ): void => {
+      for (const entry of entries) {
+        try {
+          targetUploader.remove(entry.id);
+        } catch {
+          // A host-disposed uploader must not prevent preview cleanup.
+        }
+        try {
+          entry.preview?.revoke();
+        } catch {
+          // Continue releasing later previews when one host URL call fails.
+        }
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const previous = lifecycleRef.current;
+    if (!previous.initialized) {
+      previous.initialized = true;
+      return;
+    }
+    if (
+      previous.conversationId === conversationId &&
+      previous.uploader === uploader &&
+      previous.presence === presence
+    ) {
+      return;
+    }
+
+    const previousOwned = ownedRef.current;
+    releaseOwned(previousOwned, previous.uploader);
+    ownedRef.current = [];
+    setOwned([]);
+    draftRef.current = "";
+    setDraftState("");
+    setOperationErrors([]);
+    previous.presence?.stopTyping("conversation_switch");
+    if (conversationId !== null) presence?.switchConversation(conversationId);
+    lifecycleRef.current = {
+      conversationId,
+      uploader,
+      presence,
+      initialized: true,
+    };
+  }, [conversationId, presence, releaseOwned, uploader]);
+
+  useEffect(() => () => {
+    releaseOwned(ownedRef.current, uploaderRef.current);
+    presenceRef.current?.stopTyping("destroy");
+  }, [releaseOwned]);
+
+  const itemById = useMemo(
+    () => new Map(snapshot.items.map((item) => [item.id, item])),
+    [snapshot],
+  );
+  const attachments = useMemo<readonly ConversationComposerAttachment[]>(
+    () => owned.map((entry) => {
+      const item = itemById.get(entry.id);
+      if (item === undefined) {
+        return {
+          id: entry.id,
+          fingerprint: entry.fingerprint,
+          source: entry.source,
+          ...(entry.filename === undefined ? {} : { filename: entry.filename }),
+          mediaType: entry.mediaType,
+          byteSize: entry.byteSize,
+          ...(entry.preview === undefined ? {} : { previewUrl: entry.preview.url }),
+          status: "missing",
+          progress: { uploadedBytes: 0, totalBytes: entry.byteSize },
+        };
+      }
+      return {
+        id: entry.id,
+        fingerprint: entry.fingerprint,
+        source: entry.source,
+        ...(entry.filename === undefined ? {} : { filename: entry.filename }),
+        mediaType: entry.mediaType,
+        byteSize: entry.byteSize,
+        ...(entry.preview === undefined ? {} : { previewUrl: entry.preview.url }),
+        status: item.status,
+        progress: item.progress,
+        ...(item.status === "ready" ? { reference: item.reference } : {}),
+        ...(item.status === "failed" ? { error: item.error } : {}),
+      };
+    }),
+    [itemById, owned],
+  );
+
+  const uploadErrors = useMemo<readonly ConversationComposerError[]>(() =>
+    attachments.flatMap((attachment): readonly ConversationComposerError[] => {
+      if (attachment.status === "failed" && attachment.error !== undefined) {
+        return [{
+          source: "upload",
+          code: attachment.error.code,
+          message: attachment.error.message,
+          retryable: attachment.error.retryable,
+          attachmentId: attachment.id,
+        }];
+      }
+      if (attachment.status === "cancelled" || attachment.status === "missing") {
+        return [{
+          source: "upload",
+          code: attachment.status,
+          message: attachment.status === "cancelled"
+            ? "The attachment upload was cancelled."
+            : "The attachment upload is no longer available.",
+          retryable: false,
+          attachmentId: attachment.id,
+        }];
+      }
+      return [];
+    }), [attachments]);
+  const errors = useMemo(
+    () => Object.freeze([...operationErrors, ...uploadErrors]),
+    [operationErrors, uploadErrors],
+  );
+  const uploadsReady = attachments.every((attachment) => attachment.status === "ready");
+  const hasContent = draft.trim().length > 0 || attachments.length > 0;
+  const canSend = !isSending && activeTurnId === null && hasContent && uploadsReady;
+
+  const updateDraft = useCallback((nextDraft: string): void => {
+    draftRef.current = nextDraft;
+    setDraftState(nextDraft);
+    presence?.noteActivity();
+    if (nextDraft.length === 0) presence?.stopTyping("explicit");
+    else presence?.setTyping(true);
+  }, [presence]);
+
+  const intakeOptions = useCallback((): BrowserImageIntakeOptions => ({
+    acceptedMediaTypes,
+    maxFileBytes,
+    maxSelectionCount,
+    existingFingerprints: ownedRef.current.map((entry) => entry.fingerprint),
+    existingSelectionCount: ownedRef.current.length,
+    previews,
+  }), [acceptedMediaTypes, maxFileBytes, maxSelectionCount, previews]);
+
+  const acceptIntake = useCallback((result: ReturnType<typeof intakeFileInputImages>) => {
+    const added: OwnedAttachment[] = [];
+    try {
+      for (const selection of result.selections) {
+        const preview = result.previews.find(
+          (candidate) => candidate.fingerprint === selection.fingerprint,
+        );
+        const id = uploader.enqueue({
+          ...selection,
+          fingerprint: `composer:${scope}:${compactHash(selection.fingerprint)}`,
+          idempotencyKey: `composer:${scope}:${compactHash(selection.idempotencyKey)}`,
+        });
+        added.push({
+          id,
+          fingerprint: selection.fingerprint,
+          source: selection.source,
+          ...(selection.filename === undefined ? {} : { filename: selection.filename }),
+          mediaType: selection.mediaType,
+          byteSize: selection.byteSize,
+          ...(preview === undefined ? {} : { preview }),
+        });
+      }
+    } catch {
+      releaseOwned(added);
+      result.dispose();
+      setOperationErrors([{
+        source: "intake",
+        code: "intake_failed",
+        message: "The selected images could not be prepared.",
+        retryable: false,
+      }]);
+      return;
+    }
+
+    if (added.length > 0) {
+      setOwned((current) => {
+        const next = [...current, ...added];
+        ownedRef.current = next;
+        return next;
+      });
+    }
+    setOperationErrors(result.rejections.map((rejection) => ({
+      source: "intake" as const,
+      code: rejection.reason,
+      message: INTAKE_MESSAGES[rejection.reason],
+      retryable: false as const,
+      fingerprint: rejection.fingerprint,
+      ...(rejection.filename === undefined ? {} : { filename: rejection.filename }),
+    })));
+  }, [releaseOwned, scope, uploader]);
+
+  const handlePaste = useCallback((event: ClipboardEvent<HTMLTextAreaElement>): void => {
+    const result = intakeClipboardImages(event.clipboardData.items, intakeOptions());
+    if (result.selections.length > 0) event.preventDefault();
+    acceptIntake(result);
+  }, [acceptIntake, intakeOptions]);
+
+  const handleFileInputChange = useCallback((event: ChangeEvent<HTMLInputElement>): void => {
+    if (event.currentTarget.files === null) return;
+    acceptIntake(intakeFileInputImages(event.currentTarget.files, intakeOptions()));
+  }, [acceptIntake, intakeOptions]);
+
+  const handleDrop = useCallback((event: DragEvent<HTMLElement>): void => {
+    const result = intakeDroppedImages(event.dataTransfer, intakeOptions());
+    if (result.shouldPreventDefault) event.preventDefault();
+    acceptIntake(result);
+  }, [acceptIntake, intakeOptions]);
+
+  const removeAttachment = useCallback((attachmentId: string): boolean => {
+    const entry = ownedRef.current.find((candidate) => candidate.id === attachmentId);
+    if (entry === undefined) return false;
+    releaseOwned([entry]);
+    setOwned((current) => {
+      const next = current.filter((candidate) => candidate.id !== attachmentId);
+      ownedRef.current = next;
+      return next;
+    });
+    return true;
+  }, [releaseOwned]);
+
+  const retryAttachment = useCallback((attachmentId: string): boolean => {
+    if (!ownedRef.current.some((entry) => entry.id === attachmentId)) return false;
+    try {
+      return uploader.retry(attachmentId);
+    } catch {
+      return false;
+    }
+  }, [uploader]);
+
+  const submit = useCallback(async (
+    event?: FormEvent<Element>,
+  ): Promise<ConversationRuntimeTurnResult | null> => {
+    event?.preventDefault();
+    const currentOwned = ownedRef.current;
+    const currentItems = new Map(
+      uploader.getSnapshot().items.map((item) => [item.id, item]),
+    );
+    const readyReferences = currentOwned.flatMap((entry) => {
+      const item = currentItems.get(entry.id);
+      return item?.status === "ready" ? [item.reference] : [];
+    });
+    const currentDraft = draftRef.current;
+    const eligible = !sendingRef.current && activeTurnId === null &&
+      (currentDraft.trim().length > 0 || currentOwned.length > 0) &&
+      readyReferences.length === currentOwned.length;
+    if (!eligible) return null;
+
+    sendingRef.current = true;
+    setIsSending(true);
+    setOperationErrors([]);
+    const submission = Object.freeze({
+      text: currentDraft,
+      attachments: Object.freeze(readyReferences),
+    });
+    try {
+      const outcome = await actions.sendMessage({
+        content: currentDraft.trim().length === 0 ? [] : currentDraft,
+        attachments: readyReferences.map(durableAttachment),
+        request: createRequest === undefined ? request as TRequest : createRequest(submission),
+      });
+      if (outcome.status !== "completed") {
+        setOperationErrors([outcome.error === undefined
+          ? {
+              source: "send",
+              code: `turn_${outcome.status}`,
+              message: `The conversation turn ended with status ${outcome.status}.`,
+              retryable: outcome.status === "disconnected" || outcome.status === "interrupted",
+            }
+          : sendError(outcome.error)]);
+        return outcome;
+      }
+
+      releaseOwned(currentOwned);
+      setOwned((current) => {
+        const submittedIds = new Set(currentOwned.map((entry) => entry.id));
+        const next = current.filter((entry) => !submittedIds.has(entry.id));
+        ownedRef.current = next;
+        return next;
+      });
+      setDraftState((current) => {
+        const next = current === currentDraft ? "" : current;
+        draftRef.current = next;
+        return next;
+      });
+      presence?.stopTyping("send");
+      return outcome;
+    } catch {
+      setOperationErrors([{
+        source: "send",
+        code: "send_failed",
+        message: "The message could not be sent.",
+        retryable: true,
+      }]);
+      return null;
+    } finally {
+      sendingRef.current = false;
+      setIsSending(false);
+    }
+  }, [actions, activeTurnId, createRequest, presence, releaseOwned, request, uploader]);
+
+  const cancel = useCallback(async (): Promise<boolean> => {
+    if (onCancel === undefined) return false;
+    try {
+      await onCancel();
+      presence?.stopTyping("explicit");
+      return true;
+    } catch {
+      setOperationErrors([{
+        source: "cancel",
+        code: "cancel_failed",
+        message: "The active response could not be stopped.",
+        retryable: true,
+      }]);
+      return false;
+    }
+  }, [onCancel, presence]);
+
+  const handleKeyDown = useCallback((event: KeyboardEvent<HTMLTextAreaElement>): void => {
+    const nativeEvent = event.nativeEvent as globalThis.KeyboardEvent;
+    if (
+      enterBehavior !== "send" ||
+      event.key !== "Enter" ||
+      event.shiftKey ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      composing.current ||
+      nativeEvent.isComposing ||
+      nativeEvent.keyCode === 229 ||
+      !canSend
+    ) {
+      return;
+    }
+    event.preventDefault();
+    void submit();
+  }, [canSend, enterBehavior, submit]);
+
+  const textareaProps = useMemo<ConversationComposerTextareaProps>(() => ({
+    value: draft,
+    onChange: (event) => updateDraft(event.currentTarget.value),
+    onPaste: handlePaste,
+    onBlur: () => presence?.stopTyping("blur"),
+    onKeyDown: handleKeyDown,
+    onCompositionStart: () => {
+      composing.current = true;
+    },
+    onCompositionEnd: () => {
+      composing.current = false;
+    },
+  }), [draft, handleKeyDown, handlePaste, presence, updateDraft]);
+  const fileInputProps = useMemo<ConversationComposerFileInputProps>(() => ({
+    accept: acceptedMediaTypes.join(","),
+    multiple: true,
+    onChange: handleFileInputChange,
+  }), [acceptedMediaTypes, handleFileInputChange]);
+  const dropProps = useMemo<ConversationComposerDropProps>(() => ({
+    onDrop: handleDrop,
+  }), [handleDrop]);
+
+  return useMemo(() => Object.freeze({
+    draft,
+    setDraft: updateDraft,
+    attachments,
+    errors,
+    canSend,
+    isSending,
+    submit,
+    cancel,
+    stop: cancel,
+    retryAttachment,
+    removeAttachment,
+    getTextareaProps: () => textareaProps,
+    getFileInputProps: () => fileInputProps,
+    getDropProps: () => dropProps,
+  }), [
+    attachments,
+    canSend,
+    cancel,
+    draft,
+    dropProps,
+    errors,
+    fileInputProps,
+    isSending,
+    removeAttachment,
+    retryAttachment,
+    submit,
+    textareaProps,
+    updateDraft,
+  ]);
+}

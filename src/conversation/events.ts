@@ -5,11 +5,20 @@ export const CONVERSATION_EVENT_TYPES = [
   "message.attachment_referenced",
   "turn.started",
   "turn.status_changed",
+  "turn.attempt_started",
+  "turn.retry_scheduled",
+  "turn.retry_exhausted",
+  "turn.cancellation_requested",
+  "turn.cancellation_unsupported",
   "turn.completed",
   "turn.cancelled",
   "turn.failed",
   "tool_call.requested",
+  "tool_call.discovered",
+  "tool_call.started",
+  "tool_call.approval_required",
   "tool_call.result_recorded",
+  "tool_loop.budget_exhausted",
   "usage.receipt_linked",
   "conversation.metadata_updated",
   "conversation.title_updated",
@@ -158,6 +167,43 @@ export interface TurnStatusChangedPayload {
   status: ConversationTurnStatus;
 }
 
+export type ConversationTurnAttemptOperation = "start" | "resume";
+
+export type ConversationRetryReasonCategory =
+  | "rate_limit"
+  | "timeout"
+  | "unavailable"
+  | "internal"
+  | "disconnected"
+  | "interrupted";
+
+export type ConversationRetryExhaustionReason =
+  | "maximum_attempts"
+  | "maximum_elapsed_time";
+
+export interface TurnAttemptStartedPayload {
+  type: "turn.attempt_started";
+  turn_id: ConversationTurnId;
+  attempt: number;
+  operation: ConversationTurnAttemptOperation;
+}
+
+export interface TurnRetryScheduledPayload {
+  type: "turn.retry_scheduled";
+  turn_id: ConversationTurnId;
+  attempt: number;
+  reason_category: ConversationRetryReasonCategory;
+  delay_ms: number;
+}
+
+export interface TurnRetryExhaustedPayload {
+  type: "turn.retry_exhausted";
+  turn_id: ConversationTurnId;
+  attempt: number;
+  reason_category: ConversationRetryReasonCategory;
+  exhaustion_reason: ConversationRetryExhaustionReason;
+}
+
 export type ConversationTurnCompletionOutcome =
   | "stop"
   | "length"
@@ -175,6 +221,18 @@ export type ConversationTurnCancellationReason =
   | "timeout"
   | "superseded"
   | "runtime_shutdown";
+
+export interface TurnCancellationRequestedPayload {
+  type: "turn.cancellation_requested";
+  turn_id: ConversationTurnId;
+  reason: ConversationTurnCancellationReason;
+}
+
+export interface TurnCancellationUnsupportedPayload {
+  type: "turn.cancellation_unsupported";
+  turn_id: ConversationTurnId;
+  reason: ConversationTurnCancellationReason;
+}
 
 export interface TurnCancelledPayload {
   type: "turn.cancelled";
@@ -202,6 +260,24 @@ export interface ToolCallRequestedPayload {
   arguments: ConversationJsonObject;
 }
 
+export interface ToolCallDiscoveredPayload {
+  type: "tool_call.discovered";
+  turn_id: ConversationTurnId;
+  tool_call_id: ConversationToolCallId;
+}
+
+export interface ToolCallStartedPayload {
+  type: "tool_call.started";
+  turn_id: ConversationTurnId;
+  tool_call_id: ConversationToolCallId;
+}
+
+export interface ToolCallApprovalRequiredPayload {
+  type: "tool_call.approval_required";
+  turn_id: ConversationTurnId;
+  tool_call_id: ConversationToolCallId;
+}
+
 export interface ConversationToolResultTextPart {
   type: "text";
   text: string;
@@ -222,6 +298,15 @@ export interface ToolCallResultRecordedPayload {
   tool_call_id: ConversationToolCallId;
   content: ConversationToolResultContentPart[];
   is_error: boolean;
+}
+
+export type ToolLoopBudget = "iterations" | "total_tool_calls" | "wall_clock";
+
+export interface ToolLoopBudgetExhaustedPayload {
+  type: "tool_loop.budget_exhausted";
+  turn_id: ConversationTurnId;
+  budget: ToolLoopBudget;
+  limit: number;
 }
 
 export interface UsageReceiptLinkedPayload {
@@ -245,11 +330,20 @@ export type ConversationEventPayload =
   | MessageAttachmentReferencedPayload
   | TurnStartedPayload
   | TurnStatusChangedPayload
+  | TurnAttemptStartedPayload
+  | TurnRetryScheduledPayload
+  | TurnRetryExhaustedPayload
+  | TurnCancellationRequestedPayload
+  | TurnCancellationUnsupportedPayload
   | TurnCompletedPayload
   | TurnCancelledPayload
   | TurnFailedPayload
   | ToolCallRequestedPayload
+  | ToolCallDiscoveredPayload
+  | ToolCallStartedPayload
+  | ToolCallApprovalRequiredPayload
   | ToolCallResultRecordedPayload
+  | ToolLoopBudgetExhaustedPayload
   | UsageReceiptLinkedPayload
   | ConversationMetadataUpdatedPayload
   | ConversationTitleUpdatedPayload;
@@ -364,6 +458,18 @@ const TURN_CANCELLATION_REASONS = [
   "timeout",
   "superseded",
   "runtime_shutdown",
+] as const;
+const RETRY_REASON_CATEGORIES = [
+  "rate_limit",
+  "timeout",
+  "unavailable",
+  "internal",
+  "disconnected",
+  "interrupted",
+] as const;
+const RETRY_EXHAUSTION_REASONS = [
+  "maximum_attempts",
+  "maximum_elapsed_time",
 ] as const;
 
 const normalizeFieldName = (value: string): string =>
@@ -728,6 +834,18 @@ function validateRevision(value: unknown, path: string): void {
   }
 }
 
+function positiveSafeInteger(value: unknown, path: string): void {
+  if (!Number.isSafeInteger(value) || (value as number) < 1) {
+    fail(path, "must be a positive safe integer");
+  }
+}
+
+function nonnegativeSafeInteger(value: unknown, path: string): void {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    fail(path, "must be a non-negative safe integer");
+  }
+}
+
 function validateTextPart(
   value: unknown,
   path: string,
@@ -846,6 +964,56 @@ function validatePayload(
       identifier(object.turn_id, `${path}.turn_id`);
       enumValue(object.status, TURN_STATUSES, `${path}.status`);
       return;
+    case "turn.attempt_started":
+      requiredKeys(object, ["turn_id", "attempt", "operation"], path);
+      allowedKeys(object, ["type", "turn_id", "attempt", "operation"], path);
+      identifier(object.turn_id, `${path}.turn_id`);
+      positiveSafeInteger(object.attempt, `${path}.attempt`);
+      enumValue(object.operation, ["start", "resume"], `${path}.operation`);
+      return;
+    case "turn.retry_scheduled":
+      requiredKeys(
+        object,
+        ["turn_id", "attempt", "reason_category", "delay_ms"],
+        path,
+      );
+      allowedKeys(
+        object,
+        ["type", "turn_id", "attempt", "reason_category", "delay_ms"],
+        path,
+      );
+      identifier(object.turn_id, `${path}.turn_id`);
+      positiveSafeInteger(object.attempt, `${path}.attempt`);
+      enumValue(object.reason_category, RETRY_REASON_CATEGORIES, `${path}.reason_category`);
+      nonnegativeSafeInteger(object.delay_ms, `${path}.delay_ms`);
+      return;
+    case "turn.retry_exhausted":
+      requiredKeys(
+        object,
+        ["turn_id", "attempt", "reason_category", "exhaustion_reason"],
+        path,
+      );
+      allowedKeys(
+        object,
+        ["type", "turn_id", "attempt", "reason_category", "exhaustion_reason"],
+        path,
+      );
+      identifier(object.turn_id, `${path}.turn_id`);
+      positiveSafeInteger(object.attempt, `${path}.attempt`);
+      enumValue(object.reason_category, RETRY_REASON_CATEGORIES, `${path}.reason_category`);
+      enumValue(
+        object.exhaustion_reason,
+        RETRY_EXHAUSTION_REASONS,
+        `${path}.exhaustion_reason`,
+      );
+      return;
+    case "turn.cancellation_requested":
+    case "turn.cancellation_unsupported":
+      requiredKeys(object, ["turn_id", "reason"], path);
+      allowedKeys(object, ["type", "turn_id", "reason"], path);
+      identifier(object.turn_id, `${path}.turn_id`);
+      enumValue(object.reason, TURN_CANCELLATION_REASONS, `${path}.reason`);
+      return;
     case "turn.completed":
       requiredKeys(
         object,
@@ -892,6 +1060,14 @@ function validatePayload(
       record(object.arguments, `${path}.arguments`);
       validateJson(object.arguments, `${path}.arguments`, JSON_LIMITS);
       return;
+    case "tool_call.discovered":
+    case "tool_call.started":
+    case "tool_call.approval_required":
+      requiredKeys(object, ["turn_id", "tool_call_id"], path);
+      allowedKeys(object, ["type", "turn_id", "tool_call_id"], path);
+      identifier(object.turn_id, `${path}.turn_id`);
+      identifier(object.tool_call_id, `${path}.tool_call_id`);
+      return;
     case "tool_call.result_recorded":
       requiredKeys(
         object,
@@ -912,6 +1088,17 @@ function validatePayload(
         validateToolResultPart(part, `${path}.content[${index}]`),
       );
       booleanValue(object.is_error, `${path}.is_error`);
+      return;
+    case "tool_loop.budget_exhausted":
+      requiredKeys(object, ["turn_id", "budget", "limit"], path);
+      allowedKeys(object, ["type", "turn_id", "budget", "limit"], path);
+      identifier(object.turn_id, `${path}.turn_id`);
+      enumValue(
+        object.budget,
+        ["iterations", "total_tool_calls", "wall_clock"],
+        `${path}.budget`,
+      );
+      positiveSafeInteger(object.limit, `${path}.limit`);
       return;
     case "usage.receipt_linked":
       requiredKeys(object, ["turn_id", "usage_receipt_id"], path);

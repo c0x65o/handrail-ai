@@ -13,11 +13,15 @@ import type {
   ConversationTimestamp,
   ConversationToolCallId,
   ConversationTurnCancellationReason,
+  ConversationRetryExhaustionReason,
+  ConversationRetryReasonCategory,
+  ConversationTurnAttemptOperation,
   ConversationTurnCompletionOutcome,
   ConversationTurnError,
   ConversationTurnId,
   ConversationTurnStatus,
   ConversationUsageReceiptId,
+  ToolLoopBudget,
 } from "./events.js";
 
 export type ConversationStateJsonPrimitive = string | number | boolean | null;
@@ -58,6 +62,36 @@ export type ConversationTurnStateStatus =
   | "cancelled"
   | "failed";
 
+export type ConversationTurnCancellationStatus =
+  | "requested"
+  | "unsupported"
+  | "cancelled";
+
+export type ConversationTurnRetryRecord =
+  | {
+      readonly type: "turn.attempt_started";
+      readonly attempt: number;
+      readonly operation: ConversationTurnAttemptOperation;
+      readonly occurred_at: ConversationTimestamp;
+      readonly attribution: ConversationEventAttribution;
+    }
+  | {
+      readonly type: "turn.retry_scheduled";
+      readonly attempt: number;
+      readonly reason_category: ConversationRetryReasonCategory;
+      readonly delay_ms: number;
+      readonly occurred_at: ConversationTimestamp;
+      readonly attribution: ConversationEventAttribution;
+    }
+  | {
+      readonly type: "turn.retry_exhausted";
+      readonly attempt: number;
+      readonly reason_category: ConversationRetryReasonCategory;
+      readonly exhaustion_reason: ConversationRetryExhaustionReason;
+      readonly occurred_at: ConversationTimestamp;
+      readonly attribution: ConversationEventAttribution;
+    };
+
 export interface ConversationTurnRecord {
   readonly turn_id: ConversationTurnId;
   readonly status: ConversationTurnStateStatus;
@@ -65,7 +99,13 @@ export interface ConversationTurnRecord {
   readonly output_message_ids: readonly ConversationMessageId[];
   readonly outcome: ConversationTurnCompletionOutcome | null;
   readonly cancellation_reason: ConversationTurnCancellationReason | null;
+  /** The latest durable cancellation request/outcome, independent of execution status. */
+  readonly cancellation_status: ConversationTurnCancellationStatus | null;
+  readonly cancellation_requested_reason: ConversationTurnCancellationReason | null;
+  /** False only after an authoritative terminal event has won the turn. */
+  readonly remote_may_still_be_running: boolean;
   readonly error: Readonly<ConversationTurnError> | null;
+  readonly retry_history: readonly ConversationTurnRetryRecord[];
   readonly started_at: ConversationTimestamp | null;
   readonly terminal_at: ConversationTimestamp | null;
   readonly attribution: ConversationEventAttribution | null;
@@ -99,8 +139,19 @@ export interface ConversationToolCallRecord {
   readonly name: string | null;
   readonly arguments: ConversationStateJsonObject | null;
   readonly requested_at: ConversationTimestamp | null;
+  readonly discovered_at: ConversationTimestamp | null;
+  readonly started_at: ConversationTimestamp | null;
+  readonly approval_required_at: ConversationTimestamp | null;
   readonly attribution: ConversationEventAttribution | null;
   readonly result: ConversationToolResultRecord | null;
+}
+
+export interface ConversationToolLoopBudgetExhaustion {
+  readonly turn_id: ConversationTurnId;
+  readonly budget: ToolLoopBudget;
+  readonly limit: number;
+  readonly exhausted_at: ConversationTimestamp;
+  readonly attribution: ConversationEventAttribution;
 }
 
 export interface ConversationUsageReceiptLink {
@@ -153,6 +204,7 @@ export interface ConversationState {
   readonly turns: readonly ConversationTurnRecord[];
   readonly active_turn_id: ConversationTurnId | null;
   readonly tool_calls: readonly ConversationToolCallRecord[];
+  readonly tool_loop_budget_exhaustions: readonly ConversationToolLoopBudgetExhaustion[];
   /** References only; receipt bodies live behind the usage contract/store. */
   readonly usage_receipt_links: readonly ConversationUsageReceiptLink[];
   readonly metadata: ConversationStateJsonObject;
@@ -174,6 +226,7 @@ export function createInitialConversationState(
     turns: Object.freeze([]),
     active_turn_id: null,
     tool_calls: Object.freeze([]),
+    tool_loop_budget_exhaustions: Object.freeze([]),
     usage_receipt_links: Object.freeze([]),
     metadata: Object.freeze({}),
     title: null,

@@ -466,7 +466,7 @@ export function createDirectProviderTransport(
     if (active.terminal) {
       return { ok: true, value: { status: "already_terminal" } };
     }
-    active.controller.abort();
+    active.controller.abort(protocolCancellationReason(input.reason));
     return { ok: true, value: { status: "cancellation_requested" } };
   };
 
@@ -551,4 +551,16 @@ export function createDirectProviderTransport(
   };
 
   return transport;
+}
+
+function protocolCancellationReason(
+  reason: CancelTurnInput["reason"],
+): "deadline_exceeded" | "policy_revoked" | "runtime_shutdown" {
+  switch (reason) {
+    case "timeout": return "deadline_exceeded";
+    case "superseded": return "policy_revoked";
+    case "user":
+    case "runtime_shutdown":
+      return "runtime_shutdown";
+  }
 }

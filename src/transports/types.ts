@@ -1,4 +1,5 @@
 import type { AttachmentUploadAdapter } from "../attachments/types.js";
+import type { ConversationTurnCancellationReason } from "../conversation/events.js";
 
 /**
  * A capability is usable only after its negotiated value has been narrowed to
@@ -33,6 +34,8 @@ export interface TransportError {
   readonly code: TransportErrorCode;
   readonly message: string;
   readonly retryable: boolean;
+  /** Optional provider-neutral delay hint normalized and bounded by the runtime. */
+  readonly retryAfterMs?: number;
 }
 
 export interface TransportSuccess<TValue> {
@@ -129,6 +132,8 @@ export interface CancelTurnInput {
   readonly mutationId: string;
   /** Caller-generated key used to make retries of cancellation safe. */
   readonly idempotencyKey: string;
+  /** Provider-neutral, SDK-owned reason for the authoritative request. */
+  readonly reason: ConversationTurnCancellationReason;
 }
 
 export interface AuthoritativeCancelTurnResult {

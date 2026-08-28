@@ -1,6 +1,6 @@
 {
   "name": "@handrail/ai",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "Provider-neutral TypeScript primitives and runtime tooling for building AI applications with Handrail.",
   "license": "UNLICENSED",
   "type": "module",
@@ -41,6 +41,11 @@
       "types": "./dist/providers/gemini.d.ts",
       "import": "./dist/providers/gemini.js",
       "default": "./dist/providers/gemini.js"
+    },
+    "./providers/xai": {
+      "types": "./dist/providers/xai.d.ts",
+      "import": "./dist/providers/xai.js",
+      "default": "./dist/providers/xai.js"
     }
   },
   "files": [

@@ -58,6 +58,17 @@ test("declares Gemini as an explicit opt-in provider boundary", () => {
   assert.equal(packageJson.dependencies["@google/generative-ai"], undefined);
 });
 
+test("declares xAI as an explicit opt-in provider boundary", () => {
+  assert.deepEqual(packageJson.exports["./providers/xai"], {
+    types: "./dist/providers/xai.d.ts",
+    import: "./dist/providers/xai.js",
+    default: "./dist/providers/xai.js",
+  });
+  assert.equal(packageJson.dependencies.openai, undefined);
+  assert.equal(packageJson.dependencies.xai, undefined);
+  assert.equal(packageJson.dependencies["@xai-org/xai-sdk"], undefined);
+});
+
 test("resolves every public ESM export from the built package", async () => {
   for (const exportName of Object.keys(packageJson.exports)) {
     const target = packageJson.exports[exportName].import;
@@ -117,6 +128,8 @@ test("dry pack contains only intended package assets", () => {
     "dist/providers/anthropic.d.ts",
     "dist/providers/gemini.js",
     "dist/providers/gemini.d.ts",
+    "dist/providers/xai.js",
+    "dist/providers/xai.d.ts",
   ]) {
     assert.ok(packedFiles.has(expected), `missing packed file ${expected}`);
   }

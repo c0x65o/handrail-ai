@@ -51,6 +51,8 @@ export type ApplicationToolPolicy<TContext = unknown> = (
 ) => ApplicationToolPolicyDecision | Promise<ApplicationToolPolicyDecision>;
 
 export interface ToolExecutionLedger {
+  /** Optional fast path used to avoid repeating validation/policy for completed calls. */
+  get?(toolCallId: string): Promise<ApplicationToolResult> | undefined;
   /** Implementations must atomically retain and return the first promise for a call id. */
   getOrCreate(
     toolCallId: string,
@@ -60,6 +62,10 @@ export interface ToolExecutionLedger {
 
 export class InMemoryToolExecutionLedger implements ToolExecutionLedger {
   readonly #entries = new Map<string, Promise<ApplicationToolResult>>();
+
+  get(toolCallId: string): Promise<ApplicationToolResult> | undefined {
+    return this.#entries.get(toolCallId);
+  }
 
   getOrCreate(
     toolCallId: string,
@@ -97,7 +103,20 @@ export interface BoundedToolExecutionRequest<TContext = unknown> {
   readonly discoveredTools: readonly ToolDefinition[];
   readonly applicationContext: TContext;
   readonly signal?: AbortSignal;
+  /** Awaited after authorization and before a previously unseen side effect begins. */
+  readonly onExecutionStarted?: () => void | Promise<void>;
 }
+
+export type BoundedToolExecutionOutcome =
+  | {
+      readonly status: "completed";
+      readonly result: ApplicationToolResult;
+    }
+  | {
+      readonly status: "external_approval_required";
+      readonly toolCallId: string;
+      readonly name: string;
+    };
 
 export interface BoundedToolExecutorOptions<TContext = unknown, TDiscoveryContext = unknown> {
   readonly registry: ToolRegistry<ApplicationToolExecutor<TContext>, TDiscoveryContext>;
@@ -494,6 +513,7 @@ export class BoundedToolExecutor<TContext = unknown, TDiscoveryContext = unknown
   readonly #ledger: ToolExecutionLedger;
   readonly #limits: Readonly<BoundedToolExecutorLimits>;
   readonly #limiter: ConcurrencyLimiter;
+  readonly #operations = new Map<string, Promise<BoundedToolExecutionOutcome>>();
 
   constructor(options: BoundedToolExecutorOptions<TContext, TDiscoveryContext>) {
     this.#registry = options.registry;
@@ -504,22 +524,45 @@ export class BoundedToolExecutor<TContext = unknown, TDiscoveryContext = unknown
   }
 
   async execute(request: BoundedToolExecutionRequest<TContext>): Promise<ApplicationToolResult> {
-    const toolCallId = safeIdentifier(request.call.tool_call_id, "unknown_tool_call");
-    const name = safeIdentifier(request.call.name, "unknown_tool");
-    try {
-      return await this.#ledger.getOrCreate(toolCallId, () =>
-        this.#executeOnce(request, toolCallId, name),
-      );
-    } catch {
-      return errorResult(toolCallId, name, "Tool execution could not be recorded.");
-    }
+    const outcome = await this.executeDetailed(request);
+    return outcome.status === "completed"
+      ? outcome.result
+      : errorResult(
+          outcome.toolCallId,
+          outcome.name,
+          "Tool execution requires external approval.",
+        );
   }
 
-  async #executeOnce(
+  /**
+   * Preserves the legacy result-only API while allowing orchestration layers to
+   * pause before an externally approved side effect. Approval pauses are never
+   * inserted into the execution ledger, so a later approved retry can proceed.
+   */
+  async executeDetailed(
+    request: BoundedToolExecutionRequest<TContext>,
+  ): Promise<BoundedToolExecutionOutcome> {
+    const toolCallId = safeIdentifier(request.call.tool_call_id, "unknown_tool_call");
+    const name = safeIdentifier(request.call.name, "unknown_tool");
+    const completed = this.#ledger.get?.(toolCallId);
+    if (completed !== undefined) {
+      return Object.freeze({ status: "completed", result: await completed });
+    }
+    const existing = this.#operations.get(toolCallId);
+    if (existing !== undefined) return existing;
+    const operation = this.#executeDetailedOnce(request, toolCallId, name);
+    this.#operations.set(toolCallId, operation);
+    void operation.finally(() => {
+      if (this.#operations.get(toolCallId) === operation) this.#operations.delete(toolCallId);
+    }).catch(() => undefined);
+    return operation;
+  }
+
+  async #executeDetailedOnce(
     request: BoundedToolExecutionRequest<TContext>,
     toolCallId: string,
     name: string,
-  ): Promise<ApplicationToolResult> {
+  ): Promise<BoundedToolExecutionOutcome> {
     const controller = new AbortController();
     let timedOut = false;
     let phase: "arguments" | "policy" | "execution" = "arguments";
@@ -538,7 +581,11 @@ export class BoundedToolExecutor<TContext = unknown, TDiscoveryContext = unknown
         registration === undefined ||
         !request.discoveredTools.includes(registration.definition)
       ) {
-        return errorResult(toolCallId, name, "Tool is unavailable for this call.");
+        return { status: "completed", result: errorResult(
+          toolCallId,
+          name,
+          "Tool is unavailable for this call.",
+        ) };
       }
 
       const arguments_ = cloneArguments(request.call.arguments);
@@ -546,76 +593,87 @@ export class BoundedToolExecutor<TContext = unknown, TDiscoveryContext = unknown
 
       phase = "policy";
       const decision = await raceWithSignal(
-        Promise.resolve().then(() =>
-          this.#policy({
-            applicationContext: request.applicationContext,
-            arguments: arguments_,
-            definition: registration.definition,
-            signal: controller.signal,
-            toolCallId,
-          }),
-        ),
+        Promise.resolve().then(() => this.#policy({
+          applicationContext: request.applicationContext,
+          arguments: arguments_,
+          definition: registration.definition,
+          signal: controller.signal,
+          toolCallId,
+        })),
         controller.signal,
       );
       if (decision?.outcome === "deny") {
-        return errorResult(
+        return { status: "completed", result: errorResult(
           toolCallId,
           name,
           "Tool execution was denied by application policy.",
-        );
+        ) };
       }
       if (decision?.outcome === "external_approval_required") {
-        return errorResult(toolCallId, name, "Tool execution requires external approval.");
+        return Object.freeze({ status: "external_approval_required", toolCallId, name });
       }
       if (decision?.outcome !== "allow") throw new InvalidPolicyDecision();
 
       phase = "execution";
-      const release = await this.#limiter.acquire(controller.signal);
-      const invocation = Promise.resolve()
-        .then(() =>
-          registration.executor(arguments_, {
-            applicationContext: request.applicationContext,
-            definition: registration.definition,
-            signal: controller.signal,
-            toolCallId,
-          }),
-        )
-        .then((output) => normalizeOutput(output, this.#limits));
-      void invocation.then(release, release);
-      const content = await raceWithSignal(invocation, controller.signal);
-      return result(toolCallId, name, content, false);
+      await request.onExecutionStarted?.();
+      const result = await raceWithSignal(
+        this.#ledger.getOrCreate(toolCallId, async () => {
+          try {
+            const release = await this.#limiter.acquire(controller.signal);
+            const invocation = Promise.resolve()
+              .then(() => registration.executor(arguments_, {
+                applicationContext: request.applicationContext,
+                definition: registration.definition,
+                signal: controller.signal,
+                toolCallId,
+              }))
+              .then((output) => normalizeOutput(output, this.#limits));
+            void invocation.then(release, release);
+            const content = await raceWithSignal(invocation, controller.signal);
+            return resultForExecution(toolCallId, name, content);
+          } catch (error: unknown) {
+            if (error instanceof ExecutionCancelled) {
+              return errorResult(
+                toolCallId,
+                name,
+                timedOut ? "Tool execution timed out." : "Tool execution was cancelled.",
+              );
+            }
+            if (error instanceof InvalidOutput) {
+              return errorResult(toolCallId, name, "Tool returned an invalid or unsafe result.");
+            }
+            return errorResult(toolCallId, name, "Tool execution failed.");
+          }
+        }),
+        controller.signal,
+      );
+      return Object.freeze({ status: "completed", result });
     } catch (error: unknown) {
-      if (error instanceof ExecutionCancelled) {
-        return errorResult(
-          toolCallId,
-          name,
-          timedOut ? "Tool execution timed out." : "Tool execution was cancelled.",
-        );
+      let message = "Tool execution could not be recorded.";
+      if (controller.signal.aborted) {
+        message = timedOut ? "Tool execution timed out." : "Tool execution was cancelled.";
+      } else if (phase === "arguments") {
+        message = "Tool arguments did not match the declared schema.";
+      } else if (error instanceof InvalidPolicyDecision) {
+        message = "Tool authorization returned an invalid decision.";
+      } else if (phase === "policy") {
+        message = "Tool authorization could not be completed.";
       }
-      if (error instanceof InvalidArguments || phase === "arguments") {
-        return errorResult(
-          toolCallId,
-          name,
-          "Tool arguments did not match the declared schema.",
-        );
-      }
-      if (error instanceof InvalidPolicyDecision) {
-        return errorResult(
-          toolCallId,
-          name,
-          "Tool authorization returned an invalid decision.",
-        );
-      }
-      if (phase === "policy") {
-        return errorResult(toolCallId, name, "Tool authorization could not be completed.");
-      }
-      if (error instanceof InvalidOutput) {
-        return errorResult(toolCallId, name, "Tool returned an invalid or unsafe result.");
-      }
-      return errorResult(toolCallId, name, "Tool execution failed.");
+      return Object.freeze({
+        status: "completed",
+        result: errorResult(toolCallId, name, message),
+      });
     } finally {
       clearTimeout(timeout);
       request.signal?.removeEventListener("abort", onCallerAbort);
     }
   }
+}
+
+function resultForExecution(
+  toolCallId: string,
+  name: string,
+  content: ToolResultContentPart[],
+): ApplicationToolResult {
+  return result(toolCallId, name, content, false);
 }

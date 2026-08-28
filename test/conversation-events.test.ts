@@ -39,6 +39,36 @@ const payloads: Fixture[] = [
     status: "waiting_for_tool_result",
   },
   {
+    type: "turn.attempt_started",
+    turn_id: "turn_01",
+    attempt: 1,
+    operation: "start",
+  },
+  {
+    type: "turn.retry_scheduled",
+    turn_id: "turn_01",
+    attempt: 1,
+    reason_category: "unavailable",
+    delay_ms: 250,
+  },
+  {
+    type: "turn.retry_exhausted",
+    turn_id: "turn_01",
+    attempt: 3,
+    reason_category: "unavailable",
+    exhaustion_reason: "maximum_attempts",
+  },
+  {
+    type: "turn.cancellation_requested",
+    turn_id: "turn_01",
+    reason: "user",
+  },
+  {
+    type: "turn.cancellation_unsupported",
+    turn_id: "turn_01",
+    reason: "user",
+  },
+  {
     type: "turn.completed",
     turn_id: "turn_01",
     outcome: "stop",

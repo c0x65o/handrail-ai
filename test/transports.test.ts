@@ -198,6 +198,7 @@ describe("ConversationTransport contract", () => {
       turnId: "turn-1",
       mutationId: "mutation-cancel-1",
       idempotencyKey: "idempotency-cancel-1",
+      reason: "user",
     });
 
     expect(result).toEqual({ status: "unsupported" });

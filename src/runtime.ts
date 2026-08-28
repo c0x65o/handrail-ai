@@ -32,6 +32,14 @@ import {
   type StreamEvent,
   type TerminalStreamEvent,
 } from "./protocol.js";
+import {
+  createRetryPolicy,
+  executeWithRetry,
+  type RetryFailure,
+  type RetryOperationResult,
+  type RetryPolicy,
+  type RetryReasonCategory,
+} from "./retry.js";
 import type {
   ConversationTransport,
   TransportError,
@@ -61,6 +69,8 @@ export interface ConversationRuntimeOptions<TRequest> {
   /** RFC 3339 UTC string or Date. Defaults to the current wall-clock time. */
   readonly now?: () => string | Date;
   readonly replayBatchSize?: number;
+  /** Bounded retry behavior. Defaults to createRetryPolicy(). */
+  readonly retryPolicy?: RetryPolicy;
 }
 
 export interface ConversationRuntimeSendMessageInput<TRequest> {
@@ -80,13 +90,49 @@ export interface ConversationRuntimeError {
   readonly code: string;
   readonly message: string;
   readonly retryable: boolean;
+  readonly retryAfterMs?: number;
 }
 
 export interface ConversationRuntimeTurnResult {
   readonly turnId: ConversationTurnId;
   readonly status: ConversationRuntimeTurnStatus;
+  /** Provider/runtime protocol identity for the observed invocation. */
+  readonly requestId: string | null;
+  readonly traceId: string | null;
+  /** Present when status is completed. */
+  readonly outcome: "stop" | "length" | "tool_calls" | null;
   /** The latest transport frame whose effects are durably represented. */
   readonly checkpoint: TurnResumePoint;
+  readonly error?: ConversationRuntimeError;
+}
+
+export interface ConversationRuntimeContinueTurnInput<TRequest> {
+  /** The completed tool-call turn whose protocol request is being continued. */
+  readonly precedingTurnId: ConversationTurnId;
+  readonly request: TRequest;
+}
+
+export type ConversationRuntimeToolLoopEvent = Extract<
+  ConversationEventPayload,
+  { readonly type:
+    | "tool_call.discovered"
+    | "tool_call.started"
+    | "tool_call.approval_required"
+    | "tool_call.result_recorded"
+    | "tool_loop.budget_exhausted" }
+>;
+
+export type ConversationRuntimeCancellationStatus =
+  | "cancellation_requested"
+  | "unsupported"
+  | "already_terminal"
+  | "failed";
+
+export interface ConversationRuntimeCancellationResult {
+  readonly turnId: ConversationTurnId;
+  readonly status: ConversationRuntimeCancellationStatus;
+  readonly reason: ConversationTurnCancellationReason;
+  readonly remoteMayStillBeRunning: boolean;
   readonly error?: ConversationRuntimeError;
 }
 
@@ -99,7 +145,20 @@ export interface ConversationRuntime<TRequest> {
   sendMessage(
     input: ConversationRuntimeSendMessageInput<TRequest>,
   ): Promise<ConversationRuntimeTurnResult>;
+  /** Starts a message-free protocol continuation while retaining logical input messages. */
+  continueTurn(
+    input: ConversationRuntimeContinueTurnInput<TRequest>,
+  ): Promise<ConversationRuntimeTurnResult>;
+  /** Atomically persists public tool-loop lifecycle evidence. */
+  recordToolLoopEvents(events: readonly ConversationRuntimeToolLoopEvent[]): Promise<void>;
   resumeTurn(turnId: ConversationTurnId): Promise<ConversationRuntimeTurnResult>;
+  /** Interrupt only this runtime's current observation; durable history is unchanged. */
+  stopObserving(turnId: ConversationTurnId): boolean;
+  /** Request authoritative cancellation when the negotiated transport supports it. */
+  cancelTurn(
+    turnId: ConversationTurnId,
+    reason: ConversationTurnCancellationReason,
+  ): Promise<ConversationRuntimeCancellationResult>;
   restoreActiveTurn(): Promise<ConversationRuntimeTurnResult | null>;
   destroy(): void;
 }
@@ -153,6 +212,27 @@ interface FrameState {
   failure: ConversationRuntimeError | null;
 }
 
+type RetryOperationKind = "start" | "resume";
+
+interface RuntimeRetryFailure extends RetryFailure {
+  readonly phase: "start" | "observation";
+  readonly outcome: ConversationRuntimeTurnResult;
+}
+
+class LocalObservationStoppedError extends Error {
+  constructor() {
+    super("The local turn observation was stopped");
+    this.name = "LocalObservationStoppedError";
+  }
+}
+
+class CancellationRequestedError extends Error {
+  constructor() {
+    super("Authoritative turn cancellation was requested");
+    this.name = "CancellationRequestedError";
+  }
+}
+
 const EMPTY_CHECKPOINT: TurnResumePoint = Object.freeze({
   lastAppliedEventId: null,
   lastAppliedCursor: null,
@@ -176,10 +256,20 @@ export async function createConversationRuntime<TRequest>(
   const store = replay.store;
   const createId = options.createId ?? defaultId;
   const now = options.now ?? (() => new Date());
+  const retryPolicy = options.retryPolicy ?? createRetryPolicy();
   const protocolByTurn = new Map<string, TurnProtocolState>();
   const durableFrameKeys = new Set<string>();
   const activeObservations = new Map<string, TurnObservation<unknown>>();
   const runningTurns = new Map<string, Promise<ConversationRuntimeTurnResult>>();
+  const retryControllers = new Map<string, AbortController>();
+  const locallyStoppedTurns = new Set<string>();
+  const cancellationRequestedTurns = new Set<string>();
+  const requestedCancellationReasons = new Map<string, ConversationTurnCancellationReason>();
+  const cancellationOperations = new Map<
+    string,
+    Promise<ConversationRuntimeCancellationResult>
+  >();
+  const cancellationControllers = new Map<string, AbortController>();
   let destroyed = false;
   let mutationBoundary: Promise<void> = Promise.resolve();
 
@@ -263,12 +353,30 @@ export async function createConversationRuntime<TRequest>(
     turnId: ConversationTurnId,
     status: ConversationRuntimeTurnStatus,
     error?: ConversationRuntimeError,
-  ): ConversationRuntimeTurnResult => Object.freeze({
-    turnId,
-    status,
-    checkpoint: checkpointFor(protocolByTurn.get(turnId)),
-    ...(error === undefined ? {} : { error: Object.freeze({ ...error }) }),
-  });
+  ): ConversationRuntimeTurnResult => {
+    const protocol = protocolByTurn.get(turnId);
+    const turn = store.getSnapshot().turns.find((candidate) => candidate.turn_id === turnId);
+    return Object.freeze({
+      turnId,
+      status,
+      requestId: protocol?.requestId ?? null,
+      traceId: protocol?.traceId ?? null,
+      outcome: turn?.outcome ?? null,
+      checkpoint: checkpointFor(protocol),
+      ...(error === undefined
+        ? {}
+        : {
+            error: Object.freeze({
+              code: error.code,
+              message: error.message,
+              retryable: error.retryable,
+              ...(error.retryAfterMs === undefined
+                ? {}
+                : { retryAfterMs: error.retryAfterMs }),
+            }),
+          }),
+    });
+  };
 
   const observeTransport = async (
     turnId: ConversationTurnId,
@@ -331,12 +439,15 @@ export async function createConversationRuntime<TRequest>(
       }
       if (frameState.terminal === null || !frameState.lastWasTerminal) {
         const disconnected = transportResult?.status === "disconnected";
+        const observationError = transportResult?.status === "failed"
+          ? transportResult.error
+          : undefined;
         return result(
           turnId,
           disconnected ? "disconnected" : "interrupted",
           disconnected
             ? undefined
-            : {
+            : observationError ?? {
                 code: "missing_terminal",
                 message: "The transport observation ended without one terminal response frame",
                 retryable: true,
@@ -357,6 +468,7 @@ export async function createConversationRuntime<TRequest>(
           frameState.terminal,
           createId,
           runtimeSource(),
+          requestedCancellationReasons.get(turnId),
         ),
       );
       protocol.safeSequence = frameState.terminal.sequence;
@@ -379,19 +491,94 @@ export async function createConversationRuntime<TRequest>(
     }
   };
 
-  const runObservation = (
+  const runTurnWithRetry = (
     turnId: ConversationTurnId,
-    observationFactory: () => Promise<TurnObservation<unknown>>,
+    operationKind: RetryOperationKind,
+    attemptOperation: () => Promise<RetryOperationResult<
+      ConversationRuntimeTurnResult,
+      RuntimeRetryFailure
+    >>,
   ): Promise<ConversationRuntimeTurnResult> => {
     const existing = runningTurns.get(turnId);
     if (existing !== undefined) return existing;
+    const controller = new AbortController();
+    retryControllers.set(turnId, controller);
     const operation = (async () => {
-      const observation = await observationFactory();
-      return observeTransport(turnId, observation);
+      try {
+        const execution = await executeWithRetry(
+          () => attemptOperation(),
+          {
+          policy: retryPolicy,
+          signal: controller.signal,
+          hooks: {
+            onAttemptStarted: async ({ attempt }) => {
+              const currentOperation =
+                protocolByTurn.get(turnId)?.transportTurnId == null
+                  ? operationKind
+                  : "resume";
+              await persist([retryAttemptStartedDraft(
+                turnId,
+                attempt,
+                currentOperation,
+                runtimeSource(),
+              )]);
+            },
+            onRetryScheduled: async ({ attempt, reasonCategory, delayMs }) => {
+              await persist([retryScheduledDraft(
+                turnId,
+                attempt,
+                reasonCategory,
+                delayMs,
+                runtimeSource(),
+              )]);
+            },
+            onRetryExhausted: async ({
+              attempt,
+              reasonCategory,
+              exhaustionReason,
+            }) => {
+              await persist([retryExhaustedDraft(
+                turnId,
+                attempt,
+                reasonCategory,
+                exhaustionReason,
+                runtimeSource(),
+              )]);
+            },
+          },
+          },
+        );
+        if (execution.ok) return execution.value;
+        if (execution.failure.phase === "start") {
+          const error = execution.failure.outcome.error ?? {
+            code: "internal_error",
+            message: "The transport could not start the turn",
+            retryable: false,
+          };
+          await persist([failedTurnDraft(turnId, error, runtimeSource())]);
+          return result(turnId, "failed", error);
+        }
+        return execution.failure.outcome;
+      } catch (cause) {
+        if (cause instanceof LocalObservationStoppedError) {
+          return result(turnId, "disconnected");
+        }
+        if (cause instanceof CancellationRequestedError) {
+          return result(turnId, "interrupted", {
+            code: "cancellation_requested",
+            message: "Authoritative cancellation was requested while retrying",
+            retryable: false,
+          });
+        }
+        throw cause;
+      }
     })();
     runningTurns.set(turnId, operation);
     void operation.finally(() => {
       if (runningTurns.get(turnId) === operation) runningTurns.delete(turnId);
+      if (retryControllers.get(turnId) === controller) {
+        retryControllers.delete(turnId);
+      }
     }).catch(() => undefined);
     return operation;
   };
@@ -409,16 +596,24 @@ export async function createConversationRuntime<TRequest>(
     if (protocol?.transportTurnId === null || protocol?.transportTurnId === undefined) {
       throw new TypeError("The active turn has no durable transport identity");
     }
-    return runObservation(turnId, async () => {
+    locallyStoppedTurns.delete(turnId);
+    return runTurnWithRetry(turnId, "resume", async () => {
       const resumed = await options.transport.resumeTurn({
         conversationId: options.conversationId,
         turnId: protocol.transportTurnId!,
         resumeFrom: checkpointFor(protocol),
       });
       if (!resumed.ok) {
-        return failedObservation(resumed.error, checkpointFor(protocol));
+        const outcome = result(turnId, "interrupted", resumed.error);
+        return {
+          ok: false,
+          failure: runtimeRetryFailure(resumed.error, "observation", outcome),
+        };
       }
-      return resumed.value;
+      return retryResultForObservation(
+        await observeTransport(turnId, resumed.value),
+        locallyStoppedTurns.has(turnId) || cancellationRequestedTurns.has(turnId),
+      );
     });
   };
 
@@ -469,40 +664,241 @@ export async function createConversationRuntime<TRequest>(
     ];
     await persist(initialDrafts);
 
-    const started = await options.transport.startTurn({
+    return startPersistedTurn(turnId, startMutationId, idempotencyKey, input.request);
+  };
+
+  const startPersistedTurn = (
+    turnId: ConversationTurnId,
+    startMutationId: ConversationClientMutationId,
+    idempotencyKey: string,
+    request: TRequest,
+  ): Promise<ConversationRuntimeTurnResult> => {
+    const startInput = Object.freeze({
       conversationId: options.conversationId,
       mutationId: startMutationId,
       idempotencyKey,
-      request: input.request,
+      request,
     });
-    if (!started.ok) {
-      await persist([failedTurnDraft(turnId, started.error, runtimeSource())]);
-      return result(turnId, "failed", started.error);
-    }
-    if (
-      started.value.conversationId !== options.conversationId ||
-      started.value.mutationId !== startMutationId ||
-      started.value.turnId.length === 0
-    ) {
-      started.value.observation.disconnect();
-      const error = {
-        code: "invalid_transport_handle",
-        message: "The transport returned a handle with conflicting identities",
-        retryable: false,
-      };
-      await persist([failedTurnDraft(turnId, error, runtimeSource())]);
-      return result(turnId, "failed", error);
-    }
-
     const protocol = protocolState(protocolByTurn, turnId);
-    protocol.transportTurnId = started.value.turnId;
+    return runTurnWithRetry(turnId, "start", async () => {
+      if (protocol.transportTurnId !== null) {
+        const resumed = await options.transport.resumeTurn({
+          conversationId: options.conversationId,
+          turnId: protocol.transportTurnId,
+          resumeFrom: checkpointFor(protocol),
+        });
+        if (!resumed.ok) {
+          const outcome = result(turnId, "interrupted", resumed.error);
+          return {
+            ok: false,
+            failure: runtimeRetryFailure(
+              resumed.error,
+              "observation",
+              outcome,
+            ),
+          };
+        }
+        return retryResultForObservation(
+          await observeTransport(turnId, resumed.value),
+          locallyStoppedTurns.has(turnId) || cancellationRequestedTurns.has(turnId),
+        );
+      }
+
+      const started = await options.transport.startTurn(startInput);
+      if (!started.ok) {
+        const outcome = result(turnId, "failed", started.error);
+        return {
+          ok: false,
+          failure: runtimeRetryFailure(started.error, "start", outcome),
+        };
+      }
+      if (
+        started.value.conversationId !== options.conversationId ||
+        started.value.mutationId !== startMutationId ||
+        started.value.turnId.length === 0
+      ) {
+        started.value.observation.disconnect();
+        const error = {
+          code: "invalid_transport_handle",
+          message: "The transport returned a handle with conflicting identities",
+          retryable: false,
+        };
+        await persist([failedTurnDraft(turnId, error, runtimeSource())]);
+        return { ok: true, value: result(turnId, "failed", error) };
+      }
+
+      protocol.transportTurnId = started.value.turnId;
+      await persist([{
+        actor: { type: "assistant" },
+        source: runtimeSource(),
+        metadata: metadataFor({ transportTurnId: started.value.turnId }),
+        payload: { type: "turn.status_changed", turn_id: turnId, status: "queued" },
+      }]);
+      return retryResultForObservation(
+        await observeTransport(turnId, started.value.observation),
+        locallyStoppedTurns.has(turnId) || cancellationRequestedTurns.has(turnId),
+      );
+    });
+  };
+
+  const continueTurn = async (
+    input: ConversationRuntimeContinueTurnInput<TRequest>,
+  ): Promise<ConversationRuntimeTurnResult> => {
+    assertUsable();
+    if (store.getSnapshot().active_turn_id !== null) {
+      throw new ConversationRuntimeBusyError();
+    }
+    const preceding = store.getSnapshot().turns.find(
+      (turn) => turn.turn_id === input.precedingTurnId,
+    );
+    if (
+      preceding === undefined ||
+      preceding.status !== "completed" ||
+      preceding.outcome !== "tool_calls"
+    ) {
+      throw new TypeError("A continuation requires a durable completed tool-call turn");
+    }
+    if (preceding.input_message_ids.length === 0) {
+      throw new TypeError("The preceding turn has no durable logical input messages");
+    }
+    const turnId = createId("turn") as ConversationTurnId;
+    const mutationId = createId("mutation") as ConversationClientMutationId;
+    const idempotencyKey = createId("idempotency");
     await persist([{
       actor: { type: "assistant" },
       source: runtimeSource(),
-      metadata: metadataFor({ transportTurnId: started.value.turnId }),
-      payload: { type: "turn.status_changed", turn_id: turnId, status: "queued" },
+      mutationId,
+      payload: {
+        type: "turn.started",
+        turn_id: turnId,
+        input_message_ids: [...preceding.input_message_ids],
+      },
     }]);
-    return runObservation(turnId, async () => started.value.observation);
+    return startPersistedTurn(turnId, mutationId, idempotencyKey, input.request);
+  };
+
+  const recordToolLoopEvents = async (
+    events: readonly ConversationRuntimeToolLoopEvent[],
+  ): Promise<void> => {
+    assertUsable();
+    await persist(events.map((payload): EventDraft => ({
+      actor: {
+        type: payload.type === "tool_loop.budget_exhausted" ? "system" : "tool",
+      },
+      source: runtimeSource(),
+      payload,
+    })));
+  };
+
+  const stopObserving = (turnId: ConversationTurnId): boolean => {
+    assertUsable();
+    const observation = activeObservations.get(turnId);
+    const retryController = retryControllers.get(turnId);
+    if (observation === undefined && retryController === undefined) return false;
+    locallyStoppedTurns.add(turnId);
+    observation?.disconnect();
+    retryController?.abort(new LocalObservationStoppedError());
+    return true;
+  };
+
+  const cancelTurn = (
+    turnId: ConversationTurnId,
+    reason: ConversationTurnCancellationReason,
+  ): Promise<ConversationRuntimeCancellationResult> => {
+    assertUsable();
+    assertCancellationReason(reason);
+    const existing = cancellationOperations.get(turnId);
+    if (existing !== undefined) return existing;
+
+    const mutationId = createId("mutation") as ConversationClientMutationId;
+    const idempotencyKey = createId("idempotency");
+    const controller = new AbortController();
+    cancellationControllers.set(turnId, controller);
+    const operation = (async (): Promise<ConversationRuntimeCancellationResult> => {
+      const turn = store.getSnapshot().turns.find(
+        (candidate) => candidate.turn_id === turnId,
+      );
+      if (turn === undefined) {
+        throw new TypeError("The requested turn is not durable history");
+      }
+      if (isTerminalTurnStatus(turn.status)) {
+        return cancellationResult(turnId, reason, "already_terminal", false);
+      }
+
+      const protocol = protocolByTurn.get(turnId);
+      if (protocol?.transportTurnId === null || protocol?.transportTurnId === undefined) {
+        return cancellationResult(turnId, reason, "failed", true, {
+          code: "missing_transport_turn_id",
+          message: "The active turn has no durable transport identity",
+          retryable: true,
+        });
+      }
+
+      const capability = options.transport.capabilities.authoritativeCancellation;
+      if (!capability.supported) {
+        await persist([cancellationDraft(
+          "turn.cancellation_unsupported",
+          turnId,
+          reason,
+          mutationId,
+          clientSource(),
+        )]);
+        stopObserving(turnId);
+        return cancellationResult(turnId, reason, "unsupported", true);
+      }
+
+      cancellationRequestedTurns.add(turnId);
+      requestedCancellationReasons.set(turnId, reason);
+      await persist([cancellationDraft(
+        "turn.cancellation_requested",
+        turnId,
+        reason,
+        mutationId,
+        clientSource(),
+      )]);
+      if (!activeObservations.has(turnId)) {
+        retryControllers.get(turnId)?.abort(new CancellationRequestedError());
+      }
+
+      let cancelled;
+      try {
+        cancelled = await raceWithAbort(
+          capability.capability.cancelTurn({
+            conversationId: options.conversationId,
+            turnId: protocol.transportTurnId,
+            mutationId,
+            idempotencyKey,
+            reason,
+          }),
+          controller.signal,
+        );
+      } catch (cause) {
+        if (cause instanceof ConversationRuntimeDestroyedError) throw cause;
+        return cancellationResult(turnId, reason, "failed", true, {
+          code: "cancellation_failed",
+          message: cause instanceof Error
+            ? cause.message
+            : "The authoritative cancellation request failed",
+          retryable: false,
+        });
+      }
+      if (!cancelled.ok) {
+        return cancellationResult(turnId, reason, "failed", true, cancelled.error);
+      }
+      return cancellationResult(
+        turnId,
+        reason,
+        cancelled.value.status,
+        cancelled.value.status === "cancellation_requested",
+      );
+    })();
+    cancellationOperations.set(turnId, operation);
+    void operation.finally(() => {
+      if (cancellationControllers.get(turnId) === controller) {
+        cancellationControllers.delete(turnId);
+      }
+    }).catch(() => undefined);
+    return operation;
   };
 
   const restoreActiveTurn = (): Promise<ConversationRuntimeTurnResult | null> => {
@@ -521,6 +917,14 @@ export async function createConversationRuntime<TRequest>(
   const destroy = (): void => {
     if (destroyed) return;
     destroyed = true;
+    for (const controller of retryControllers.values()) {
+      controller.abort(new ConversationRuntimeDestroyedError());
+    }
+    retryControllers.clear();
+    for (const controller of cancellationControllers.values()) {
+      controller.abort(new ConversationRuntimeDestroyedError());
+    }
+    cancellationControllers.clear();
     for (const observation of activeObservations.values()) observation.disconnect();
     activeObservations.clear();
     store.destroy();
@@ -531,7 +935,11 @@ export async function createConversationRuntime<TRequest>(
     getSnapshot: () => store.getSnapshot(),
     observe,
     sendMessage,
+    continueTurn,
+    recordToolLoopEvents,
     resumeTurn,
+    stopObserving,
+    cancelTurn,
     restoreActiveTurn,
     destroy,
   });
@@ -606,6 +1014,7 @@ function draftsForTerminal(
   terminal: TerminalStreamEvent,
   createId: (kind: ConversationRuntimeIdKind) => string,
   source: ConversationEventSource,
+  requestedCancellationReason?: ConversationTurnCancellationReason,
 ): EventDraft[] {
   const metadata = metadataFor({
     ...(state.protocol.transportTurnId === null
@@ -658,7 +1067,7 @@ function draftsForTerminal(
       payload: {
         type: "turn.cancelled",
         turn_id: state.turnId,
-        reason: cancellationReason(terminal.reason),
+        reason: requestedCancellationReason ?? cancellationReason(terminal.reason),
       },
     }];
   }
@@ -762,15 +1171,185 @@ function failedTurnDraft(
   };
 }
 
-function failedObservation(
-  error: TransportError,
-  checkpoint: TurnResumePoint,
-): TurnObservation<unknown> {
+function retryAttemptStartedDraft(
+  turnId: ConversationTurnId,
+  attempt: number,
+  operation: RetryOperationKind,
+  source: ConversationEventSource,
+): EventDraft {
   return {
-    events: { async *[Symbol.asyncIterator]() { /* no response frames */ } },
-    result: Promise.resolve({ status: "failed", checkpoint, error }),
-    disconnect() { /* already settled */ },
+    actor: { type: "assistant" },
+    source,
+    payload: {
+      type: "turn.attempt_started",
+      turn_id: turnId,
+      attempt,
+      operation,
+    },
   };
+}
+
+function retryScheduledDraft(
+  turnId: ConversationTurnId,
+  attempt: number,
+  reasonCategory: RetryReasonCategory,
+  delayMs: number,
+  source: ConversationEventSource,
+): EventDraft {
+  return {
+    actor: { type: "assistant" },
+    source,
+    payload: {
+      type: "turn.retry_scheduled",
+      turn_id: turnId,
+      attempt,
+      reason_category: reasonCategory,
+      delay_ms: delayMs,
+    },
+  };
+}
+
+function retryExhaustedDraft(
+  turnId: ConversationTurnId,
+  attempt: number,
+  reasonCategory: RetryReasonCategory,
+  exhaustionReason: "maximum_attempts" | "maximum_elapsed_time",
+  source: ConversationEventSource,
+): EventDraft {
+  return {
+    actor: { type: "assistant" },
+    source,
+    payload: {
+      type: "turn.retry_exhausted",
+      turn_id: turnId,
+      attempt,
+      reason_category: reasonCategory,
+      exhaustion_reason: exhaustionReason,
+    },
+  };
+}
+
+function cancellationDraft(
+  type: "turn.cancellation_requested" | "turn.cancellation_unsupported",
+  turnId: ConversationTurnId,
+  reason: ConversationTurnCancellationReason,
+  mutationId: ConversationClientMutationId,
+  source: ConversationEventSource,
+): EventDraft {
+  return {
+    actor: { type: "user" },
+    source,
+    mutationId,
+    payload: { type, turn_id: turnId, reason },
+  };
+}
+
+function cancellationResult(
+  turnId: ConversationTurnId,
+  reason: ConversationTurnCancellationReason,
+  status: ConversationRuntimeCancellationStatus,
+  remoteMayStillBeRunning: boolean,
+  error?: ConversationRuntimeError,
+): ConversationRuntimeCancellationResult {
+  return Object.freeze({
+    turnId,
+    status,
+    reason,
+    remoteMayStillBeRunning,
+    ...(error === undefined ? {} : { error: Object.freeze({ ...error }) }),
+  });
+}
+
+function assertCancellationReason(
+  reason: string,
+): asserts reason is ConversationTurnCancellationReason {
+  if (
+    reason !== "user" &&
+    reason !== "timeout" &&
+    reason !== "superseded" &&
+    reason !== "runtime_shutdown"
+  ) {
+    throw new TypeError("The cancellation reason is not supported");
+  }
+}
+
+function raceWithAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const cleanup = (): void => {
+      signal.removeEventListener("abort", aborted);
+    };
+    const aborted = (): void => {
+      cleanup();
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", aborted, { once: true });
+    operation.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (cause) => {
+        cleanup();
+        reject(cause);
+      },
+    );
+  });
+}
+
+function retryResultForObservation(
+  outcome: ConversationRuntimeTurnResult,
+  suppressRetry = false,
+): RetryOperationResult<ConversationRuntimeTurnResult, RuntimeRetryFailure> {
+  if (
+    suppressRetry ||
+    outcome.status === "completed" ||
+    outcome.status === "cancelled" ||
+    outcome.status === "failed"
+  ) {
+    return { ok: true, value: outcome };
+  }
+  const error = outcome.error ?? {
+    code: "disconnected",
+    message: "The transport observation disconnected before a terminal frame",
+    retryable: true,
+  };
+  return {
+    ok: false,
+    failure: runtimeRetryFailure(
+      error,
+      "observation",
+      outcome,
+      outcome.status === "disconnected" ? "disconnected" : undefined,
+    ),
+  };
+}
+
+function runtimeRetryFailure(
+  error: TransportError | ConversationRuntimeError,
+  phase: RuntimeRetryFailure["phase"],
+  outcome: ConversationRuntimeTurnResult,
+  reasonCategory?: RetryReasonCategory,
+): RuntimeRetryFailure {
+  return Object.freeze({
+    retryable: error.retryable,
+    reasonCategory: reasonCategory ?? retryReasonCategory(error.code),
+    ...("retryAfterMs" in error && error.retryAfterMs !== undefined
+      ? { retryAfterMs: error.retryAfterMs }
+      : {}),
+    phase,
+    outcome,
+  });
+}
+
+function retryReasonCategory(code: string): RetryReasonCategory {
+  switch (code) {
+    case "rate_limited": return "rate_limit";
+    case "timeout": return "timeout";
+    case "unavailable": return "unavailable";
+    case "internal_error": return "internal";
+    default: return "interrupted";
+  }
 }
 
 function cancellationReason(reason: string): ConversationTurnCancellationReason {

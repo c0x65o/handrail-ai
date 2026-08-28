@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   AI_RUNTIME_PROTOCOL_VERSION,
   InMemoryConversationEventStore,
+  createRetryPolicy,
   createConversationRuntime,
   type AppendConversationEventsInput,
   type AppendConversationEventsResult,
@@ -18,6 +19,7 @@ import {
   type StartTurnInput,
   type StreamEvent,
   type TransportResult,
+  type TransportError,
   type TurnHandle,
   type TurnObservation,
   type TurnObservationResult,
@@ -167,6 +169,7 @@ class FakeTransport implements ConversationTransport<unknown, FakeRequest> {
   readonly starts: StartTurnInput<FakeRequest>[] = [];
   readonly resumes: ResumeTurnInput[] = [];
   readonly startObservations: TurnObservation<unknown>[] = [];
+  readonly startFailures: TransportError[] = [];
   readonly resumeObservations: TurnObservation<unknown>[] = [];
   beforeStart: (() => void | Promise<void>) | null = null;
 
@@ -175,6 +178,8 @@ class FakeTransport implements ConversationTransport<unknown, FakeRequest> {
   ): Promise<TransportResult<TurnHandle<unknown>>> {
     this.starts.push(input);
     await this.beforeStart?.();
+    const failure = this.startFailures.shift();
+    if (failure !== undefined) return { ok: false, error: failure };
     const next = this.startObservations.shift();
     if (next === undefined) throw new Error("No fake start observation queued");
     return {
@@ -243,7 +248,7 @@ describe("createConversationRuntime", () => {
       completedFrame(3),
     ], "completed"));
     transport.beforeStart = async () => {
-      expect(await eventStore.getLatestRevision(conversationId)).toBe(3);
+      expect(await eventStore.getLatestRevision(conversationId)).toBe(4);
     };
     const runtime = await createConversationRuntime({
       conversationId,
@@ -289,7 +294,141 @@ describe("createConversationRuntime", () => {
       status: "completed",
       outcome: "stop",
     });
-    expect(notifications).toEqual([3, 4, 5, 7]);
+    expect(notifications).toEqual([3, 4, 5, 6, 8]);
+  });
+
+  it("retries a normalized pre-start failure with the exact logical identities", async () => {
+    const eventStore = new InMemoryConversationEventStore();
+    const transport = new FakeTransport();
+    transport.startFailures.push({
+      code: "unavailable",
+      message: "Normalized upstream unavailability",
+      retryable: true,
+      retryAfterMs: 5,
+      native_status: 503,
+      raw_headers: { "retry-after": "provider-native" },
+    } as TransportError);
+    transport.startObservations.push(observation([
+      startedFrame(),
+      completedFrame(1),
+    ], "completed"));
+    const runtime = await createConversationRuntime({
+      conversationId,
+      clientId,
+      transport,
+      eventStore,
+      retryPolicy: createRetryPolicy({
+        maximumAttempts: 2,
+        initialDelayMs: 0,
+        jitterRatio: 0,
+        sleep: async (_delayMs, signal) => signal.throwIfAborted(),
+      }),
+      ...deterministicSources(),
+    });
+
+    const outcome = await runtime.sendMessage({
+      content: "Retry safely",
+      request: { prompt: "Retry safely" },
+    });
+
+    expect(outcome.status).toBe("completed");
+    expect(transport.starts).toHaveLength(2);
+    expect(transport.starts[0]).toBe(transport.starts[1]);
+    expect(transport.starts[0]).toMatchObject({
+      conversationId,
+      mutationId: transport.starts[1]?.mutationId,
+      idempotencyKey: transport.starts[1]?.idempotencyKey,
+    });
+    expect(runtime.getSnapshot().turns).toHaveLength(1);
+    expect(runtime.getSnapshot().turns[0]?.retry_history).toMatchObject([
+      { type: "turn.attempt_started", attempt: 1, operation: "start" },
+      {
+        type: "turn.retry_scheduled",
+        attempt: 1,
+        reason_category: "unavailable",
+        delay_ms: 5,
+      },
+      { type: "turn.attempt_started", attempt: 2, operation: "start" },
+    ]);
+    const history = await eventStore.read({ conversationId, limit: 100 });
+    const durableJson = JSON.stringify(history.entries.map((entry) => entry.event));
+    expect(durableJson).not.toContain("native_status");
+    expect(durableJson).not.toContain("raw_headers");
+    expect(durableJson).not.toContain("provider-native");
+  });
+
+  it("automatically resumes partial output from the safe cursor without duplicating effects", async () => {
+    const eventStore = new InMemoryConversationEventStore();
+    const transport = new FakeTransport();
+    const tool = frame("response.tool_call", 1, {
+      tool_call_id: "call_resume",
+      name: "lookup",
+      arguments: { query: "safe" },
+    });
+    const usage = frame("response.usage", 3, {
+      usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6 },
+    });
+    transport.startObservations.push(observation([
+      startedFrame(),
+      tool,
+      deltaFrame(2, "Recovered once"),
+      usage,
+    ], "disconnected"));
+    transport.resumeObservations.push(observation([
+      deltaFrame(2, "Recovered once"),
+      structuredClone(usage),
+      completedFrame(4),
+    ], "completed"));
+    const runtime = await createConversationRuntime({
+      conversationId,
+      clientId,
+      transport,
+      eventStore,
+      retryPolicy: createRetryPolicy({
+        maximumAttempts: 2,
+        initialDelayMs: 0,
+        jitterRatio: 0,
+        sleep: async (_delayMs, signal) => signal.throwIfAborted(),
+      }),
+      ...deterministicSources(),
+    });
+
+    const outcome = await runtime.sendMessage({
+      content: "Resume safely",
+      request: { prompt: "Resume safely" },
+    });
+
+    expect(outcome.status).toBe("completed");
+    expect(transport.starts).toHaveLength(1);
+    expect(transport.resumes).toEqual([{
+      conversationId,
+      turnId: "remote-turn-1",
+      resumeFrom: {
+        lastAppliedEventId: "remote-turn-1:1",
+        lastAppliedCursor: "remote-turn-1:1",
+        lastAppliedRevision: 1,
+      },
+    }]);
+    expect(runtime.getSnapshot().messages.filter((message) => message.role === "assistant"))
+      .toMatchObject([{ content: [{ type: "text", text: "Recovered once" }] }]);
+    expect(runtime.getSnapshot().tool_calls).toHaveLength(1);
+    expect(runtime.getSnapshot().tool_calls[0]).toMatchObject({
+      tool_call_id: "call_resume",
+      name: "lookup",
+    });
+    expect(runtime.getSnapshot().usage_receipt_links).toHaveLength(0);
+    const history = await eventStore.read({ conversationId, limit: 100 });
+    const durableJson = JSON.stringify(history.entries.map((entry) => entry.event));
+    expect(durableJson).not.toContain("input_tokens");
+    expect(runtime.getSnapshot().turns[0]?.retry_history).toMatchObject([
+      { type: "turn.attempt_started", attempt: 1, operation: "start" },
+      {
+        type: "turn.retry_scheduled",
+        attempt: 1,
+        reason_category: "disconnected",
+      },
+      { type: "turn.attempt_started", attempt: 2, operation: "resume" },
+    ]);
   });
 
   it("projects a tool-call terminal without entering a tool loop", async () => {
@@ -366,6 +505,7 @@ describe("createConversationRuntime", () => {
       clientId,
       transport: malformedTransport,
       eventStore: new InMemoryConversationEventStore(),
+      retryPolicy: createRetryPolicy({ maximumAttempts: 1 }),
       ...deterministicSources(),
     });
 
@@ -417,6 +557,7 @@ describe("createConversationRuntime", () => {
       clientId,
       transport,
       eventStore,
+      retryPolicy: createRetryPolicy({ maximumAttempts: 1 }),
       ...deterministicSources(),
     });
     const disconnected = await runtimeBeforeRestart.sendMessage({
@@ -425,6 +566,15 @@ describe("createConversationRuntime", () => {
     });
     expect(disconnected.status).toBe("disconnected");
     expect(runtimeBeforeRestart.getSnapshot().turns[0]?.status).toBe("running");
+    expect(runtimeBeforeRestart.getSnapshot().turns[0]?.retry_history).toMatchObject([
+      { type: "turn.attempt_started", attempt: 1, operation: "start" },
+      {
+        type: "turn.retry_exhausted",
+        attempt: 1,
+        reason_category: "disconnected",
+        exhaustion_reason: "maximum_attempts",
+      },
+    ]);
     expect(runtimeBeforeRestart.getSnapshot().messages).toHaveLength(1);
     runtimeBeforeRestart.destroy();
 
@@ -491,5 +641,47 @@ describe("createConversationRuntime", () => {
     const observerCalls = observer.mock.calls.length;
     await Promise.resolve();
     expect(observer).toHaveBeenCalledTimes(observerCalls);
+  });
+
+  it("aborts a pending runtime retry delay on destroy", async () => {
+    const eventStore = new InMemoryConversationEventStore();
+    const transport = new FakeTransport();
+    transport.startFailures.push({
+      code: "unavailable",
+      message: "Temporarily unavailable",
+      retryable: true,
+    });
+    let markSleepStarted!: () => void;
+    const sleepStarted = new Promise<void>((resolve) => {
+      markSleepStarted = resolve;
+    });
+    const runtime = await createConversationRuntime({
+      conversationId,
+      clientId,
+      transport,
+      eventStore,
+      retryPolicy: createRetryPolicy({
+        maximumAttempts: 2,
+        sleep: (_delayMs, signal) => {
+          markSleepStarted();
+          return new Promise<void>((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(signal.reason), {
+              once: true,
+            });
+          });
+        },
+      }),
+      ...deterministicSources(),
+    });
+    const sending = runtime.sendMessage({
+      content: "Destroy during retry",
+      request: { prompt: "Destroy during retry" },
+    });
+    await sleepStarted;
+
+    runtime.destroy();
+
+    await expect(sending).rejects.toThrow("destroyed");
+    expect(transport.starts).toHaveLength(1);
   });
 });

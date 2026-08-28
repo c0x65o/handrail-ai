@@ -325,6 +325,7 @@ describe("createDirectProviderTransport", () => {
         turnId: handle.turnId,
         mutationId: "cancel_mutation",
         idempotencyKey: "cancel_idempotency",
+        reason: "user",
       }),
     ).toEqual({ ok: true, value: { status: "cancellation_requested" } });
     expect(adapter.invocation?.signal.aborted).toBe(true);
@@ -338,6 +339,7 @@ describe("createDirectProviderTransport", () => {
         turnId: handle.turnId,
         mutationId: "cancel_mutation_retry",
         idempotencyKey: "cancel_idempotency_retry",
+        reason: "user",
       }),
     ).toEqual({ ok: true, value: { status: "already_terminal" } });
   });
@@ -386,6 +388,7 @@ describe("createDirectProviderTransport", () => {
         turnId: handle.turnId,
         mutationId: "late_cancel",
         idempotencyKey: "late_cancel_key",
+        reason: "user",
       }),
     ).toEqual({ ok: true, value: { status: "already_terminal" } });
   });

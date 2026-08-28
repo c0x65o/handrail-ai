@@ -18,8 +18,10 @@ import type {
   ConversationStateJsonValue,
   ConversationStateToolResultContentPart,
   ConversationToolCallRecord,
+  ConversationToolLoopBudgetExhaustion,
   ConversationToolResultRecord,
   ConversationTurnRecord,
+  ConversationTurnRetryRecord,
   ConversationUsageReceiptLink,
 } from "./state.js";
 
@@ -174,7 +176,11 @@ export function reduceConversationEvent(
         output_message_ids: freeze([]),
         outcome: null,
         cancellation_reason: null,
+        cancellation_status: null,
+        cancellation_requested_reason: null,
+        remote_may_still_be_running: true,
         error: null,
+        retry_history: freeze([]),
         started_at: event.occurred_at,
         terminal_at: null,
         attribution,
@@ -198,12 +204,60 @@ export function reduceConversationEvent(
       }), payload.turn_id);
     }
 
+    case "turn.attempt_started":
+      return appendTurnRetryRecord(accepted, payload.turn_id, freeze({
+        type: payload.type,
+        attempt: payload.attempt,
+        operation: payload.operation,
+        occurred_at: event.occurred_at,
+        attribution,
+      }));
+
+    case "turn.retry_scheduled":
+      return appendTurnRetryRecord(accepted, payload.turn_id, freeze({
+        type: payload.type,
+        attempt: payload.attempt,
+        reason_category: payload.reason_category,
+        delay_ms: payload.delay_ms,
+        occurred_at: event.occurred_at,
+        attribution,
+      }));
+
+    case "turn.retry_exhausted":
+      return appendTurnRetryRecord(accepted, payload.turn_id, freeze({
+        type: payload.type,
+        attempt: payload.attempt,
+        reason_category: payload.reason_category,
+        exhaustion_reason: payload.exhaustion_reason,
+        occurred_at: event.occurred_at,
+        attribution,
+      }));
+
+    case "turn.cancellation_requested":
+      return updateTurnCancellation(
+        accepted,
+        payload.turn_id,
+        "requested",
+        payload.reason,
+        attribution,
+      );
+
+    case "turn.cancellation_unsupported":
+      return updateTurnCancellation(
+        accepted,
+        payload.turn_id,
+        "unsupported",
+        payload.reason,
+        attribution,
+      );
+
     case "turn.completed":
       return terminateTurn(accepted, payload.turn_id, event.occurred_at, attribution, {
         status: "completed",
         output_message_ids: freeze([...payload.output_message_ids]),
         outcome: payload.outcome,
         cancellation_reason: null,
+        remote_may_still_be_running: false,
         error: null,
       });
 
@@ -213,6 +267,9 @@ export function reduceConversationEvent(
         output_message_ids: freeze([]),
         outcome: null,
         cancellation_reason: payload.reason,
+        cancellation_status: "cancelled",
+        cancellation_requested_reason: payload.reason,
+        remote_may_still_be_running: false,
         error: null,
       });
 
@@ -222,6 +279,7 @@ export function reduceConversationEvent(
         output_message_ids: freeze([]),
         outcome: null,
         cancellation_reason: null,
+        remote_may_still_be_running: false,
         error: freeze({ ...payload.error }),
       });
 
@@ -249,6 +307,9 @@ export function reduceConversationEvent(
         name: payload.name,
         arguments: cloneJsonObject(payload.arguments),
         requested_at: event.occurred_at,
+        discovered_at: null,
+        started_at: null,
+        approval_required_at: null,
         attribution,
         result: null,
       });
@@ -258,8 +319,44 @@ export function reduceConversationEvent(
       });
     }
 
+    case "tool_call.discovered":
+    case "tool_call.started":
+    case "tool_call.approval_required": {
+      const index = accepted.tool_calls.findIndex(
+        (toolCall) => toolCall.tool_call_id === payload.tool_call_id,
+      );
+      const field = payload.type === "tool_call.discovered"
+        ? "discovered_at"
+        : payload.type === "tool_call.started"
+          ? "started_at"
+          : "approval_required_at";
+      if (index >= 0) {
+        const current = accepted.tool_calls[index]!;
+        if (current.turn_id !== payload.turn_id || current[field] !== null) return accepted;
+        return updateToolCall(accepted, index, freeze({
+          ...current,
+          [field]: event.occurred_at,
+        }));
+      }
+      const toolCall: ConversationToolCallRecord = freeze({
+        tool_call_id: payload.tool_call_id,
+        turn_id: payload.turn_id,
+        name: null,
+        arguments: null,
+        requested_at: null,
+        discovered_at: field === "discovered_at" ? event.occurred_at : null,
+        started_at: field === "started_at" ? event.occurred_at : null,
+        approval_required_at: field === "approval_required_at" ? event.occurred_at : null,
+        attribution: null,
+        result: null,
+      });
+      return freeze({
+        ...accepted,
+        tool_calls: freeze([...accepted.tool_calls, toolCall]),
+      });
+    }
+
     case "tool_call.result_recorded": {
-      if (isTerminalTurn(accepted, payload.turn_id)) return accepted;
       const result: ConversationToolResultRecord = freeze({
         content: cloneToolResultContent(payload.content),
         is_error: payload.is_error,
@@ -282,12 +379,35 @@ export function reduceConversationEvent(
         name: null,
         arguments: null,
         requested_at: null,
+        discovered_at: null,
+        started_at: null,
+        approval_required_at: null,
         attribution: null,
         result,
       });
       return freeze({
         ...accepted,
         tool_calls: freeze([...accepted.tool_calls, toolCall]),
+      });
+    }
+
+    case "tool_loop.budget_exhausted": {
+      if (accepted.tool_loop_budget_exhaustions.some(
+        (item) => item.turn_id === payload.turn_id && item.budget === payload.budget,
+      )) return accepted;
+      const exhaustion: ConversationToolLoopBudgetExhaustion = freeze({
+        turn_id: payload.turn_id,
+        budget: payload.budget,
+        limit: payload.limit,
+        exhausted_at: event.occurred_at,
+        attribution,
+      });
+      return freeze({
+        ...accepted,
+        tool_loop_budget_exhaustions: freeze([
+          ...accepted.tool_loop_budget_exhaustions,
+          exhaustion,
+        ]),
       });
     }
 
@@ -465,7 +585,11 @@ function emptyTurn(
     output_message_ids: freeze([]),
     outcome: null,
     cancellation_reason: null,
+    cancellation_status: null,
+    cancellation_requested_reason: null,
+    remote_may_still_be_running: true,
     error: null,
+    retry_history: freeze([]),
     started_at: null,
     terminal_at: null,
   });
@@ -505,8 +629,12 @@ function terminateTurn(
     | "output_message_ids"
     | "outcome"
     | "cancellation_reason"
+    | "remote_may_still_be_running"
     | "error"
-  >,
+  > & Partial<Pick<
+    ConversationTurnRecord,
+    "cancellation_status" | "cancellation_requested_reason"
+  >>,
 ): ConversationState {
   const index = findTurn(state, turnId);
   if (index >= 0) {
@@ -524,8 +652,59 @@ function terminateTurn(
     started_at: null,
     terminal_at: terminalAt,
     attribution,
+    retry_history: freeze([]),
+    cancellation_status: terminal.cancellation_status ?? null,
+    cancellation_requested_reason: terminal.cancellation_requested_reason ?? null,
     ...terminal,
   }), state.active_turn_id);
+}
+
+function updateTurnCancellation(
+  state: ConversationState,
+  turnId: ConversationTurnRecord["turn_id"],
+  status: Exclude<ConversationTurnRecord["cancellation_status"], null | "cancelled">,
+  reason: Exclude<ConversationTurnRecord["cancellation_requested_reason"], null>,
+  attribution: ConversationEventAttribution,
+): ConversationState {
+  const index = findTurn(state, turnId);
+  if (index >= 0) {
+    const turn = state.turns[index]!;
+    if (isTerminal(turn)) return state;
+    return updateTurn(state, index, freeze({
+      ...turn,
+      cancellation_status: status,
+      cancellation_requested_reason: reason,
+      remote_may_still_be_running: true,
+    }), state.active_turn_id);
+  }
+  return appendTurn(state, freeze({
+    ...emptyTurn({ turn_id: turnId, status: "queued", attribution }),
+    cancellation_status: status,
+    cancellation_requested_reason: reason,
+  }), turnId);
+}
+
+function appendTurnRetryRecord(
+  state: ConversationState,
+  turnId: ConversationTurnRecord["turn_id"],
+  record: ConversationTurnRetryRecord,
+): ConversationState {
+  const index = findTurn(state, turnId);
+  if (index >= 0) {
+    const turn = state.turns[index]!;
+    return updateTurn(state, index, freeze({
+      ...turn,
+      retry_history: freeze([...turn.retry_history, record]),
+    }), state.active_turn_id);
+  }
+  return appendTurn(state, freeze({
+    ...emptyTurn({
+      turn_id: turnId,
+      status: "queued",
+      attribution: record.attribution,
+    }),
+    retry_history: freeze([record]),
+  }), turnId);
 }
 
 function updateToolCall(

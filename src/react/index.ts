@@ -1,5 +1,34 @@
 /** Optional React entry point for @handrail/ai. */
 export {
+  ConversationProvider,
+  type ConversationFactoryProviderProps,
+  type ConversationProviderFactory,
+  type ConversationProviderProps,
+  type ConversationRuntimeProviderProps,
+  type ConversationStoreProviderProps,
+} from "./context.js";
+export {
+  useConversationActions,
+  useConversationSelector,
+  useConversationSnapshot,
+  useConversationStore,
+  type ConversationActions,
+} from "./hooks.js";
+export {
+  useConversationComposer,
+  type ConversationComposerAttachment,
+  type ConversationComposerAttachmentStatus,
+  type ConversationComposerDropProps,
+  type ConversationComposerEnterBehavior,
+  type ConversationComposerError,
+  type ConversationComposerFileInputProps,
+  type ConversationComposerImageIntakeOptions,
+  type ConversationComposerResult,
+  type ConversationComposerSubmission,
+  type ConversationComposerTextareaProps,
+  type UseConversationComposerOptions,
+} from "./use-conversation-composer.js";
+export {
   ChatDialogClose,
   ChatDialogContent,
   ChatDialogDescription,
