@@ -4,3 +4,9 @@
 *.env.*
 !.env.example
 !*.env.example
+
+node_modules/
+dist/
+coverage/
+*.tgz
+.DS_Store
