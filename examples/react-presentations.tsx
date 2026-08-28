@@ -8,7 +8,6 @@ import {
   type AttachmentUploader,
   type AuthoritativeAttribution,
   type CancelTurnInput,
-  type ChatRequest,
   type ConversationClientId,
   type ConversationId,
   type ConversationRuntime,
@@ -497,11 +496,16 @@ function CustomHooksChat({ runtime, uploader }: ReactPresentationRecipeProps) {
   const actions = useConversationActions<ExampleChatRequest>();
   const composer = useExampleComposer(runtime, uploader);
   const status = useMemo(() => turns.at(-1)?.status ?? "idle", [turns]);
+  const retryableTurn = useMemo(
+    () => [...turns].reverse().find((turn) =>
+      turn.status === "failed" && turn.error?.retryable === true
+    ),
+    [turns],
+  );
   const submit = useCallback((event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     void composer.submit(event);
   }, [composer]);
-  void actions;
 
   return (
     <main className="app-custom-chat" aria-labelledby="app-custom-chat-title">
@@ -548,7 +552,15 @@ function CustomHooksChat({ runtime, uploader }: ReactPresentationRecipeProps) {
         <button type="button" disabled={activeTurnId === null} onClick={() => void composer.stop()}>
           Stop
         </button>
-        <button type="button" disabled>Retry</button>
+        <button
+          type="button"
+          disabled={retryableTurn === undefined}
+          onClick={() => {
+            if (retryableTurn) void actions.resumeTurn(retryableTurn.turn_id);
+          }}
+        >
+          Retry
+        </button>
       </form>
     </main>
   );
@@ -563,7 +575,3 @@ export const REACT_PRESENTATION_RECIPES = [
   FullPageChatRecipe,
   CustomHooksChatRecipe,
 ] as const;
-
-// ChatRequest is intentionally imported as a public declaration proof: recipe requests are
-// application-specific and need not expose provider credentials or make network calls.
-export type CheckedPublicChatRequestDeclaration = ChatRequest;
