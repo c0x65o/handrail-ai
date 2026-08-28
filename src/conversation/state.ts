@@ -40,6 +40,8 @@ export interface ConversationEventAttribution {
 
 export interface ConversationMessageRecord {
   readonly message_id: ConversationMessageId;
+  /** The originating turn for incrementally appended assistant text. */
+  readonly turn_id?: ConversationTurnId | null;
   /** Null only when an attachment referenced the message before it was created. */
   readonly role: ConversationMessageRole | null;
   readonly content: readonly Readonly<ConversationMessageContentPart>[];

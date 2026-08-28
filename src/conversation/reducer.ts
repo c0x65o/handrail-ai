@@ -99,6 +99,43 @@ export function reduceConversationEvent(
       });
     }
 
+    case "message.text_appended": {
+      const index = accepted.messages.findIndex(
+        (message) => message.message_id === payload.message_id,
+      );
+      if (index >= 0) {
+        const current = accepted.messages[index]!;
+        if (
+          (current.role !== null && current.role !== "assistant") ||
+          (current.role === "assistant" && current.turn_id !== payload.turn_id)
+        ) {
+          return accepted;
+        }
+        return updateMessages(accepted, index, freeze({
+          ...current,
+          turn_id: payload.turn_id,
+          role: "assistant",
+          content: appendMessageText(current.content, payload.text),
+          created_at: current.created_at ?? event.occurred_at,
+          attribution: current.attribution ?? attribution,
+        }));
+      }
+
+      const message: ConversationMessageRecord = freeze({
+        message_id: payload.message_id,
+        turn_id: payload.turn_id,
+        role: "assistant",
+        content: freeze([freeze({ type: "text", text: payload.text })]),
+        attachments: freeze([]),
+        created_at: event.occurred_at,
+        attribution,
+      });
+      return freeze({
+        ...accepted,
+        messages: freeze([...accepted.messages, message]),
+      });
+    }
+
     case "message.attachment_referenced": {
       const reference = cloneAttachment(payload.attachment);
       const alreadyLinked = accepted.attachments.some(
@@ -523,6 +560,20 @@ function cloneMessageContent(
   content: readonly ConversationMessageContentPart[],
 ): readonly Readonly<ConversationMessageContentPart>[] {
   return freeze(content.map((part) => freeze({ type: part.type, text: part.text })));
+}
+
+function appendMessageText(
+  content: readonly Readonly<ConversationMessageContentPart>[],
+  text: string,
+): readonly Readonly<ConversationMessageContentPart>[] {
+  if (content.length === 0) {
+    return freeze([freeze({ type: "text", text })]);
+  }
+  const next = [...content];
+  const index = next.length - 1;
+  const current = next[index]!;
+  next[index] = freeze({ type: "text", text: current.text + text });
+  return freeze(next);
 }
 
 function cloneToolResultContent(

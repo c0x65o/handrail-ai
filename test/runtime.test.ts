@@ -130,6 +130,80 @@ function observation(
   };
 }
 
+function pausableObservation(
+  framesBeforePause: readonly unknown[],
+  framesAfterPause: readonly unknown[],
+  status: TurnObservationResult["status"],
+): {
+  readonly observation: TurnObservation<unknown>;
+  readonly paused: Promise<void>;
+  readonly release: () => void;
+} {
+  let disconnected = false;
+  let settled = false;
+  let resolveResult!: (result: TurnObservationResult) => void;
+  let markPaused!: () => void;
+  let releasePause!: () => void;
+  let checkpoint: TurnResumePoint = {
+    lastAppliedEventId: null,
+    lastAppliedCursor: null,
+    lastAppliedRevision: null,
+  };
+  const result = new Promise<TurnObservationResult>((resolve) => {
+    resolveResult = resolve;
+  });
+  const paused = new Promise<void>((resolve) => {
+    markPaused = resolve;
+  });
+  const released = new Promise<void>((resolve) => {
+    releasePause = resolve;
+  });
+  const settle = (next: TurnObservationResult): void => {
+    if (settled) return;
+    settled = true;
+    resolveResult(next);
+  };
+  const rememberCheckpoint = (value: unknown): void => {
+    const candidate = value as { request_id?: unknown; sequence?: unknown };
+    if (
+      typeof candidate.request_id === "string" &&
+      typeof candidate.sequence === "number"
+    ) {
+      checkpoint = checkpointFor(value);
+    }
+  };
+
+  return {
+    observation: {
+      events: {
+        async *[Symbol.asyncIterator]() {
+          for (const value of framesBeforePause) {
+            if (disconnected) return;
+            rememberCheckpoint(value);
+            yield value;
+          }
+          markPaused();
+          await released;
+          for (const value of framesAfterPause) {
+            if (disconnected) return;
+            rememberCheckpoint(value);
+            yield value;
+          }
+          settle({ status, checkpoint } as TurnObservationResult);
+        },
+      },
+      result,
+      disconnect() {
+        disconnected = true;
+        releasePause();
+        settle({ status: "disconnected", checkpoint });
+      },
+    },
+    paused,
+    release: releasePause,
+  };
+}
+
 function pendingObservation(onDisconnect: () => void): TurnObservation<unknown> {
   let release!: () => void;
   const released = new Promise<void>((resolve) => {
@@ -241,12 +315,12 @@ describe("createConversationRuntime", () => {
   it("persists optimistic text and attachment facts before publishing, then durably finalizes streamed text", async () => {
     const eventStore = new TrackingEventStore();
     const transport = new FakeTransport();
-    transport.startObservations.push(observation([
-      startedFrame(),
-      deltaFrame(1, "Hello "),
-      deltaFrame(2, "there"),
-      completedFrame(3),
-    ], "completed"));
+    const controlled = pausableObservation(
+      [startedFrame(), deltaFrame(1, "Hello ")],
+      [deltaFrame(2, "there"), completedFrame(3)],
+      "completed",
+    );
+    transport.startObservations.push(controlled.observation);
     transport.beforeStart = async () => {
       expect(await eventStore.getLatestRevision(conversationId)).toBe(4);
     };
@@ -264,7 +338,7 @@ describe("createConversationRuntime", () => {
       notifications.push(snapshot.revision ?? 0);
     });
 
-    const outcome = await runtime.sendMessage({
+    const sending = runtime.sendMessage({
       content: "Describe this image",
       attachments: [{
         attachment_id: "attachment_runtime" as never,
@@ -274,6 +348,16 @@ describe("createConversationRuntime", () => {
       }],
       request: { prompt: "Describe this image" },
     });
+
+    await controlled.paused;
+    expect(runtime.getSnapshot().messages[1]).toMatchObject({
+      role: "assistant",
+      content: [{ type: "text", text: "Hello " }],
+    });
+    expect(notifications.at(-1)).toBe(7);
+
+    controlled.release();
+    const outcome = await sending;
 
     expect(outcome).toMatchObject({ status: "completed", checkpoint: {
       lastAppliedEventId: "remote-turn-1:3",
@@ -290,11 +374,22 @@ describe("createConversationRuntime", () => {
         content: [{ type: "text", text: "Hello there" }],
       },
     ]);
+    const assistantMessageId = runtime.getSnapshot().messages[1]?.message_id;
+    expect(assistantMessageId).toBeDefined();
     expect(runtime.getSnapshot().turns[0]).toMatchObject({
       status: "completed",
       outcome: "stop",
+      output_message_ids: [assistantMessageId],
     });
-    expect(notifications).toEqual([3, 4, 5, 6, 8]);
+    expect(notifications).toEqual([3, 4, 5, 6, 7, 8, 9]);
+    const history = await eventStore.read({ conversationId, limit: 100 });
+    expect(history.entries.filter(
+      ({ event }) => event.payload.type === "message.text_appended",
+    )).toHaveLength(2);
+    expect(history.entries.filter(
+      ({ event }) =>
+        event.payload.type === "message.created" && event.payload.role === "assistant",
+    )).toHaveLength(0);
   });
 
   it("retries a normalized pre-start failure with the exact logical identities", async () => {
@@ -336,10 +431,13 @@ describe("createConversationRuntime", () => {
     expect(transport.starts[0]).toBe(transport.starts[1]);
     expect(transport.starts[0]).toMatchObject({
       conversationId,
+      conversationTurnId: transport.starts[1]?.conversationTurnId,
       mutationId: transport.starts[1]?.mutationId,
       idempotencyKey: transport.starts[1]?.idempotencyKey,
     });
     expect(runtime.getSnapshot().turns).toHaveLength(1);
+    expect(runtime.getSnapshot().messages).toHaveLength(1);
+    expect(runtime.getSnapshot().turns[0]?.output_message_ids).toEqual([]);
     expect(runtime.getSnapshot().turns[0]?.retry_history).toMatchObject([
       { type: "turn.attempt_started", attempt: 1, operation: "start" },
       {
@@ -351,6 +449,16 @@ describe("createConversationRuntime", () => {
       { type: "turn.attempt_started", attempt: 2, operation: "start" },
     ]);
     const history = await eventStore.read({ conversationId, limit: 100 });
+    const durableTurnId = history.entries.flatMap(({ event }) =>
+      event.payload.type === "turn.started" ? [event.payload.turn_id] : []
+    )[0];
+    expect(durableTurnId).toBeDefined();
+    expect(transport.starts.map((input) => input.conversationTurnId)).toEqual([
+      durableTurnId,
+      durableTurnId,
+    ]);
+    expect(transport.starts[0]?.conversationTurnId).not.toBe("remote-turn-1");
+    expect(outcome.turnId).toBe(durableTurnId);
     const durableJson = JSON.stringify(history.entries.map((entry) => entry.event));
     expect(durableJson).not.toContain("native_status");
     expect(durableJson).not.toContain("raw_headers");
@@ -404,9 +512,9 @@ describe("createConversationRuntime", () => {
       conversationId,
       turnId: "remote-turn-1",
       resumeFrom: {
-        lastAppliedEventId: "remote-turn-1:1",
-        lastAppliedCursor: "remote-turn-1:1",
-        lastAppliedRevision: 1,
+        lastAppliedEventId: "remote-turn-1:2",
+        lastAppliedCursor: "remote-turn-1:2",
+        lastAppliedRevision: 2,
       },
     }]);
     expect(runtime.getSnapshot().messages.filter((message) => message.role === "assistant"))
@@ -470,6 +578,7 @@ describe("createConversationRuntime", () => {
 
   it("deduplicates request_id plus sequence replays while preserving text once", async () => {
     const transport = new FakeTransport();
+    const eventStore = new InMemoryConversationEventStore();
     const delta = deltaFrame(1, "once");
     transport.startObservations.push(observation([
       startedFrame(),
@@ -481,7 +590,7 @@ describe("createConversationRuntime", () => {
       conversationId,
       clientId,
       transport,
-      eventStore: new InMemoryConversationEventStore(),
+      eventStore,
       ...deterministicSources(),
     });
 
@@ -492,6 +601,10 @@ describe("createConversationRuntime", () => {
     expect(runtime.getSnapshot().messages[1]?.content).toEqual([
       { type: "text", text: "once" },
     ]);
+    const history = await eventStore.read({ conversationId, limit: 100 });
+    expect(history.entries.filter(
+      ({ event }) => event.payload.type === "message.text_appended",
+    )).toHaveLength(1);
   });
 
   it("leaves malformed and conflicting-terminal observations nonterminal", async () => {
@@ -575,12 +688,21 @@ describe("createConversationRuntime", () => {
         exhaustion_reason: "maximum_attempts",
       },
     ]);
-    expect(runtimeBeforeRestart.getSnapshot().messages).toHaveLength(1);
+    expect(disconnected.checkpoint).toMatchObject({
+      lastAppliedEventId: "remote-turn-1:1",
+      lastAppliedRevision: 1,
+    });
+    expect(runtimeBeforeRestart.getSnapshot().messages[1]).toMatchObject({
+      role: "assistant",
+      content: [{ type: "text", text: "Recovered" }],
+    });
+    const streamedMessageId = runtimeBeforeRestart.getSnapshot().messages[1]?.message_id;
     runtimeBeforeRestart.destroy();
 
     transport.resumeObservations.push(observation([
       deltaFrame(1, "Recovered"),
-      completedFrame(2),
+      deltaFrame(2, " once"),
+      completedFrame(3),
     ], "completed"));
     const runtimeAfterRestart = await createConversationRuntime({
       conversationId,
@@ -589,9 +711,10 @@ describe("createConversationRuntime", () => {
       eventStore,
       ...deterministicSources(),
     });
-    expect(runtimeAfterRestart.getSnapshot().messages[0]?.content).toEqual([
-      { type: "text", text: "Resume me" },
-    ]);
+    expect(runtimeAfterRestart.getSnapshot().messages[1]).toMatchObject({
+      message_id: streamedMessageId,
+      content: [{ type: "text", text: "Recovered" }],
+    });
     expect(runtimeAfterRestart.getSnapshot().active_turn_id).not.toBeNull();
 
     const resumed = await runtimeAfterRestart.restoreActiveTurn();
@@ -600,15 +723,23 @@ describe("createConversationRuntime", () => {
       conversationId,
       turnId: "remote-turn-1",
       resumeFrom: {
-        lastAppliedEventId: "remote-turn-1:0",
-        lastAppliedCursor: "remote-turn-1:0",
-        lastAppliedRevision: 0,
+        lastAppliedEventId: "remote-turn-1:1",
+        lastAppliedCursor: "remote-turn-1:1",
+        lastAppliedRevision: 1,
       },
     }]);
-    expect(runtimeAfterRestart.getSnapshot().messages[1]?.content).toEqual([
-      { type: "text", text: "Recovered" },
-    ]);
-    expect(runtimeAfterRestart.getSnapshot().turns[0]?.status).toBe("completed");
+    expect(runtimeAfterRestart.getSnapshot().messages[1]).toMatchObject({
+      message_id: streamedMessageId,
+      content: [{ type: "text", text: "Recovered once" }],
+    });
+    expect(runtimeAfterRestart.getSnapshot().turns[0]).toMatchObject({
+      status: "completed",
+      output_message_ids: [streamedMessageId],
+    });
+    const history = await eventStore.read({ conversationId, limit: 100 });
+    expect(history.entries.filter(
+      ({ event }) => event.payload.type === "message.text_appended",
+    )).toHaveLength(2);
   });
 
   it("disconnects local observers and clears subscriptions on destroy without deleting history", async () => {

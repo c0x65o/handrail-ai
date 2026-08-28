@@ -1,5 +1,9 @@
 import type { AttachmentUploadAdapter } from "../attachments/types.js";
-import type { ConversationTurnCancellationReason } from "../conversation/events.js";
+import type {
+  ConversationTurnCancellationReason,
+  ConversationTurnId,
+} from "../conversation/events.js";
+import type { NormalizedUsageReceipt } from "../usage.js";
 
 /**
  * A capability is usable only after its negotiated value has been narrowed to
@@ -64,6 +68,8 @@ export interface TurnResumePoint {
 
 export interface StartTurnInput<TRequest = unknown> {
   readonly conversationId: string;
+  /** Caller-owned durable turn identifier used by conversation state. */
+  readonly conversationTurnId: ConversationTurnId;
   /** Caller-generated mutation identifier used by conversation state. */
   readonly mutationId: string;
   /** Caller-generated key used to make retries of this start operation safe. */
@@ -81,11 +87,13 @@ export interface ResumeTurnInput {
 export interface TurnObservationCompleted {
   readonly status: "completed";
   readonly checkpoint: TurnResumePoint;
+  readonly usageReceipt?: NormalizedUsageReceipt | null;
 }
 
 export interface TurnObservationCancelled {
   readonly status: "cancelled";
   readonly checkpoint: TurnResumePoint;
+  readonly usageReceipt?: NormalizedUsageReceipt | null;
 }
 
 export interface TurnObservationDisconnected {
@@ -97,6 +105,7 @@ export interface TurnObservationFailed {
   readonly status: "failed";
   readonly checkpoint: TurnResumePoint;
   readonly error: TransportError;
+  readonly usageReceipt?: NormalizedUsageReceipt | null;
 }
 
 export type TurnObservationResult =

@@ -19,6 +19,12 @@ const payloads: Fixture[] = [
     content: [{ type: "text", text: "Where is my order?" }],
   },
   {
+    type: "message.text_appended",
+    turn_id: "turn_01",
+    message_id: "msg_02",
+    text: "Your order is ",
+  },
+  {
     type: "message.attachment_referenced",
     message_id: "msg_01",
     attachment: {
@@ -192,7 +198,7 @@ describe("durable conversation event contract", () => {
       ).toThrow(/future_payload_field.*not a supported field/);
     }
 
-    const attachmentPayload = payloads[1]!;
+    const attachmentPayload = payloads[2]!;
     parseConversationEvent(event(attachmentPayload));
     expect(() =>
       parseConversationEvent(
@@ -205,6 +211,49 @@ describe("durable conversation event contract", () => {
         }),
       ),
     ).toThrow(/remote_url.*not a supported field/);
+  });
+
+  it("accepts one bounded assistant text chunk and rejects malformed append payloads", () => {
+    const payload = {
+      type: "message.text_appended",
+      turn_id: "turn_01",
+      message_id: "msg_assistant_01",
+      text: "Hello, world!",
+    };
+
+    expect(parseConversationEvent(event(payload)).payload).toBe(payload);
+
+    for (const malformed of [
+      { ...payload, turn_id: "" },
+      { ...payload, turn_id: 42 },
+      { ...payload, message_id: "" },
+      {
+        ...payload,
+        message_id: "m".repeat(
+          CONVERSATION_EVENT_LIMITS.identifierLength + 1,
+        ),
+      },
+      { ...payload, text: "" },
+      { ...payload, text: "x".repeat(CONVERSATION_EVENT_LIMITS.textLength + 1) },
+      {
+        ...payload,
+        text: "😀".repeat(
+          Math.floor(CONVERSATION_EVENT_LIMITS.textChunkBytes / 4) + 1,
+        ),
+      },
+      { ...payload, provider_delta: { native: true } },
+    ]) {
+      expect(() => parseConversationEvent(event(malformed))).toThrow(
+        ConversationEventValidationError,
+      );
+      expect(isConversationEvent(event(malformed))).toBe(false);
+    }
+
+    for (const key of ["turn_id", "message_id", "text"]) {
+      expect(() => parseConversationEvent(event(without(payload, key)))).toThrow(
+        new RegExp(`${key}.*required`),
+      );
+    }
   });
 
   it("requires non-empty event and conversation identifiers and a revision", () => {

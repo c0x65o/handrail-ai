@@ -6,6 +6,7 @@ import {
   createDirectProviderTransport,
   type AuthoritativeAttribution,
   type ChatRequest,
+  type ConversationTurnId,
   type DirectProviderTurnContext,
   type ProviderAdapter,
   type ProviderAdapterInvocation,
@@ -63,11 +64,14 @@ const request: ChatRequest = {
   metadata: { surface: "support_chat" },
 };
 
+const conversationTurnId = "conversation_turn_direct" as ConversationTurnId;
+const remoteTransportTurnId = "remote_transport_turn_direct";
+
 function context(): DirectProviderTurnContext & { readonly private_marker: string } {
   return {
     request_id: "request_direct",
     trace_id: "trace_direct",
-    turn_id: "turn_direct",
+    turn_id: remoteTransportTurnId,
     attribution,
     correlation_hints: request.correlation_hints,
     metadata: { route: "direct" },
@@ -136,6 +140,7 @@ async function start(adapter: ProviderAdapter) {
   const transport = createTransport(adapter);
   const started = await transport.startTurn({
     conversationId: "conversation_direct",
+    conversationTurnId,
     mutationId: "mutation_direct",
     idempotencyKey: "idempotency_direct",
     request,
@@ -180,6 +185,7 @@ describe("createDirectProviderTransport", () => {
     const events = await collect(handle.observation.events);
     const result = await handle.observation.result;
 
+    expect(handle.turnId).toBe(remoteTransportTurnId);
     expect(events.map((event) => event.type)).toEqual([
       "response.started",
       "response.text.delta",
@@ -203,7 +209,7 @@ describe("createDirectProviderTransport", () => {
       usageReceipt: {
         usage_receipt_id: "usage_direct",
         conversation_id: "conversation_direct",
-        turn_id: "turn_direct",
+        turn_id: conversationTurnId,
         provider_id: "fake-direct",
         model_id: "fake-model-v1",
         terminal_status: "completed",
@@ -214,6 +220,7 @@ describe("createDirectProviderTransport", () => {
         },
       },
     });
+    expect(JSON.stringify(result)).not.toContain(remoteTransportTurnId);
     expect(JSON.stringify(events)).not.toContain("private-server-value");
   });
 
@@ -280,7 +287,7 @@ describe("createDirectProviderTransport", () => {
           code: "upstream_unavailable",
           message: "Provider temporarily unavailable",
         },
-        usage: null,
+        usage,
       };
     });
     const { handle } = await start(adapter);
@@ -292,7 +299,10 @@ describe("createDirectProviderTransport", () => {
     expect(await handle.observation.result).toMatchObject({
       status: "failed",
       error: { code: "unavailable", retryable: true },
-      usageReceipt: null,
+      usageReceipt: {
+        turn_id: conversationTurnId,
+        terminal_status: "failed",
+      },
     });
   });
 
@@ -313,7 +323,7 @@ describe("createDirectProviderTransport", () => {
         type: "response.cancelled",
         reason: "runtime_shutdown",
       };
-      return { status: "cancelled", reason: "runtime_shutdown", usage: null };
+      return { status: "cancelled", reason: "runtime_shutdown", usage };
     });
     const { transport, handle } = await start(adapter);
     const cancellation = transport.capabilities.authoritativeCancellation;
@@ -332,7 +342,13 @@ describe("createDirectProviderTransport", () => {
     expect((await collect(handle.observation.events)).at(-1)?.type).toBe(
       "response.cancelled",
     );
-    expect(await handle.observation.result).toMatchObject({ status: "cancelled" });
+    expect(await handle.observation.result).toMatchObject({
+      status: "cancelled",
+      usageReceipt: {
+        turn_id: conversationTurnId,
+        terminal_status: "cancelled",
+      },
+    });
     expect(
       await cancellation.capability.cancelTurn({
         conversationId: handle.conversationId,
@@ -453,6 +469,114 @@ describe("createDirectProviderTransport", () => {
       "response.text.delta",
     ]);
     expect(await handle.observation.result).toMatchObject({
+      status: "failed",
+      error: { code: "internal_error", retryable: false },
+      usageReceipt: null,
+    });
+  });
+
+  it("rejects malformed receipt identity at the validation boundary", async () => {
+    const adapter = new FakeAdapter(async function* (invocation) {
+      yield {
+        ...envelope(invocation, "response.started", 0),
+        type: "response.started",
+        attribution: invocation.context.attribution,
+      };
+      yield {
+        ...envelope(invocation, "response.completed", 1),
+        type: "response.completed",
+        outcome: "stop",
+      };
+      return { status: "completed", outcome: "stop", usage };
+    });
+    const transport = createDirectProviderTransport({
+      adapter,
+      createContext: () => {
+        const trusted = context();
+        return {
+          ...trusted,
+          usage: { ...trusted.usage, usage_receipt_id: "" },
+        };
+      },
+    });
+    const started = await transport.startTurn({
+      conversationId: "conversation_direct",
+      conversationTurnId,
+      mutationId: "mutation_direct",
+      idempotencyKey: "idempotency_direct",
+      request,
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+
+    expect(await collect(started.value.observation.events)).toEqual([
+      expect.objectContaining({ type: "response.started" }),
+    ]);
+    expect(await started.value.observation.result).toMatchObject({
+      status: "failed",
+      error: { code: "internal_error", retryable: false },
+      usageReceipt: null,
+    });
+  });
+
+  it("validates the remote transport turn identity independently", async () => {
+    const adapter = new FakeAdapter(() => {
+      throw new Error("invalid trusted context must prevent provider invocation");
+    });
+    const transport = createDirectProviderTransport({
+      adapter,
+      createContext: () => ({ ...context(), turn_id: "" }),
+    });
+
+    expect(
+      await transport.startTurn({
+        conversationId: "conversation_direct",
+        conversationTurnId,
+        mutationId: "mutation_direct",
+        idempotencyKey: "idempotency_direct",
+        request,
+      }),
+    ).toEqual({
+      ok: false,
+      error: {
+        code: "internal_error",
+        message: "The trusted provider context is invalid.",
+        retryable: false,
+      },
+    });
+    expect(adapter.invocation).toBeNull();
+  });
+
+  it("validates the caller conversation turn identity independently", async () => {
+    const adapter = new FakeAdapter(async function* (invocation) {
+      yield {
+        ...envelope(invocation, "response.started", 0),
+        type: "response.started",
+        attribution: invocation.context.attribution,
+      };
+      yield {
+        ...envelope(invocation, "response.completed", 1),
+        type: "response.completed",
+        outcome: "stop",
+      };
+      return { status: "completed", outcome: "stop", usage };
+    });
+    const transport = createTransport(adapter);
+    const started = await transport.startTurn({
+      conversationId: "conversation_direct",
+      conversationTurnId: "" as ConversationTurnId,
+      mutationId: "mutation_direct",
+      idempotencyKey: "idempotency_direct",
+      request,
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+
+    expect(started.value.turnId).toBe(remoteTransportTurnId);
+    expect(await collect(started.value.observation.events)).toEqual([
+      expect.objectContaining({ type: "response.started" }),
+    ]);
+    expect(await started.value.observation.result).toMatchObject({
       status: "failed",
       error: { code: "internal_error", retryable: false },
       usageReceipt: null,

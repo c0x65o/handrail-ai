@@ -132,6 +132,7 @@ export interface ManagedRuntimeTransportContract
 
 interface TurnSnapshot {
   readonly conversationId: string;
+  readonly conversationTurnId: string;
   readonly mutationId: string;
   readonly request: ChatRequest;
   readonly serializedBody: string;
@@ -744,7 +745,7 @@ async function resultForTerminal(
           : "failed";
     const receiptInput: ManagedRuntimeUsageReceiptInput = {
       conversationId: snapshot.conversationId,
-      turnId: snapshot.turnId,
+      turnId: snapshot.conversationTurnId,
       requestId: started.request_id,
       traceId: started.trace_id,
       attribution: started.attribution,
@@ -876,6 +877,7 @@ export class ManagedRuntimeTransport implements ManagedRuntimeTransportContract 
     }
     const provisional = {
       conversationId: input.conversationId,
+      conversationTurnId: input.conversationTurnId,
       mutationId: input.mutationId,
       request,
       serializedBody,

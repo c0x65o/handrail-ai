@@ -1,9 +1,16 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 
+import {
+  NORMALIZED_USAGE_RECEIPT_VERSION,
+  parseNormalizedUsageReceipt,
+} from "../src/index.js";
 import type {
   AuthoritativeCancelTurnResult,
   CancelTurnInput,
   ConversationTransport,
+  ConversationTurnId,
+  DirectProviderTurnObservationResult,
+  NormalizedUsageReceipt,
   ResumeTurnInput,
   StartTurnInput,
   TransportResult,
@@ -12,6 +19,7 @@ import type {
   TurnObservationResult,
   TurnResumePoint,
 } from "../src/index.js";
+import type { ManagedRuntimeTurnObservationResult } from "../src/server/managed.js";
 
 interface FakeConversationEvent {
   readonly eventId: string;
@@ -35,6 +43,43 @@ const initialCheckpoint: TurnResumePoint = {
   lastAppliedRevision: null,
 };
 
+const normalizedReceipt = parseNormalizedUsageReceipt({
+  version: NORMALIZED_USAGE_RECEIPT_VERSION,
+  usage_receipt_id: "usage-transport-1",
+  conversation_id: "conversation-1",
+  turn_id: "turn-1",
+  logical_request_id: "logical-request-1",
+  trace_id: "trace-1",
+  attempt: { id: "attempt-1", index: 0 },
+  continuation: { id: "continuation-1", index: 0 },
+  provider_id: "fake-provider",
+  model_id: "fake-model-v1",
+  attribution: {
+    organization: { id: "org-1", source: "server_derived", trust: "authoritative" },
+    project: { id: "project-1", source: "server_derived", trust: "authoritative" },
+    service_environment: {
+      id: "development",
+      source: "server_derived",
+      trust: "authoritative",
+    },
+    known_user: { id: "user-1", source: "server_derived", trust: "authoritative" },
+    session: { id: null, source: "server_derived", trust: "authoritative" },
+    automation: { id: null, source: "server_derived", trust: "authoritative" },
+  },
+  source: "provider",
+  terminal_status: "completed",
+  tokens: {
+    input_tokens: { status: "reported", value: 4 },
+    cached_input_tokens: { status: "reported", value: 0 },
+    output_tokens: { status: "reported", value: 2 },
+    reasoning_tokens: { status: "reported", value: 0 },
+    total_tokens: { status: "reported", value: 6 },
+  },
+  provider_cost: { status: "unavailable" },
+});
+
+const callerTurnId = "conversation-turn-1" as ConversationTurnId;
+
 function checkpointFor(event: FakeConversationEvent): TurnResumePoint {
   return {
     lastAppliedEventId: event.eventId,
@@ -46,6 +91,7 @@ function checkpointFor(event: FakeConversationEvent): TurnResumePoint {
 function createObservation(
   observedEvents: readonly FakeConversationEvent[],
   startingCheckpoint: TurnResumePoint,
+  usageReceipt?: NormalizedUsageReceipt,
 ): TurnObservation<FakeConversationEvent> {
   let disconnected = false;
   let resolveResult: (result: TurnObservationResult) => void = () => undefined;
@@ -66,7 +112,11 @@ function createObservation(
           checkpoint = checkpointFor(event);
           yield event;
         }
-        resolveResult({ status: "completed", checkpoint });
+        resolveResult({
+          status: "completed",
+          checkpoint,
+          ...(usageReceipt === undefined ? {} : { usageReceipt }),
+        });
       },
     },
     result,
@@ -91,6 +141,8 @@ class FakeTransport
   readonly starts: StartTurnInput<FakeStartRequest>[] = [];
   readonly resumes: ResumeTurnInput[] = [];
 
+  constructor(private readonly usageReceipt?: NormalizedUsageReceipt) {}
+
   async startTurn(
     input: StartTurnInput<FakeStartRequest>,
   ): Promise<TransportResult<TurnHandle<FakeConversationEvent>>> {
@@ -101,7 +153,7 @@ class FakeTransport
         conversationId: input.conversationId,
         turnId: "turn-1",
         mutationId: input.mutationId,
-        observation: createObservation(events, initialCheckpoint),
+        observation: createObservation(events, initialCheckpoint, this.usageReceipt),
       },
     };
   }
@@ -115,7 +167,11 @@ class FakeTransport
     );
     return {
       ok: true,
-      value: createObservation(remainingEvents, input.resumeFrom),
+      value: createObservation(
+        remainingEvents,
+        input.resumeFrom,
+        this.usageReceipt,
+      ),
     };
   }
 }
@@ -132,10 +188,47 @@ async function cancelIfSupported(
 }
 
 describe("ConversationTransport contract", () => {
+  it("exposes a validated normalized receipt from a generic transport", async () => {
+    const transport: ConversationTransport<
+      FakeConversationEvent,
+      FakeStartRequest
+    > = new FakeTransport(normalizedReceipt);
+    const started = await transport.startTurn({
+      conversationId: "conversation-1",
+      conversationTurnId: callerTurnId,
+      mutationId: "mutation-receipt-1",
+      idempotencyKey: "idempotency-receipt-1",
+      request: { text: "receipt" },
+    });
+
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    const observed: FakeConversationEvent[] = [];
+    for await (const event of started.value.observation.events) observed.push(event);
+    const result = await started.value.observation.result;
+
+    expect(observed).toEqual(events);
+    expect(result.status).toBe("completed");
+    if (result.status !== "completed") return;
+    expect(result.usageReceipt).toBe(normalizedReceipt);
+  });
+
+  it("keeps adapter-specific results assignable to the common result", () => {
+    expectTypeOf<DirectProviderTurnObservationResult>().toMatchTypeOf<TurnObservationResult>();
+    expectTypeOf<ManagedRuntimeTurnObservationResult>().toMatchTypeOf<TurnObservationResult>();
+    expectTypeOf<
+      Extract<
+        DirectProviderTurnObservationResult,
+        { status: "completed" }
+      >["usageReceipt"]
+    >().toEqualTypeOf<NormalizedUsageReceipt>();
+  });
+
   it("starts with caller identifiers, disconnects locally, and resumes from a checkpoint", async () => {
     const transport = new FakeTransport();
     const started = await transport.startTurn({
       conversationId: "conversation-1",
+      conversationTurnId: callerTurnId,
       mutationId: "mutation-client-1",
       idempotencyKey: "idempotency-client-1",
       request: { text: "hello" },
@@ -156,6 +249,7 @@ describe("ConversationTransport contract", () => {
     });
 
     expect(transport.starts[0]).toMatchObject({
+      conversationTurnId: callerTurnId,
       mutationId: "mutation-client-1",
       idempotencyKey: "idempotency-client-1",
     });

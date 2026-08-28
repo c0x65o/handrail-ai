@@ -205,7 +205,7 @@ interface FrameState {
   readonly turnId: ConversationTurnId;
   readonly protocol: TurnProtocolState;
   expectedSequence: number;
-  text: string;
+  assistantMessageId: ConversationMessageId | null;
   hasUnsafeFrame: boolean;
   terminal: TerminalStreamEvent | null;
   lastWasTerminal: boolean;
@@ -387,15 +387,15 @@ export async function createConversationRuntime<TRequest>(
       turnId,
       protocol,
       expectedSequence: (protocol.safeSequence ?? -1) + 1,
-      text: "",
+      assistantMessageId: streamedAssistantMessageId(store.getSnapshot(), turnId),
       hasUnsafeFrame: false,
       terminal: null,
       lastWasTerminal: false,
       failure: null,
     };
-    // Only duplicates within this observation are suppressed. Frames whose
-    // effects were not durable (notably text deltas) must be accepted again
-    // when a later observation resumes from the last safe checkpoint.
+    // Durable request/sequence keys suppress replayed effects across retries
+    // and runtime reconstruction; this map additionally detects conflicts
+    // and duplicates received before the current observation ends.
     const liveFrameFingerprints = new Map<string, string>();
     activeObservations.set(turnId, observation);
     let transportResult: TurnObservationResult | null = null;
@@ -413,7 +413,12 @@ export async function createConversationRuntime<TRequest>(
           );
           if (disposition === "duplicate") continue;
 
-          const drafts = draftsForNonterminalFrame(frameState, frame, runtimeSource());
+          const drafts = draftsForNonterminalFrame(
+            frameState,
+            frame,
+            createId,
+            runtimeSource(),
+          );
           if (drafts.length > 0) {
             await persist(drafts);
             if (drafts.some((draft) => runtimeMetadata(draft.metadata)?.resumeSafe)) {
@@ -466,7 +471,6 @@ export async function createConversationRuntime<TRequest>(
         draftsForTerminal(
           frameState,
           frameState.terminal,
-          createId,
           runtimeSource(),
           requestedCancellationReasons.get(turnId),
         ),
@@ -675,6 +679,7 @@ export async function createConversationRuntime<TRequest>(
   ): Promise<ConversationRuntimeTurnResult> => {
     const startInput = Object.freeze({
       conversationId: options.conversationId,
+      conversationTurnId: turnId,
       mutationId: startMutationId,
       idempotencyKey,
       request,
@@ -969,9 +974,23 @@ function normalizeMessageContent(
     : content.map((part) => ({ ...part }));
 }
 
+function streamedAssistantMessageId(
+  state: ConversationState,
+  turnId: ConversationTurnId,
+): ConversationMessageId | null {
+  const matches = state.messages.filter(
+    (message) => message.role === "assistant" && message.turn_id === turnId,
+  );
+  if (matches.length > 1) {
+    throw new TypeError("A turn cannot contain multiple streamed assistant messages");
+  }
+  return matches[0]?.message_id ?? null;
+}
+
 function draftsForNonterminalFrame(
   state: FrameState,
   frame: StreamEvent,
+  createId: (kind: ConversationRuntimeIdKind) => string,
   source: ConversationEventSource,
 ): EventDraft[] {
   const metadata = (resumeSafe: boolean): ConversationEventMetadata =>
@@ -996,10 +1015,23 @@ function draftsForNonterminalFrame(
         payload: { type: "turn.status_changed", turn_id: state.turnId, status: "running" },
       }];
     }
-    case "response.text.delta":
-      state.text += frame.delta;
-      state.hasUnsafeFrame = true;
-      return [];
+    case "response.text.delta": {
+      if (frame.delta.length === 0) return [];
+      const assistantMessageId = state.assistantMessageId ??
+        createId("assistant_message") as ConversationMessageId;
+      state.assistantMessageId = assistantMessageId;
+      return [{
+        actor: { type: "assistant" },
+        source,
+        metadata: metadata(!state.hasUnsafeFrame),
+        payload: {
+          type: "message.text_appended",
+          turn_id: state.turnId,
+          message_id: assistantMessageId,
+          text: frame.delta,
+        },
+      }];
+    }
     case "response.tool_call": {
       const safe = !state.hasUnsafeFrame;
       return [{
@@ -1028,7 +1060,6 @@ function draftsForNonterminalFrame(
 function draftsForTerminal(
   state: FrameState,
   terminal: TerminalStreamEvent,
-  createId: (kind: ConversationRuntimeIdKind) => string,
   source: ConversationEventSource,
   requestedCancellationReason?: ConversationTurnCancellationReason,
 ): EventDraft[] {
@@ -1043,37 +1074,18 @@ function draftsForTerminal(
     resumeSafe: true,
   });
   if (terminal.type === "response.completed") {
-    const assistantMessageId =
-      state.text.length === 0 ? null : createId("assistant_message");
-    return [
-      ...(assistantMessageId === null
-        ? []
-        : [{
-            actor: { type: "assistant" } as ConversationEventActor,
-            source,
-            metadata,
-            payload: {
-              type: "message.created" as const,
-              message_id: assistantMessageId as ConversationMessageId,
-              role: "assistant" as const,
-              content: [{ type: "text" as const, text: state.text }],
-            },
-          }]),
-      {
-        actor: { type: "assistant" },
-        source,
-        metadata,
-        payload: {
-          type: "turn.completed",
-          turn_id: state.turnId,
-          outcome: terminal.outcome,
-          output_message_ids:
-            assistantMessageId === null
-              ? []
-              : [assistantMessageId as ConversationMessageId],
-        },
+    return [{
+      actor: { type: "assistant" },
+      source,
+      metadata,
+      payload: {
+        type: "turn.completed",
+        turn_id: state.turnId,
+        outcome: terminal.outcome,
+        output_message_ids:
+          state.assistantMessageId === null ? [] : [state.assistantMessageId],
       },
-    ];
+    }];
   }
   if (terminal.type === "response.cancelled") {
     return [{

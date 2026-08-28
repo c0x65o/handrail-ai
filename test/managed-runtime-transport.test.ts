@@ -8,9 +8,12 @@ import {
 } from "../src/protocol.js";
 import * as browserEntry from "../src/browser/index.js";
 import * as coreEntry from "../src/index.js";
+import type { ConversationTurnId } from "../src/index.js";
 import {
   createManagedRuntimeTransport,
   type ManagedRuntimeFetch,
+  type ManagedRuntimeUsageReceiptIdentityProvider,
+  type ManagedRuntimeUsageReceiptInput,
 } from "../src/server/managed.js";
 
 const encoder = new TextEncoder();
@@ -43,6 +46,8 @@ const request: ChatRequest = {
   generation: { max_output_tokens: 64, temperature: 0.2 },
   correlation_hints: {},
 };
+
+const conversationTurnId = "turn_managed" as ConversationTurnId;
 
 function envelope(type: StreamEvent["type"], sequence: number) {
   return {
@@ -136,26 +141,31 @@ function problemResponse(status: number, code: string): Response {
   );
 }
 
-function transportFor(fetch: ManagedRuntimeFetch, timeoutMs = 2_000) {
+function transportFor(
+  fetch: ManagedRuntimeFetch,
+  timeoutMs = 2_000,
+  createUsageReceiptIdentity: ManagedRuntimeUsageReceiptIdentityProvider = () => ({
+    usage_receipt_id: "usage_managed",
+    logical_request_id: "logical_managed",
+    attempt: { id: "attempt_managed", index: 0 },
+    continuation: { id: "continuation_managed", index: 0 },
+    provider_id: "handrail-runtime",
+    model_id: "runtime-selected-v1",
+  }),
+) {
   return createManagedRuntimeTransport({
     baseUrl: "https://runtime.example.test/base/path",
     getHeaders: async () => ({ authorization: "Bearer managed-secret-token" }),
     fetch,
     timeoutMs,
-    createUsageReceiptIdentity: () => ({
-      usage_receipt_id: "usage_managed",
-      logical_request_id: "logical_managed",
-      attempt: { id: "attempt_managed", index: 0 },
-      continuation: { id: "continuation_managed", index: 0 },
-      provider_id: "handrail-runtime",
-      model_id: "runtime-selected-v1",
-    }),
+    createUsageReceiptIdentity,
   });
 }
 
 async function startTurn(transport: ReturnType<typeof transportFor>) {
   return transport.startTurn({
     conversationId: "conversation_managed",
+    conversationTurnId,
     mutationId: "mutation_managed",
     idempotencyKey: "managed.key-1",
     request,
@@ -224,10 +234,25 @@ describe("ManagedRuntimeTransport", () => {
       bytes.slice(globeByte + 3),
     ];
     const calls: Array<{ url: string; init: RequestInit }> = [];
-    const transport = transportFor(async (url, init = {}) => {
-      calls.push({ url: String(url), init });
-      return streamResponse(chunks);
-    });
+    const receiptInputs: ManagedRuntimeUsageReceiptInput[] = [];
+    const transport = transportFor(
+      async (url, init = {}) => {
+        calls.push({ url: String(url), init });
+        return streamResponse(chunks);
+      },
+      2_000,
+      (input) => {
+        receiptInputs.push(input);
+        return {
+          usage_receipt_id: "usage_managed",
+          logical_request_id: "logical_managed",
+          attempt: { id: "attempt_managed", index: 0 },
+          continuation: { id: "continuation_managed", index: 0 },
+          provider_id: "handrail-runtime",
+          model_id: "runtime-selected-v1",
+        };
+      },
+    );
 
     const result = await startTurn(transport);
     expect(result.ok).toBe(true);
@@ -239,6 +264,7 @@ describe("ManagedRuntimeTransport", () => {
       status: "completed",
       usage: { input_tokens: 10, output_tokens: 4, total_tokens: 14 },
       usageReceipt: {
+        turn_id: conversationTurnId,
         source: "runtime",
         terminal_status: "completed",
         provider_cost: { status: "unavailable" },
@@ -251,6 +277,13 @@ describe("ManagedRuntimeTransport", () => {
         },
       },
     });
+    expect(receiptInputs).toMatchObject([
+      {
+        conversationId: "conversation_managed",
+        turnId: conversationTurnId,
+        requestId: "req_managed",
+      },
+    ]);
     expect(calls[0]?.url).toBe(
       "https://runtime.example.test/api/ai-runtime/v1/chat",
     );
@@ -263,10 +296,42 @@ describe("ManagedRuntimeTransport", () => {
     );
   });
 
+  it("keeps normalized usage optional when no receipt identity provider is configured", async () => {
+    const usageEvent: StreamEvent = {
+      ...envelope("response.usage", 1),
+      type: "response.usage",
+      usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6 },
+    };
+    const terminal: StreamEvent = {
+      ...envelope("response.completed", 2),
+      type: "response.completed",
+      outcome: "stop",
+    };
+    const transport = createManagedRuntimeTransport({
+      baseUrl: "https://runtime.example.test/base/path",
+      getHeaders: async () => ({ authorization: "Bearer managed-secret-token" }),
+      fetch: async () =>
+        streamResponse(
+          sseFrame(started) + sseFrame(usageEvent) + sseFrame(terminal),
+        ),
+      timeoutMs: 2_000,
+    });
+
+    const result = await startTurn(transport);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    await collect(result.value.observation.events);
+    expect(await result.value.observation.result).toMatchObject({
+      status: "completed",
+      usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6 },
+      usageReceipt: null,
+    });
+  });
+
   it.each([
     {
       terminal: {
-        ...envelope("response.cancelled", 1),
+        ...envelope("response.cancelled", 2),
         type: "response.cancelled" as const,
         reason: "policy_revoked" as const,
       },
@@ -274,7 +339,7 @@ describe("ManagedRuntimeTransport", () => {
     },
     {
       terminal: {
-        ...envelope("response.error", 1),
+        ...envelope("response.error", 2),
         type: "response.error" as const,
         error: {
           category: "upstream" as const,
@@ -286,14 +351,65 @@ describe("ManagedRuntimeTransport", () => {
       status: "failed",
     },
   ])("handles the $terminal.type terminal event", async ({ terminal, status }) => {
+    const usageEvent: StreamEvent = {
+      ...envelope("response.usage", 1),
+      type: "response.usage",
+      usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6 },
+    };
     const transport = transportFor(async () =>
-      streamResponse(sseFrame(started) + sseFrame(terminal)),
+      streamResponse(sseFrame(started) + sseFrame(usageEvent) + sseFrame(terminal)),
     );
     const result = await startTurn(transport);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect((await collect(result.value.observation.events)).at(-1)).toEqual(terminal);
-    expect((await result.value.observation.result).status).toBe(status);
+    expect(await result.value.observation.result).toMatchObject({
+      status,
+      usageReceipt: { terminal_status: status },
+    });
+  });
+
+  it("rejects malformed receipt identity at the validation boundary", async () => {
+    const usageEvent: StreamEvent = {
+      ...envelope("response.usage", 1),
+      type: "response.usage",
+      usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6 },
+    };
+    const terminal: StreamEvent = {
+      ...envelope("response.completed", 2),
+      type: "response.completed",
+      outcome: "stop",
+    };
+    const transport = createManagedRuntimeTransport({
+      baseUrl: "https://runtime.example.test/base/path",
+      getHeaders: async () => ({ authorization: "Bearer managed-secret-token" }),
+      fetch: async () =>
+        streamResponse(
+          sseFrame(started) + sseFrame(usageEvent) + sseFrame(terminal),
+        ),
+      timeoutMs: 2_000,
+      createUsageReceiptIdentity: () => ({
+        usage_receipt_id: "usage_managed",
+        logical_request_id: "logical_managed",
+        attempt: { id: "attempt_managed", index: 0 },
+        continuation: { id: "continuation_managed", index: 0 },
+        provider_id: "provider native object",
+        model_id: "runtime-selected-v1",
+      }),
+    });
+
+    const result = await startTurn(transport);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect((await collect(result.value.observation.events)).map((event) => event.type)).toEqual([
+      "response.started",
+      "response.usage",
+    ]);
+    expect(await result.value.observation.result).toMatchObject({
+      status: "failed",
+      error: { code: "internal_error", retryable: false },
+      usageReceipt: null,
+    });
   });
 
   it.each([
@@ -497,12 +613,13 @@ describe("ManagedRuntimeTransport", () => {
     const first = await startTurn(transport);
     expect(first.ok).toBe(true);
     if (!first.ok) return;
+    expect(first.value.turnId).toBe("req_managed");
     await collect(first.value.observation.events);
     await first.value.observation.result;
 
     const resumed = await transport.resumeTurn({
       conversationId: first.value.conversationId,
-      turnId: first.value.turnId,
+      turnId: "req_managed",
       resumeFrom: {
         lastAppliedEventId: "req_managed:1",
         lastAppliedCursor: "req_managed:1",
@@ -531,6 +648,7 @@ describe("ManagedRuntimeTransport", () => {
     });
     const invalidKey = await transport.startTurn({
       conversationId: "conversation_managed",
+      conversationTurnId,
       mutationId: "mutation_managed",
       idempotencyKey: "contains a space",
       request,

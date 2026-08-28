@@ -295,7 +295,7 @@ function usageReceipt(
   return projectProviderUsageToReceipt(result.usage, {
     ...context.usage,
     conversation_id: input.conversationId,
-    turn_id: context.turn_id,
+    turn_id: input.conversationTurnId,
     trace_id: context.trace_id,
     provider_id: provider.provider_id,
     model_id: provider.model_id,

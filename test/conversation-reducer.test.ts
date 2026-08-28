@@ -116,6 +116,162 @@ describe("reduceConversationEvent", () => {
     expect(state.replay_error).toBeNull();
   });
 
+  it("creates an assistant message on the first append and concatenates chunks immutably", () => {
+    const chunks = [
+      event({
+        revision: 1,
+        payload: {
+          type: "message.text_appended",
+          turn_id: "turn_stream",
+          message_id: "message_stream",
+          text: "Hello",
+        },
+      }),
+      event({
+        revision: 2,
+        payload: {
+          type: "message.text_appended",
+          turn_id: "turn_stream",
+          message_id: "message_stream",
+          text: ", world!",
+        },
+      }),
+    ] as const;
+
+    const first = reduceConversationEvent(
+      createInitialConversationState(),
+      chunks[0],
+    );
+    expect(first.messages[0]).toEqual({
+      message_id: "message_stream",
+      turn_id: "turn_stream",
+      role: "assistant",
+      content: [{ type: "text", text: "Hello" }],
+      attachments: [],
+      created_at: "2026-08-27T12:00:01.000Z",
+      attribution: {
+        actor: { type: "assistant" },
+        source: { type: "runtime" },
+      },
+    });
+
+    const complete = reduceConversationEvent(first, chunks[1]);
+    expect(complete.messages[0]?.content).toEqual([
+      { type: "text", text: "Hello, world!" },
+    ]);
+    expect(complete.messages[0]?.created_at).toBe(
+      "2026-08-27T12:00:01.000Z",
+    );
+    expect(complete.messages[0]?.attribution).toEqual(
+      first.messages[0]?.attribution,
+    );
+    expect(first.messages[0]?.content).toEqual([
+      { type: "text", text: "Hello" },
+    ]);
+    expect(Object.isFrozen(complete.messages[0]?.content)).toBe(true);
+
+    const duplicate = reduceConversationEvent(complete, chunks[1]);
+    expect(duplicate).toBe(complete);
+    const replayed = replay(chunks);
+    const replayedAgain = replay(chunks);
+    expect(JSON.stringify(replayed)).toBe(JSON.stringify(complete));
+    expect(JSON.stringify(replayedAgain)).toBe(JSON.stringify(replayed));
+
+    const identityConflict = reduceConversationEvent(complete, event({
+      revision: 3,
+      payload: {
+        type: "message.text_appended",
+        turn_id: "turn_other",
+        message_id: "message_stream",
+        text: " Must not append.",
+      },
+    }));
+    expect(identityConflict.revision).toBe(3);
+    expect(identityConflict.messages[0]?.content).toEqual([
+      { type: "text", text: "Hello, world!" },
+    ]);
+  });
+
+  it("promotes attachment placeholders and safely ignores role conflicts", () => {
+    const promoted = replay([
+      event({
+        revision: 1,
+        payload: {
+          type: "message.attachment_referenced",
+          message_id: "message_stream",
+          attachment: {
+            attachment_id: "attachment_stream",
+            media_type: "image/png",
+          },
+        },
+      }),
+      event({
+        revision: 2,
+        payload: {
+          type: "message.created",
+          message_id: "message_other",
+          role: "assistant",
+          content: [{ type: "text", text: "Other" }],
+        },
+      }),
+      event({
+        revision: 3,
+        payload: {
+          type: "message.text_appended",
+          turn_id: "turn_stream",
+          message_id: "message_stream",
+          text: "Image received",
+        },
+      }),
+    ]);
+
+    expect(promoted.messages.map(({ message_id }) => message_id)).toEqual([
+      "message_stream",
+      "message_other",
+    ]);
+    expect(promoted.messages[0]).toMatchObject({
+      turn_id: "turn_stream",
+      role: "assistant",
+      content: [{ type: "text", text: "Image received" }],
+      attachments: [{ attachment_id: "attachment_stream" }],
+      created_at: "2026-08-27T12:00:03.000Z",
+      attribution: {
+        actor: { type: "assistant" },
+        source: { type: "runtime" },
+      },
+    });
+
+    const conflicted = replay([
+      event({
+        revision: 1,
+        mutationId: "mutation_user",
+        payload: {
+          type: "message.created",
+          message_id: "message_conflict",
+          role: "user",
+          content: [{ type: "text", text: "Do not overwrite" }],
+        },
+      }),
+      event({
+        revision: 2,
+        payload: {
+          type: "message.text_appended",
+          turn_id: "turn_conflict",
+          message_id: "message_conflict",
+          text: "Corrupting append",
+        },
+      }),
+    ]);
+
+    expect(conflicted.revision).toBe(2);
+    expect(conflicted.processed_event_ids).toEqual(["evt_1", "evt_2"]);
+    expect(conflicted.messages[0]).toMatchObject({
+      role: "user",
+      content: [{ type: "text", text: "Do not overwrite" }],
+      created_at: "2026-08-27T12:00:01.000Z",
+    });
+  });
+
   const projections = [
     {
       name: "tool continuation",
