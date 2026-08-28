@@ -280,7 +280,13 @@ const METADATA_FORBIDDEN_FIELD_NAMES = new Set([
   "automation",
   "automationid",
   "chunk",
+  "choices",
+  "completiontokens",
+  "contentblock",
+  "contentblockdelta",
   "finishreason",
+  "functioncall",
+  "functioncallingconfig",
   "gemini",
   "headers",
   "knownuser",
@@ -303,6 +309,9 @@ const METADATA_FORBIDDEN_FIELD_NAMES = new Set([
   "providerpayload",
   "providerrequest",
   "providerresponse",
+  "promptfeedback",
+  "prompttokens",
+  "raw",
   "rawerror",
   "rawrequest",
   "rawresponse",
@@ -312,9 +321,31 @@ const METADATA_FORBIDDEN_FIELD_NAMES = new Set([
   "serviceenvironmentid",
   "session",
   "sessionid",
+  "stopreason",
+  "stopsequence",
+  "systemfingerprint",
+  "tooluse",
+  "tooluses",
   "traceid",
+  "usagemetadata",
   "xai",
 ]);
+
+const METADATA_FORBIDDEN_STRING_VALUES = new Set([
+  "anthropic",
+  "chatcompletion",
+  "chatcompletionchunk",
+  "contentblockdelta",
+  "gemini",
+  "openai",
+  "xai",
+]);
+
+const CREDENTIAL_VALUE_PATTERNS = [
+  /\bbearer\s+[a-z0-9._~+/=-]{8,}/i,
+  /\bsk-[a-z0-9_-]{8,}\b/i,
+  /-----begin (?:rsa |ec |openssh )?private key-----/i,
+] as const;
 
 const normalizeFieldName = (value: string): string =>
   value.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -381,6 +412,7 @@ interface JsonLimits {
   maxKeyLength: number;
   maxStringLength: number;
   forbiddenFields?: ReadonlySet<string>;
+  forbiddenStringValues?: ReadonlySet<string>;
 }
 
 function validateJson(value: unknown, path: string, limits: JsonLimits): asserts value is JsonValue {
@@ -400,6 +432,12 @@ function validateJson(value: unknown, path: string, limits: JsonLimits): asserts
     if (typeof current === "string") {
       if (current.length > limits.maxStringLength) {
         fail(currentPath, `must be at most ${limits.maxStringLength} characters`);
+      }
+      if (CREDENTIAL_VALUE_PATTERNS.some((pattern) => pattern.test(current))) {
+        fail(currentPath, "must not contain credential material");
+      }
+      if (limits.forbiddenStringValues?.has(normalizeFieldName(current))) {
+        fail(currentPath, "must not identify provider-native data");
       }
       return;
     }
@@ -452,6 +490,7 @@ const METADATA_LIMITS: JsonLimits = {
   maxKeyLength: AI_RUNTIME_PROTOCOL_LIMITS.metadataKeyLength,
   maxStringLength: AI_RUNTIME_PROTOCOL_LIMITS.metadataStringLength,
   forbiddenFields: METADATA_FORBIDDEN_FIELD_NAMES,
+  forbiddenStringValues: METADATA_FORBIDDEN_STRING_VALUES,
 };
 
 function validateMetadata(value: unknown, path: string): asserts value is ProtocolMetadata {
@@ -465,6 +504,96 @@ function validateMetadata(value: unknown, path: string): asserts value is Protoc
 
 function validateCredentialsAbsent(value: unknown, path: string) {
   validateJson(value, path, PUBLIC_JSON_LIMITS);
+}
+
+const JSON_SCHEMA_TYPES = [
+  "array",
+  "boolean",
+  "integer",
+  "null",
+  "number",
+  "object",
+  "string",
+] as const;
+
+function validateJsonSchemaNode(value: unknown, path: string, root = false): void {
+  if (typeof value === "boolean" && !root) return;
+  const schema = record(value, path);
+
+  if (root && schema.type !== "object") fail(`${path}.type`, 'must equal "object"');
+  if (Object.hasOwn(schema, "type")) {
+    if (Array.isArray(schema.type)) {
+      if (schema.type.length === 0) fail(`${path}.type`, "must not be empty");
+      const types = new Set<string>();
+      schema.type.forEach((type, index) => {
+        const parsed = enumValue(type, JSON_SCHEMA_TYPES, `${path}.type[${index}]`);
+        if (types.has(parsed)) fail(`${path}.type[${index}]`, "must be unique");
+        types.add(parsed);
+      });
+    } else {
+      enumValue(schema.type, JSON_SCHEMA_TYPES, `${path}.type`);
+    }
+  }
+
+  for (const keyword of ["properties", "patternProperties", "$defs", "definitions", "dependentSchemas"] as const) {
+    if (!Object.hasOwn(schema, keyword)) continue;
+    const schemas = record(schema[keyword], `${path}.${keyword}`);
+    for (const [name, child] of Object.entries(schemas)) {
+      validateJsonSchemaNode(child, `${path}.${keyword}.${name}`);
+    }
+  }
+
+  if (Object.hasOwn(schema, "required")) {
+    if (!Array.isArray(schema.required)) fail(`${path}.required`, "must be an array");
+    const names = new Set<string>();
+    schema.required.forEach((item, index) => {
+      const name = stringValue(item, `${path}.required[${index}]`);
+      if (names.has(name)) fail(`${path}.required[${index}]`, "must be unique");
+      names.add(name);
+    });
+  }
+
+  for (const keyword of ["additionalProperties", "unevaluatedProperties", "items", "contains", "not", "if", "then", "else", "propertyNames"] as const) {
+    if (Object.hasOwn(schema, keyword)) {
+      validateJsonSchemaNode(schema[keyword], `${path}.${keyword}`);
+    }
+  }
+
+  for (const keyword of ["allOf", "anyOf", "oneOf", "prefixItems"] as const) {
+    if (!Object.hasOwn(schema, keyword)) continue;
+    const schemas = schema[keyword];
+    if (!Array.isArray(schemas) || schemas.length === 0) {
+      fail(`${path}.${keyword}`, "must be a non-empty array of JSON Schemas");
+    }
+    schemas.forEach((child, index) => validateJsonSchemaNode(child, `${path}.${keyword}[${index}]`));
+  }
+
+  if (Object.hasOwn(schema, "enum") && (!Array.isArray(schema.enum) || schema.enum.length === 0)) {
+    fail(`${path}.enum`, "must be a non-empty array");
+  }
+
+  for (const keyword of [
+    "multipleOf",
+    "maximum",
+    "exclusiveMaximum",
+    "minimum",
+    "exclusiveMinimum",
+    "maxLength",
+    "minLength",
+    "maxItems",
+    "minItems",
+    "maxContains",
+    "minContains",
+    "maxProperties",
+    "minProperties",
+  ] as const) {
+    if (
+      Object.hasOwn(schema, keyword) &&
+      (typeof schema[keyword] !== "number" || !Number.isFinite(schema[keyword]))
+    ) {
+      fail(`${path}.${keyword}`, "must be a finite number");
+    }
+  }
 }
 
 function validateTextPart(value: unknown, path: string): asserts value is MessageTextPart {
@@ -499,16 +628,7 @@ function validateToolDefinition(value: unknown, path: string): asserts value is 
   });
   const schema = record(object.input_schema, `${path}.input_schema`);
   validateCredentialsAbsent(schema, `${path}.input_schema`);
-  if (schema.type !== "object") fail(`${path}.input_schema.type`, 'must equal "object"');
-  if (Object.hasOwn(schema, "required")) {
-    if (!Array.isArray(schema.required)) fail(`${path}.input_schema.required`, "must be an array");
-    const names = new Set<string>();
-    schema.required.forEach((item, index) => {
-      const name = stringValue(item, `${path}.input_schema.required[${index}]`);
-      if (names.has(name)) fail(`${path}.input_schema.required[${index}]`, "must be unique");
-      names.add(name);
-    });
-  }
+  validateJsonSchemaNode(schema, `${path}.input_schema`, true);
 }
 
 function validateToolResultPart(
@@ -869,4 +989,3 @@ export function isStreamEvent(value: unknown): value is StreamEvent {
     return false;
   }
 }
-
