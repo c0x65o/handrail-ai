@@ -493,11 +493,13 @@ const METADATA_LIMITS: JsonLimits = {
   forbiddenStringValues: METADATA_FORBIDDEN_STRING_VALUES,
 };
 
+const UTF8_ENCODER = new TextEncoder();
+
 function validateMetadata(value: unknown, path: string): asserts value is ProtocolMetadata {
   record(value, path);
   validateJson(value, path, METADATA_LIMITS);
   const serialized = JSON.stringify(value);
-  if (Buffer.byteLength(serialized, "utf8") > AI_RUNTIME_PROTOCOL_LIMITS.metadataSerializedBytes) {
+  if (UTF8_ENCODER.encode(serialized).byteLength > AI_RUNTIME_PROTOCOL_LIMITS.metadataSerializedBytes) {
     fail(path, `must serialize to at most ${AI_RUNTIME_PROTOCOL_LIMITS.metadataSerializedBytes} bytes`);
   }
 }

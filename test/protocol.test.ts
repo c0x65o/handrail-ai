@@ -112,6 +112,33 @@ const request = (): RequestFixture => ({
   },
 });
 
+const utf8ByteLength = (value: string) => new TextEncoder().encode(value).byteLength;
+
+function metadataWithSerializedByteLength(targetBytes: number, fill: string) {
+  const metadata: Record<string, string> = {};
+  const fillBytes = utf8ByteLength(fill);
+  const maxFillCount = Math.floor(AI_RUNTIME_PROTOCOL_LIMITS.metadataStringLength / fill.length);
+
+  for (let index = 0; index < AI_RUNTIME_PROTOCOL_LIMITS.metadataObjectKeys; index += 1) {
+    const key = `chunk_${index}`;
+    const emptyValueBytes = utf8ByteLength(JSON.stringify({ ...metadata, [key]: "" }));
+    const remainingBytes = targetBytes - emptyValueBytes;
+    const fillCount = Math.floor(remainingBytes / fillBytes);
+    const remainderBytes = remainingBytes - fillCount * fillBytes;
+    const value = fill.repeat(fillCount) + "x".repeat(remainderBytes);
+
+    if (remainingBytes >= 0 && value.length <= AI_RUNTIME_PROTOCOL_LIMITS.metadataStringLength) {
+      metadata[key] = value;
+      expect(utf8ByteLength(JSON.stringify(metadata))).toBe(targetBytes);
+      return metadata;
+    }
+
+    metadata[key] = fill.repeat(maxFillCount);
+  }
+
+  throw new Error(`Could not construct metadata serialized to ${targetBytes} bytes`);
+}
+
 const envelope = (type: string, sequence: number) => ({
   type,
   protocol_version: AI_RUNTIME_PROTOCOL_VERSION,
@@ -312,18 +339,27 @@ describe("chat request protocol", () => {
     }
   });
 
-  it("bounds metadata depth and serialized size", () => {
+  it("bounds metadata depth", () => {
     let nested: Record<string, unknown> = { value: true };
     for (let index = 0; index <= AI_RUNTIME_PROTOCOL_LIMITS.metadataDepth; index += 1) {
       nested = { nested };
     }
     expect(() => parseChatRequest({ ...request(), metadata: nested })).toThrow(/depth/);
-    expect(() =>
-      parseChatRequest({
-        ...request(),
-        metadata: { value: "x".repeat(AI_RUNTIME_PROTOCOL_LIMITS.metadataSerializedBytes) },
-      }),
-    ).toThrow();
+  });
+
+  it.each([
+    ["ASCII", "x"],
+    ["multibyte text", "\u00e9"],
+    ["surrogate pairs", "\ud83d\ude00"],
+  ])("enforces the exact serialized UTF-8 byte boundary for %s", (_label, fill) => {
+    const limit = AI_RUNTIME_PROTOCOL_LIMITS.metadataSerializedBytes;
+    const accepted = metadataWithSerializedByteLength(limit, fill);
+    const rejected = metadataWithSerializedByteLength(limit + 1, fill);
+
+    expect(parseChatRequest({ ...request(), metadata: accepted }).metadata).toBe(accepted);
+    expect(() => parseChatRequest({ ...request(), metadata: rejected })).toThrow(
+      `must serialize to at most ${limit} bytes`,
+    );
   });
 });
 

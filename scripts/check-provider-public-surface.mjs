@@ -28,6 +28,11 @@ assert.match(
   /export \* from ["']\.\/providers\/index\.js["'];/,
   "the package entry point must export the provider adapter contract",
 );
+assert.match(
+  packageEntry,
+  /export \* from ["']\.\/transports\/index\.js["'];/,
+  "the package entry point must export the conversation transport contract",
+);
 
 const externalImports = [...declarations.matchAll(/from ["']([^"']+)["']/g)]
   .map((match) => match[1])
@@ -49,6 +54,12 @@ const forbiddenMarkers = [
   /\bGenerateContentResponse\b/,
   /\braw_(?:request|response|error)\b/,
   /\b(?:provider|native|sdk)_chunk\b/,
+  /\bfetch\b/,
+  /\bResponse\b/,
+  /\bEventSource\b/,
+  /\bNodeJS\b/,
+  /\bBuffer\b/,
+  /\bcredentials?\b/i,
 ];
 
 for (const marker of forbiddenMarkers) {
@@ -59,4 +70,4 @@ for (const marker of forbiddenMarkers) {
   );
 }
 
-stdout.write(`checked ${files.length} declaration files: provider adapter surface is neutral\n`);
+stdout.write(`checked ${files.length} declaration files: public surface is runtime-neutral\n`);
