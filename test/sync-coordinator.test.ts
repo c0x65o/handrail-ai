@@ -5,6 +5,7 @@ import {
   CONVERSATION_SYNC_STATE_SCHEMA_VERSION,
   ConversationSyncAdapterProtocolError,
   ConversationSyncCoordinatorDestroyedError,
+  ConversationSyncSnapshotError,
   ConversationSyncStateRecordError,
   InMemoryConversationEventStore,
   InMemoryConversationSyncStateStore,
@@ -1128,6 +1129,77 @@ describe("createConversationSyncCoordinator", () => {
     });
     expect(adapter.snapshotPulls).toBe(1);
     await second.destroy();
+  });
+
+  it("rejects a malformed remote snapshot without installing or persisting it", async () => {
+    const adapter = new FakeAuthoritativeAdapter();
+    vi.spyOn(adapter, "readSince").mockResolvedValueOnce({
+      status: "snapshot_required",
+      reason: "compacted",
+      latestRevision: null,
+    });
+    const malformedState = {
+      ...createInitialConversationState(conversationId),
+      messages: [null],
+    };
+    vi.spyOn(adapter, "pullSnapshot").mockResolvedValue({
+      status: "snapshot",
+      snapshot: {
+        conversationId,
+        revision: null,
+        state: malformedState as unknown as ConversationJsonValue,
+      },
+    });
+    const stateStore = new InMemoryConversationSyncStateStore();
+    const saveState = vi.spyOn(stateStore, "save");
+    const sync = coordinator(
+      adapter,
+      new InMemoryConversationEventStore(),
+      new ManualClock(),
+      stateStore,
+    ).coordinator;
+
+    await expect(sync.start()).rejects.toBeInstanceOf(
+      ConversationSyncSnapshotError,
+    );
+
+    expect(sync.store.getSnapshot().messages).toEqual([]);
+    expect(saveState).toHaveBeenCalledOnce();
+    expect(saveState.mock.calls[0]?.[0].record.authoritativeState.messages).toEqual([]);
+    await sync.destroy();
+  });
+
+  it("rejects a malformed persisted baseline before installation or save", async () => {
+    const persisted = {
+      schemaVersion: CONVERSATION_SYNC_STATE_SCHEMA_VERSION,
+      conversationId,
+      generation: 1,
+      authoritativeState: {
+        ...createInitialConversationState(conversationId),
+        messages: [null],
+      },
+      authoritativeRevision: null,
+      pendingMutations: [],
+    };
+    const saveState = vi.fn<ConversationSyncStateStore["save"]>();
+    const stateStore: ConversationSyncStateStore = {
+      load: async () => persisted as never,
+      save: saveState,
+    };
+    const sync = createConversationSyncCoordinator({
+      conversationId,
+      adapter: new FakeAuthoritativeAdapter(),
+      eventStore: new InMemoryConversationEventStore(),
+      stateStore,
+    });
+
+    await expect(sync.start()).rejects.toBeInstanceOf(
+      ConversationSyncStateRecordError,
+    );
+
+    expect(sync.store.getSnapshot().messages).toEqual([]);
+    expect(saveState).not.toHaveBeenCalled();
+    await sync.destroy();
   });
 
   it.each([

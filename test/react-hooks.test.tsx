@@ -23,6 +23,7 @@ import {
 import {
   ConversationProvider,
   MessageList,
+  type ConversationProviderProps,
   useConversationActions,
   useConversationSelector,
   useConversationSnapshot,
@@ -162,6 +163,34 @@ describe("ConversationProvider and hooks", () => {
     consoleError.mockRestore();
   });
 
+  it("rejects undefined or ambiguously combined provider sources", () => {
+    const store = createConversationStore();
+    const { runtime } = fakeRuntime<unknown>(store);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const invalidSources: readonly Record<string, unknown>[] = [
+      {},
+      { store: undefined },
+      { runtime: undefined },
+      { create: undefined },
+      { store, runtime: undefined },
+      { runtime, store: undefined },
+      { store, create: () => store },
+      { runtime, create: () => store },
+      { store, runtime, create: () => store },
+    ];
+
+    for (const sourceProps of invalidSources) {
+      expect(() =>
+        render(
+          <ConversationProvider
+            {...(sourceProps as unknown as ConversationProviderProps)}
+          />,
+        )
+      ).toThrow(/requires `create` alone/u);
+    }
+    consoleError.mockRestore();
+  });
+
   it("selectively rerenders while observing every external store update", async () => {
     const store = createConversationStore();
     let titleRenders = 0;
@@ -288,6 +317,93 @@ describe("ConversationProvider and hooks", () => {
     ownedView.unmount();
     await act(async () => Promise.resolve());
     expect(create).toHaveBeenCalledOnce();
+    expect(coordinator.store.getSnapshot().revision).toBe(1);
+    await coordinator.destroy();
+  });
+
+  it("pairs authoritative sync reads with external runtime actions", async () => {
+    interface Request {
+      readonly model: string;
+    }
+    const conversationId = "conversation_react_paired_sync" as ConversationId;
+    const updates = new RemoteUpdateStream();
+    const coordinator = createConversationSyncCoordinator({
+      conversationId,
+      eventStore: new InMemoryConversationEventStore(),
+      adapter: remoteSyncAdapter(updates),
+    });
+    await coordinator.start();
+    const runtimeStore = createConversationStore();
+    const { runtime, destroy, sendMessage } = fakeRuntime<Request>(runtimeStore);
+    let selectedRenders = 0;
+    let primitiveRenders = 0;
+    let observedStore: ReturnType<typeof useConversationStore> | undefined;
+    let actions: ReturnType<typeof useConversationActions<Request>> | undefined;
+
+    function PairedConsumer() {
+      selectedRenders += 1;
+      observedStore = useConversationStore();
+      actions = useConversationActions<Request>();
+      const count = useConversationSelector((state) => state.messages.length);
+      return <span data-testid="paired-sync-count">{count}</span>;
+    }
+
+    const view = render(
+      <ConversationProvider store={coordinator.store} runtime={runtime}>
+        <PairedConsumer />
+        <MessageList
+          data-testid="paired-sync-messages"
+          render={(props, ref) => {
+            primitiveRenders += 1;
+            return <div {...props} ref={ref} />;
+          }}
+        />
+      </ConversationProvider>,
+    );
+    expect(observedStore).toBe(coordinator.store);
+    expect(selectedRenders).toBe(1);
+    expect(primitiveRenders).toBe(1);
+
+    await act(() => runtimeStore.applyEvent(titleEvent(1, "Runtime-only update")));
+    expect(selectedRenders).toBe(1);
+    expect(primitiveRenders).toBe(1);
+
+    const remoteEvent = event(1, {
+      type: "message.created",
+      message_id: "message_paired_remote" as never,
+      role: "assistant",
+      content: [{ type: "text", text: "Paired authoritative message" }],
+    }, conversationId);
+    updates.push({
+      status: "events",
+      events: [remoteEvent],
+      revision: remoteEvent.revision,
+      latestRevision: remoteEvent.revision,
+      hasMore: false,
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(coordinator.store.getSnapshot().revision).toBe(1);
+      });
+    });
+
+    expect(screen.getByTestId("paired-sync-count").textContent).toBe("1");
+    expect(screen.getByTestId("paired-sync-messages").textContent).toContain(
+      "Paired authoritative message",
+    );
+    expect(selectedRenders).toBe(2);
+    expect(primitiveRenders).toBe(2);
+
+    const input: ConversationRuntimeSendMessageInput<Request> = {
+      content: "Send through paired runtime",
+      request: { model: "test-model" },
+    };
+    void actions?.sendMessage(input);
+    expect(sendMessage).toHaveBeenCalledOnce();
+    expect(sendMessage).toHaveBeenCalledWith(input);
+
+    view.unmount();
+    expect(destroy).not.toHaveBeenCalled();
     expect(coordinator.store.getSnapshot().revision).toBe(1);
     await coordinator.destroy();
   });

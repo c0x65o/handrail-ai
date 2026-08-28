@@ -11,6 +11,7 @@ import type {
   ConversationEventStore,
   WriteConversationEventCheckpointResult,
 } from "./event-store.js";
+import { isConversationState } from "./state-validation.js";
 import {
   createInitialConversationState,
   type ConversationState,
@@ -321,188 +322,13 @@ function parseCheckpoint(
   };
 }
 
-function isConversationState(
-  value: unknown,
-  conversationId: ConversationId,
-  revision: ConversationRevision,
-): value is ConversationState {
-  if (!isRecord(value)) return false;
-  const requiredKeys = [
-    "conversation_id", "revision", "last_event_id", "processed_event_ids",
-    "processed_mutation_ids", "messages", "attachments", "turns",
-    "active_turn_id", "tool_calls", "tool_loop_budget_exhaustions",
-    "usage_receipt_links", "metadata",
-    "title", "replay_error",
-  ];
-  if (!hasExactKeys(value, requiredKeys)) return false;
-  if (
-    value.conversation_id !== conversationId ||
-    value.revision !== revision ||
-    !isIdentifier(value.last_event_id) ||
-    value.replay_error !== null ||
-    !(value.title === null || typeof value.title === "string") ||
-    !isJsonObject(value.metadata)
-  ) return false;
-
-  const eventIds = identifierArray(value.processed_event_ids);
-  const mutationIds = identifierArray(value.processed_mutation_ids);
-  if (
-    eventIds === null || mutationIds === null ||
-    eventIds.length !== revision ||
-    new Set(eventIds).size !== eventIds.length ||
-    new Set(mutationIds).size !== mutationIds.length ||
-    eventIds.at(-1) !== value.last_event_id
-  ) return false;
-
-  if (!recordArray(value.messages, isMessage)) return false;
-  if (!recordArray(value.attachments, isAttachmentRecord)) return false;
-  if (!recordArray(value.turns, isTurn)) return false;
-  if (!recordArray(value.tool_calls, isToolCall)) return false;
-  if (!recordArray(value.tool_loop_budget_exhaustions, isToolLoopBudgetExhaustion)) return false;
-  if (!recordArray(value.usage_receipt_links, isUsageLink)) return false;
-  if (!(value.active_turn_id === null || isIdentifier(value.active_turn_id))) return false;
-  if (
-    value.active_turn_id !== null &&
-    !(value.turns as Record<string, unknown>[]).some(
-      (turn) => turn.turn_id === value.active_turn_id &&
-        ["queued", "running", "waiting_for_tool_result"].includes(String(turn.status)),
-    )
-  ) return false;
-  return true;
-}
-
-function isMessage(value: Record<string, unknown>): boolean {
-  return isIdentifier(value.message_id) &&
-    (value.role === null || ["user", "assistant", "system"].includes(String(value.role))) &&
-    Array.isArray(value.content) && value.content.every(isTextPart) &&
-    Array.isArray(value.attachments) && value.attachments.every(isAttachmentReference) &&
-    (value.created_at === null || typeof value.created_at === "string") &&
-    isNullableAttribution(value.attribution);
-}
-
-function isAttachmentRecord(value: Record<string, unknown>): boolean {
-  return isIdentifier(value.message_id) && isIdentifier(value.attachment_id) &&
-    isAttachmentReference(value.reference) && typeof value.referenced_at === "string" &&
-    isAttribution(value.attribution);
-}
-
-function isTurn(value: Record<string, unknown>): boolean {
-  return isIdentifier(value.turn_id) &&
-    (value.continuation_of_turn_id === null || isIdentifier(value.continuation_of_turn_id)) &&
-    ["queued", "running", "waiting_for_tool_result", "completed", "cancelled", "failed"]
-      .includes(String(value.status)) &&
-    identifierArray(value.input_message_ids) !== null &&
-    identifierArray(value.output_message_ids) !== null &&
-    (value.outcome === null || ["stop", "length", "tool_calls"].includes(String(value.outcome))) &&
-    (value.cancellation_reason === null || ["user", "timeout", "superseded", "runtime_shutdown"].includes(String(value.cancellation_reason))) &&
-    (value.error === null || isTurnError(value.error)) &&
-    (value.started_at === null || typeof value.started_at === "string") &&
-    (value.terminal_at === null || typeof value.terminal_at === "string") &&
-    isNullableAttribution(value.attribution);
-}
-
-function isToolCall(value: Record<string, unknown>): boolean {
-  return isIdentifier(value.tool_call_id) && isIdentifier(value.turn_id) &&
-    (value.name === null || typeof value.name === "string") &&
-    (value.arguments === null || isJsonObject(value.arguments)) &&
-    (value.requested_at === null || typeof value.requested_at === "string") &&
-    (value.discovered_at === null || typeof value.discovered_at === "string") &&
-    (value.started_at === null || typeof value.started_at === "string") &&
-    (value.approval_required_at === null || typeof value.approval_required_at === "string") &&
-    isNullableAttribution(value.attribution) &&
-    (value.result === null || isToolResult(value.result));
-}
-
-function isToolLoopBudgetExhaustion(value: Record<string, unknown>): boolean {
-  return isIdentifier(value.turn_id) &&
-    ["iterations", "total_tool_calls", "wall_clock"].includes(String(value.budget)) &&
-    Number.isSafeInteger(value.limit) && (value.limit as number) > 0 &&
-    typeof value.exhausted_at === "string" && isAttribution(value.attribution);
-}
-
-function isToolResult(value: unknown): boolean {
-  return isRecord(value) && Array.isArray(value.content) &&
-    value.content.every((part) => isTextPart(part) || isJsonPart(part)) &&
-    typeof value.is_error === "boolean" && typeof value.recorded_at === "string" &&
-    isAttribution(value.attribution);
-}
-
-function isUsageLink(value: Record<string, unknown>): boolean {
-  return isIdentifier(value.usage_receipt_id) && isIdentifier(value.turn_id) &&
-    typeof value.linked_at === "string" && isAttribution(value.attribution);
-}
-
-function isTextPart(value: unknown): boolean {
-  return isRecord(value) && value.type === "text" && typeof value.text === "string";
-}
-
-function isJsonPart(value: unknown): boolean {
-  return isRecord(value) && value.type === "json" && isJsonValue(value.value);
-}
-
-function isAttachmentReference(value: unknown): boolean {
-  return isRecord(value) && isIdentifier(value.attachment_id) &&
-    typeof value.media_type === "string" &&
-    (value.filename === undefined || typeof value.filename === "string") &&
-    (value.size_bytes === undefined ||
-      Number.isSafeInteger(value.size_bytes) && (value.size_bytes as number) >= 0);
-}
-
-function isTurnError(value: unknown): boolean {
-  return isRecord(value) && typeof value.code === "string" &&
-    typeof value.message === "string" && typeof value.retryable === "boolean";
-}
-
-function isNullableAttribution(value: unknown): boolean {
-  return value === null || isAttribution(value);
-}
-
-function isAttribution(value: unknown): boolean {
-  if (!isRecord(value) || !isRecord(value.actor) || !isRecord(value.source)) return false;
-  if (!["user", "assistant", "tool", "system"].includes(String(value.actor.type))) return false;
-  if (value.actor.id !== undefined && !isIdentifier(value.actor.id)) return false;
-  if (!["client", "runtime", "sync", "import"].includes(String(value.source.type))) return false;
-  return value.source.type !== "client" || isIdentifier(value.source.client_id);
-}
-
-function recordArray(
-  value: unknown,
-  predicate: (item: Record<string, unknown>) => boolean,
-): boolean {
-  return Array.isArray(value) && value.every((item) => isRecord(item) && predicate(item));
-}
-
-function identifierArray(value: unknown): string[] | null {
-  return Array.isArray(value) && value.every(isIdentifier) ? value : null;
-}
-
-function isIdentifier(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0;
-}
-
 function isRevision(value: unknown): value is ConversationRevision {
   return Number.isSafeInteger(value) && (value as number) > 0;
-}
-
-function isJsonObject(value: unknown): boolean {
-  return isRecord(value) && Object.values(value).every(isJsonValue);
-}
-
-function isJsonValue(value: unknown): boolean {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
-  if (typeof value === "number") return Number.isFinite(value);
-  if (Array.isArray(value)) return value.every(isJsonValue);
-  return isJsonObject(value);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value) &&
     (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
-}
-
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const actual = Object.keys(value);
-  return actual.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 }
 
 function validateThreshold(value: number | undefined, name: string): void {

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   AI_RUNTIME_PROTOCOL_VERSION,
+  ConversationRuntimeBusyError,
   InMemoryConversationEventStore,
   createRetryPolicy,
   createConversationRuntime,
@@ -400,6 +401,37 @@ class CheckpointFailingEventStore implements ConversationEventStore {
   }
 }
 
+class AdmissionEventStore implements ConversationEventStore {
+  readonly inner = new InMemoryConversationEventStore();
+  initialAppendAttempts = 0;
+  successfulInitialAppends = 0;
+  failNextInitialAppend = false;
+
+  async append(input: AppendConversationEventsInput): Promise<AppendConversationEventsResult> {
+    const isInitialAppend = input.events.some(
+      (event) => event.payload.type === "turn.started",
+    );
+    if (isInitialAppend) {
+      this.initialAppendAttempts += 1;
+      if (this.failNextInitialAppend) {
+        this.failNextInitialAppend = false;
+        throw new Error("initial append failed");
+      }
+    }
+    const result = await this.inner.append(input);
+    if (isInitialAppend) this.successfulInitialAppends += 1;
+    return result;
+  }
+
+  read(input: ReadConversationEventsInput): Promise<ReadConversationEventsResult> {
+    return this.inner.read(input);
+  }
+
+  getLatestRevision(id: ConversationId): Promise<ConversationRevision | null> {
+    return this.inner.getLatestRevision(id);
+  }
+}
+
 function deterministicSources() {
   let id = 0;
   let tick = 0;
@@ -416,6 +448,116 @@ function deterministicSources() {
 }
 
 describe("createConversationRuntime", () => {
+  it("admits only one of two same-tick sends", async () => {
+    const eventStore = new AdmissionEventStore();
+    const transport = new FakeTransport();
+    transport.startObservations.push(observation([], "disconnected"));
+    const runtime = await createConversationRuntime({
+      conversationId,
+      clientId,
+      transport,
+      eventStore,
+      retryPolicy: createRetryPolicy({ maximumAttempts: 1 }),
+      ...deterministicSources(),
+    });
+
+    const [first, second] = await Promise.allSettled([
+      runtime.sendMessage({
+        content: "First",
+        request: { prompt: "First" },
+      }),
+      runtime.sendMessage({
+        content: "Second",
+        request: { prompt: "Second" },
+      }),
+    ]);
+
+    expect(first).toMatchObject({ value: { status: "disconnected" } });
+    expect(second).toMatchObject({
+      status: "rejected",
+      reason: expect.any(ConversationRuntimeBusyError),
+    });
+    expect(eventStore.initialAppendAttempts).toBe(1);
+    expect(eventStore.successfulInitialAppends).toBe(1);
+    expect(transport.starts).toHaveLength(1);
+  });
+
+  it("admits only one of two same-tick continuations", async () => {
+    const eventStore = new AdmissionEventStore();
+    const transport = new FakeTransport();
+    transport.startObservations.push(observation([
+      startedFrame(),
+      frame("response.tool_call", 1, {
+        tool_call_id: "call_same_tick",
+        name: "same_tick_tool",
+        arguments: {},
+      }),
+      completedFrame(2, "tool_calls"),
+    ], "completed"));
+    const runtime = await createConversationRuntime({
+      conversationId,
+      clientId,
+      transport,
+      eventStore,
+      retryPolicy: createRetryPolicy({ maximumAttempts: 1 }),
+      ...deterministicSources(),
+    });
+    const preceding = await runtime.sendMessage({
+      content: "Use a tool",
+      request: { prompt: "Use a tool" },
+    });
+    transport.startObservations.push(observation([], "disconnected"));
+
+    const [first, second] = await Promise.allSettled([
+      runtime.continueTurn!({
+        precedingTurnId: preceding.turnId,
+        request: { prompt: "Continue first" },
+      }),
+      runtime.continueTurn!({
+        precedingTurnId: preceding.turnId,
+        request: { prompt: "Continue second" },
+      }),
+    ]);
+
+    expect(first).toMatchObject({ value: { status: "disconnected" } });
+    expect(second).toMatchObject({
+      status: "rejected",
+      reason: expect.any(ConversationRuntimeBusyError),
+    });
+    expect(eventStore.initialAppendAttempts).toBe(2);
+    expect(eventStore.successfulInitialAppends).toBe(2);
+    expect(transport.starts).toHaveLength(2);
+  });
+
+  it("releases turn admission when the initial append fails", async () => {
+    const eventStore = new AdmissionEventStore();
+    eventStore.failNextInitialAppend = true;
+    const transport = new FakeTransport();
+    const runtime = await createConversationRuntime({
+      conversationId,
+      clientId,
+      transport,
+      eventStore,
+      retryPolicy: createRetryPolicy({ maximumAttempts: 1 }),
+      ...deterministicSources(),
+    });
+
+    await expect(runtime.sendMessage({
+      content: "Fail before transport",
+      request: { prompt: "Fail before transport" },
+    })).rejects.toThrow("initial append failed");
+    expect(transport.starts).toHaveLength(0);
+
+    transport.startObservations.push(observation([], "disconnected"));
+    await expect(runtime.sendMessage({
+      content: "Try again",
+      request: { prompt: "Try again" },
+    })).resolves.toMatchObject({ status: "disconnected" });
+    expect(eventStore.initialAppendAttempts).toBe(2);
+    expect(eventStore.successfulInitialAppends).toBe(1);
+    expect(transport.starts).toHaveLength(1);
+  });
+
   it("persists optimistic text and attachment facts before publishing, then durably finalizes streamed text", async () => {
     const eventStore = new TrackingEventStore();
     const transport = new FakeTransport();

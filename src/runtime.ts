@@ -284,6 +284,7 @@ export async function createConversationRuntime<TRequest>(
   const cancellationControllers = new Map<string, AbortController>();
   let destroyed = false;
   let mutationBoundary: Promise<void> = Promise.resolve();
+  let turnAdmissionPending = false;
 
   await hydrateRuntimeMetadata(
     options.conversationId,
@@ -369,6 +370,29 @@ export async function createConversationRuntime<TRequest>(
   ): Promise<readonly ConversationEvent[]> => drafts.length === 0
     ? Promise.resolve([])
     : persistGenerated(() => drafts);
+
+  const persistAdmittedTurn = async (
+    drafts: readonly EventDraft[],
+  ): Promise<readonly ConversationEvent[]> => {
+    assertUsable();
+    if (
+      turnAdmissionPending ||
+      store.getSnapshot().active_turn_id !== null
+    ) {
+      throw new ConversationRuntimeBusyError();
+    }
+    turnAdmissionPending = true;
+    try {
+      return await persistGenerated(() => {
+        if (store.getSnapshot().active_turn_id !== null) {
+          throw new ConversationRuntimeBusyError();
+        }
+        return drafts;
+      });
+    } finally {
+      turnAdmissionPending = false;
+    }
+  };
 
   const result = (
     turnId: ConversationTurnId,
@@ -775,9 +799,6 @@ export async function createConversationRuntime<TRequest>(
     input: ConversationRuntimeSendMessageInput<TRequest>,
   ): Promise<ConversationRuntimeTurnResult> => {
     assertUsable();
-    if (store.getSnapshot().active_turn_id !== null) {
-      throw new ConversationRuntimeBusyError();
-    }
     const content = normalizeMessageContent(input.content);
     const attachments = input.attachments ?? [];
     const messageId = createId("message") as ConversationMessageId;
@@ -816,7 +837,7 @@ export async function createConversationRuntime<TRequest>(
         },
       },
     ];
-    await persist(initialDrafts);
+    await persistAdmittedTurn(initialDrafts);
 
     return startPersistedTurn(turnId, startMutationId, idempotencyKey, input.request);
   };
@@ -915,9 +936,6 @@ export async function createConversationRuntime<TRequest>(
         existing.error === null ? undefined : existing.error,
       );
     }
-    if (store.getSnapshot().active_turn_id !== null) {
-      throw new ConversationRuntimeBusyError();
-    }
     const preceding = store.getSnapshot().turns.find(
       (turn) => turn.turn_id === input.precedingTurnId,
     );
@@ -934,7 +952,7 @@ export async function createConversationRuntime<TRequest>(
     const turnId = createId("turn") as ConversationTurnId;
     const mutationId = createId("mutation") as ConversationClientMutationId;
     const idempotencyKey = createId("idempotency");
-    await persist([{
+    await persistAdmittedTurn([{
       actor: { type: "assistant" },
       source: clientSource(),
       mutationId,

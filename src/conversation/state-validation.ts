@@ -1,0 +1,265 @@
+import type {
+  ConversationId,
+  ConversationRevision,
+} from "./events.js";
+import type { ConversationState } from "./state.js";
+
+export function isConversationState(
+  value: unknown,
+  conversationId: ConversationId | null,
+  revision: ConversationRevision | null,
+): value is ConversationState {
+  if (!isPlainRecord(value)) return false;
+  const requiredKeys = [
+    "conversation_id", "revision", "last_event_id", "processed_event_ids",
+    "processed_mutation_ids", "messages", "attachments", "turns",
+    "active_turn_id", "tool_calls", "tool_loop_budget_exhaustions",
+    "usage_receipt_links", "metadata",
+    "title", "replay_error",
+  ];
+  if (!hasExactKeys(value, requiredKeys)) return false;
+  if (
+    value.conversation_id !== conversationId ||
+    value.revision !== revision ||
+    !(revision === null ? value.last_event_id === null : isIdentifier(value.last_event_id)) ||
+    value.replay_error !== null ||
+    !(value.title === null || typeof value.title === "string") ||
+    !isJsonObject(value.metadata)
+  ) return false;
+
+  const eventIds = identifierArray(value.processed_event_ids);
+  const mutationIds = identifierArray(value.processed_mutation_ids);
+  if (
+    eventIds === null || mutationIds === null ||
+    eventIds.length !== (revision ?? 0) ||
+    new Set(eventIds).size !== eventIds.length ||
+    new Set(mutationIds).size !== mutationIds.length ||
+    (revision !== null && eventIds.at(-1) !== value.last_event_id)
+  ) return false;
+
+  if (!recordArray(value.messages, isMessage)) return false;
+  if (!recordArray(value.attachments, isAttachmentRecord)) return false;
+  if (!recordArray(value.turns, isTurn)) return false;
+  if (!recordArray(value.tool_calls, isToolCall)) return false;
+  if (!recordArray(value.tool_loop_budget_exhaustions, isToolLoopBudgetExhaustion)) return false;
+  if (!recordArray(value.usage_receipt_links, isUsageLink)) return false;
+  if (!(value.active_turn_id === null || isIdentifier(value.active_turn_id))) return false;
+  if (
+    value.active_turn_id !== null &&
+    !(value.turns as Record<string, unknown>[]).some(
+      (turn) => turn.turn_id === value.active_turn_id &&
+        ["queued", "running", "waiting_for_tool_result"].includes(String(turn.status)),
+    )
+  ) return false;
+  return true;
+}
+
+function isMessage(value: Record<string, unknown>): boolean {
+  return isIdentifier(value.message_id) &&
+    (!Object.hasOwn(value, "turn_id") || value.turn_id === null || isIdentifier(value.turn_id)) &&
+    (value.role === null || ["user", "assistant", "system"].includes(String(value.role))) &&
+    Array.isArray(value.content) && value.content.every(isTextPart) &&
+    Array.isArray(value.attachments) && value.attachments.every(isAttachmentReference) &&
+    (value.created_at === null || typeof value.created_at === "string") &&
+    isNullableAttribution(value.attribution);
+}
+
+function isAttachmentRecord(value: Record<string, unknown>): boolean {
+  return isIdentifier(value.message_id) && isIdentifier(value.attachment_id) &&
+    isAttachmentReference(value.reference) && typeof value.referenced_at === "string" &&
+    isAttribution(value.attribution);
+}
+
+function isTurn(value: Record<string, unknown>): boolean {
+  return isIdentifier(value.turn_id) &&
+    (value.continuation_of_turn_id === null || isIdentifier(value.continuation_of_turn_id)) &&
+    ["queued", "running", "waiting_for_tool_result", "completed", "cancelled", "failed"]
+      .includes(String(value.status)) &&
+    identifierArray(value.input_message_ids) !== null &&
+    identifierArray(value.output_message_ids) !== null &&
+    (value.outcome === null || ["stop", "length", "tool_calls"].includes(String(value.outcome))) &&
+    (value.cancellation_reason === null || ["user", "timeout", "superseded", "runtime_shutdown"].includes(String(value.cancellation_reason))) &&
+    (value.cancellation_status === null || isOneOf(
+      value.cancellation_status,
+      ["requested", "unsupported", "cancelled"],
+    )) &&
+    (value.cancellation_requested_reason === null || isOneOf(
+      value.cancellation_requested_reason,
+      ["user", "timeout", "superseded", "runtime_shutdown"],
+    )) &&
+    typeof value.remote_may_still_be_running === "boolean" &&
+    (value.error === null || isTurnError(value.error)) &&
+    Array.isArray(value.retry_history) && value.retry_history.every(isTurnRetryRecord) &&
+    (value.started_at === null || typeof value.started_at === "string") &&
+    (value.terminal_at === null || typeof value.terminal_at === "string") &&
+    isNullableAttribution(value.attribution);
+}
+
+function isTurnRetryRecord(value: unknown): boolean {
+  if (!isPlainRecord(value) || !isPositiveSafeInteger(value.attempt) ||
+    !isConversationTimestamp(value.occurred_at) || !isAttribution(value.attribution)) {
+    return false;
+  }
+  switch (value.type) {
+    case "turn.attempt_started":
+      return hasExactKeys(value, [
+        "type", "attempt", "operation", "occurred_at", "attribution",
+      ]) && isOneOf(value.operation, ["start", "resume"]);
+    case "turn.retry_scheduled":
+      return hasExactKeys(value, [
+        "type", "attempt", "reason_category", "delay_ms", "occurred_at", "attribution",
+      ]) && isRetryReasonCategory(value.reason_category) &&
+        isNonnegativeSafeInteger(value.delay_ms);
+    case "turn.retry_exhausted":
+      return hasExactKeys(value, [
+        "type", "attempt", "reason_category", "exhaustion_reason", "occurred_at",
+        "attribution",
+      ]) && isRetryReasonCategory(value.reason_category) &&
+        isOneOf(value.exhaustion_reason, ["maximum_attempts", "maximum_elapsed_time"]);
+    default:
+      return false;
+  }
+}
+
+function isRetryReasonCategory(value: unknown): boolean {
+  return isOneOf(value, [
+    "rate_limit", "timeout", "unavailable", "internal", "disconnected", "interrupted",
+  ]);
+}
+
+function isOneOf<const Values extends readonly string[]>(
+  value: unknown,
+  values: Values,
+): value is Values[number] {
+  return typeof value === "string" && values.includes(value);
+}
+
+function isPositiveSafeInteger(value: unknown): boolean {
+  return Number.isSafeInteger(value) && (value as number) > 0;
+}
+
+function isNonnegativeSafeInteger(value: unknown): boolean {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function isConversationTimestamp(value: unknown): boolean {
+  if (typeof value !== "string" || value.length > 64) return false;
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?Z$/.exec(value);
+  if (match === null) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [
+    31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+  ][month - 1];
+  return year !== 0 && daysInMonth !== undefined && day >= 1 && day <= daysInMonth &&
+    hour <= 23 && minute <= 59 && second <= 59 && Number.isFinite(Date.parse(value));
+}
+
+function isToolCall(value: Record<string, unknown>): boolean {
+  return isIdentifier(value.tool_call_id) && isIdentifier(value.turn_id) &&
+    (value.name === null || typeof value.name === "string") &&
+    (value.arguments === null || isJsonObject(value.arguments)) &&
+    (value.requested_at === null || typeof value.requested_at === "string") &&
+    (value.discovered_at === null || typeof value.discovered_at === "string") &&
+    (value.started_at === null || typeof value.started_at === "string") &&
+    (value.approval_required_at === null || typeof value.approval_required_at === "string") &&
+    isNullableAttribution(value.attribution) &&
+    (value.result === null || isToolResult(value.result));
+}
+
+function isToolLoopBudgetExhaustion(value: Record<string, unknown>): boolean {
+  return isIdentifier(value.turn_id) &&
+    ["iterations", "total_tool_calls", "wall_clock"].includes(String(value.budget)) &&
+    Number.isSafeInteger(value.limit) && (value.limit as number) > 0 &&
+    typeof value.exhausted_at === "string" && isAttribution(value.attribution);
+}
+
+function isToolResult(value: unknown): boolean {
+  return isPlainRecord(value) && Array.isArray(value.content) &&
+    value.content.every((part) => isTextPart(part) || isJsonPart(part)) &&
+    typeof value.is_error === "boolean" && typeof value.recorded_at === "string" &&
+    isAttribution(value.attribution);
+}
+
+function isUsageLink(value: Record<string, unknown>): boolean {
+  return isIdentifier(value.usage_receipt_id) && isIdentifier(value.turn_id) &&
+    typeof value.linked_at === "string" && isAttribution(value.attribution);
+}
+
+function isTextPart(value: unknown): boolean {
+  return isPlainRecord(value) && value.type === "text" && typeof value.text === "string";
+}
+
+function isJsonPart(value: unknown): boolean {
+  return isPlainRecord(value) && value.type === "json" && isJsonValue(value.value);
+}
+
+function isAttachmentReference(value: unknown): boolean {
+  return isPlainRecord(value) && isIdentifier(value.attachment_id) &&
+    typeof value.media_type === "string" &&
+    (value.filename === undefined || typeof value.filename === "string") &&
+    (value.size_bytes === undefined ||
+      Number.isSafeInteger(value.size_bytes) && (value.size_bytes as number) >= 0);
+}
+
+function isTurnError(value: unknown): boolean {
+  return isPlainRecord(value) && typeof value.code === "string" &&
+    typeof value.message === "string" && typeof value.retryable === "boolean";
+}
+
+function isNullableAttribution(value: unknown): boolean {
+  return value === null || isAttribution(value);
+}
+
+function isAttribution(value: unknown): boolean {
+  if (!isPlainRecord(value) || !isPlainRecord(value.actor) || !isPlainRecord(value.source)) {
+    return false;
+  }
+  if (!["user", "assistant", "tool", "system"].includes(String(value.actor.type))) return false;
+  if (value.actor.id !== undefined && !isIdentifier(value.actor.id)) return false;
+  if (!["client", "runtime", "sync", "import"].includes(String(value.source.type))) return false;
+  return value.source.type !== "client" || isIdentifier(value.source.client_id);
+}
+
+function recordArray(
+  value: unknown,
+  predicate: (item: Record<string, unknown>) => boolean,
+): boolean {
+  return Array.isArray(value) &&
+    value.every((item) => isPlainRecord(item) && predicate(item));
+}
+
+function identifierArray(value: unknown): string[] | null {
+  return Array.isArray(value) && value.every(isIdentifier) ? value : null;
+}
+
+function isIdentifier(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function isJsonObject(value: unknown): boolean {
+  return isPlainRecord(value) && Object.values(value).every(isJsonValue);
+}
+
+function isJsonValue(value: unknown): boolean {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  return isJsonObject(value);
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value) &&
+    (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value);
+  return actual.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
+}

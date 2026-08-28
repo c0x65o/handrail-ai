@@ -7,6 +7,7 @@ export {
   type ConversationReadableStore,
   type ConversationRuntimeProviderProps,
   type ConversationStoreProviderProps,
+  type ConversationStoreRuntimeProviderProps,
 } from "./context.js";
 export {
   useConversationActions,

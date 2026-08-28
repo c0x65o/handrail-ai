@@ -44,6 +44,15 @@ export interface ConversationRuntimeProviderProps<TRequest = unknown>
   readonly create?: never;
 }
 
+export interface ConversationStoreRuntimeProviderProps<TRequest = unknown>
+  extends ConversationProviderBaseProps {
+  /** Externally owned. All React reads and subscriptions use this store. */
+  readonly store: ConversationReadableStore;
+  /** Externally owned. Runtime actions delegate to this runtime. */
+  readonly runtime: ConversationRuntime<TRequest>;
+  readonly create?: never;
+}
+
 export interface ConversationFactoryProviderProps<TRequest = unknown>
   extends ConversationProviderBaseProps {
   /**
@@ -60,6 +69,7 @@ export interface ConversationFactoryProviderProps<TRequest = unknown>
 export type ConversationProviderProps<TRequest = unknown> =
   | ConversationStoreProviderProps
   | ConversationRuntimeProviderProps<TRequest>
+  | ConversationStoreRuntimeProviderProps<TRequest>
   | ConversationFactoryProviderProps<TRequest>;
 
 interface OwnedBindingEntry {
@@ -91,34 +101,47 @@ export function ConversationProvider<TRequest = unknown>(
   props: ConversationProviderProps<TRequest>,
 ) {
   const instanceId = useId();
-  const externalRuntime = "runtime" in props ? props.runtime : undefined;
-  const externalStore = "store" in props ? props.store : undefined;
-  const factory = "create" in props ? props.create : undefined;
-  const sourceCount = Number(externalRuntime !== undefined) +
-    Number(externalStore !== undefined) + Number(factory !== undefined);
-  const ownedEntry = sourceCount === 1 && factory !== undefined
+  const hasExternalRuntime = "runtime" in props;
+  const hasExternalStore = "store" in props;
+  const hasFactory = "create" in props;
+  const externalRuntime = hasExternalRuntime ? props.runtime : undefined;
+  const externalStore = hasExternalStore ? props.store : undefined;
+  const factory = hasFactory ? props.create : undefined;
+  const hasValidFactorySource = hasFactory && !hasExternalRuntime &&
+    !hasExternalStore && factory !== undefined;
+  const hasValidExternalSource = !hasFactory &&
+    (hasExternalRuntime || hasExternalStore) &&
+    (!hasExternalRuntime || externalRuntime !== undefined) &&
+    (!hasExternalStore || externalStore !== undefined);
+  const ownedEntry = hasValidFactorySource
     ? getOwnedBinding(
         factory as ConversationProviderFactory<unknown>,
         instanceId,
       )
     : null;
   const externalBinding = useMemo<ConversationBinding<unknown> | null>(() => {
+    if (!hasValidExternalSource) return null;
+    if (externalStore !== undefined) {
+      return Object.freeze({
+        store: externalStore,
+        runtime: externalRuntime as ConversationRuntime<unknown> | undefined ?? null,
+      });
+    }
     if (externalRuntime !== undefined) {
       return Object.freeze({
         store: externalRuntime.store,
         runtime: externalRuntime as ConversationRuntime<unknown>,
       });
     }
-    if (externalStore !== undefined) {
-      return Object.freeze({ store: externalStore, runtime: null });
-    }
     return null;
-  }, [externalRuntime, externalStore]);
+  }, [externalRuntime, externalStore, hasValidExternalSource]);
   const binding = ownedEntry?.binding ?? externalBinding;
 
-  if (sourceCount !== 1 || binding === null) {
+  if ((!hasValidFactorySource && !hasValidExternalSource) || binding === null) {
     throw new TypeError(
-      "ConversationProvider requires exactly one of `store`, `runtime`, or `create`.",
+      "ConversationProvider requires `create` alone, `store` alone, `runtime` " +
+        "alone, or an external `store` and `runtime` pair. Source props must " +
+        "be defined, and `create` cannot be combined with `store` or `runtime`.",
     );
   }
 

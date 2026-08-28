@@ -7,6 +7,7 @@ import {
 } from "../conversation/events.js";
 import type { ConversationEventStore } from "../conversation/event-store.js";
 import { replayConversation } from "../conversation/replay.js";
+import { isConversationState } from "../conversation/state-validation.js";
 import type { ConversationState } from "../conversation/state.js";
 import {
   createConversationStore,
@@ -1130,20 +1131,7 @@ function validateDecodedSnapshot(
   conversationId: ConversationId,
   revision: ConversationRevision | null,
 ): void {
-  if (
-    state === null ||
-    typeof state !== "object" ||
-    state.conversation_id !== conversationId ||
-    state.revision !== revision ||
-    state.replay_error !== null ||
-    !Array.isArray(state.processed_event_ids) ||
-    !Array.isArray(state.processed_mutation_ids) ||
-    !Array.isArray(state.messages) ||
-    !Array.isArray(state.attachments) ||
-    !Array.isArray(state.turns) ||
-    !Array.isArray(state.tool_calls) ||
-    !Array.isArray(state.usage_receipt_links)
-  ) {
+  if (!isConversationState(state, conversationId, revision)) {
     throw new ConversationSyncSnapshotError(
       "Sync snapshot is not a compatible conversation projection",
     );

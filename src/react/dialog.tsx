@@ -169,6 +169,10 @@ function cycleFocus(content: HTMLElement, backwards: boolean): void {
   if (next) focusElement(next);
 }
 
+function focusFirst(content: HTMLElement): void {
+  focusElement(getFocusableElements(content)[0] ?? content);
+}
+
 export interface ChatDialogRootProps {
   children?: ReactNode;
   /** Whether pointer interaction outside the top-most dialog requests closing. */
@@ -397,6 +401,16 @@ export const ChatDialogContent = forwardRef<
       }
     };
 
+    const handleFocusIn = (event: FocusEvent) => {
+      if (
+        getTopLayer(document) !== layer ||
+        event.composedPath().includes(content)
+      ) {
+        return;
+      }
+      focusFirst(content);
+    };
+
     const handlePointerDown = (event: PointerEvent) => {
       if (
         event.defaultPrevented ||
@@ -415,6 +429,7 @@ export const ChatDialogContent = forwardRef<
     };
 
     document.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("focusin", handleFocusIn);
     document.addEventListener("pointerdown", handlePointerDown);
     queueMicrotask(() => {
       if (cancelled || getTopLayer(document) !== layer) return;
@@ -433,6 +448,7 @@ export const ChatDialogContent = forwardRef<
     return () => {
       cancelled = true;
       document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("focusin", handleFocusIn);
       document.removeEventListener("pointerdown", handlePointerDown);
       unregisterLayer();
     };
