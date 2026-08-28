@@ -1692,10 +1692,11 @@ function validatedObservationCheckpoint(
   if (maximumDurableRevision === null || revision > maximumDurableRevision) {
     throw new TypeError("The transport checkpoint exceeds durably applied observation effects");
   }
+  const durableRevision = maximumDurableRevision;
   if (
     current.lastAppliedRevision !== null &&
-    (revision < current.lastAppliedRevision ||
-      (revision === current.lastAppliedRevision &&
+    (durableRevision < current.lastAppliedRevision ||
+      (durableRevision === current.lastAppliedRevision &&
         (eventId !== current.lastAppliedEventId || cursor !== current.lastAppliedCursor)))
   ) {
     throw new TypeError("The transport checkpoint conflicts with the prior durable point");
@@ -1703,7 +1704,7 @@ function validatedObservationCheckpoint(
   return Object.freeze({
     lastAppliedEventId: eventId,
     lastAppliedCursor: cursor,
-    lastAppliedRevision: revision as number,
+    lastAppliedRevision: durableRevision,
   });
 }
 

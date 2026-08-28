@@ -10,11 +10,11 @@ export const MANAGED_RUNTIME_TURN_STATE_SCHEMA_VERSION = 1 as const;
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9._:-]{1,128}$/;
 
 /**
- * Provider-neutral state required to reopen one managed-runtime turn exactly.
+ * Runtime-neutral state required to reopen one managed-runtime turn exactly.
  *
- * The record intentionally contains no headers, credentials, fetch objects, or
- * provider-native values. `serializedBody` is retained byte-for-byte and must
- * equal the JSON serialization of `request`.
+ * The record is limited to durable replay identity and canonical request data.
+ * `serializedBody` is retained byte-for-byte and must equal the JSON
+ * serialization of `request`.
  */
 export interface ManagedRuntimeTurnStateRecord {
   readonly schemaVersion: typeof MANAGED_RUNTIME_TURN_STATE_SCHEMA_VERSION;

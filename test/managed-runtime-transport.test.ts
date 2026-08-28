@@ -10,8 +10,13 @@ import * as browserEntry from "../src/browser/index.js";
 import * as coreEntry from "../src/index.js";
 import type { ConversationTurnId } from "../src/index.js";
 import {
+  MANAGED_RUNTIME_TURN_STATE_SCHEMA_VERSION,
+  ManagedRuntimeTurnStateStoreUnavailableError,
   createManagedRuntimeTransport,
+  parseManagedRuntimeTurnStateRecord,
   type ManagedRuntimeFetch,
+  type ManagedRuntimeTurnStateRecord,
+  type ManagedRuntimeTurnStateStore,
   type ManagedRuntimeUsageReceiptIdentityProvider,
   type ManagedRuntimeUsageReceiptInput,
 } from "../src/server/managed.js";
@@ -141,6 +146,62 @@ function problemResponse(status: number, code: string): Response {
   );
 }
 
+function durableTurnState(
+  overrides: Partial<ManagedRuntimeTurnStateRecord> = {},
+): ManagedRuntimeTurnStateRecord {
+  return {
+    schemaVersion: MANAGED_RUNTIME_TURN_STATE_SCHEMA_VERSION,
+    conversationId: "conversation_managed",
+    turnId: "req_managed",
+    conversationTurnId,
+    mutationId: "mutation_managed",
+    request,
+    serializedBody: JSON.stringify(request),
+    idempotencyKey: "managed.key-1",
+    ...overrides,
+  };
+}
+
+function turnStateKey(conversationId: string, turnId: string): string {
+  return `${conversationId.length}:${conversationId}${turnId}`;
+}
+
+class FakeManagedRuntimeTurnStateStore implements ManagedRuntimeTurnStateStore {
+  readonly #records = new Map<string, ManagedRuntimeTurnStateRecord>();
+  readonly #beforeSave:
+    | ((record: ManagedRuntimeTurnStateRecord) => Promise<void>)
+    | undefined;
+  loadCalls = 0;
+  saveCalls = 0;
+
+  constructor(
+    beforeSave?: (record: ManagedRuntimeTurnStateRecord) => Promise<void>,
+  ) {
+    this.#beforeSave = beforeSave;
+  }
+
+  async load(
+    conversationId: string,
+    turnId: string,
+  ): Promise<ManagedRuntimeTurnStateRecord | null> {
+    this.loadCalls += 1;
+    const stored = this.#records.get(turnStateKey(conversationId, turnId));
+    return stored === undefined
+      ? null
+      : parseManagedRuntimeTurnStateRecord(stored);
+  }
+
+  async save(
+    value: ManagedRuntimeTurnStateRecord,
+  ): Promise<ManagedRuntimeTurnStateRecord> {
+    this.saveCalls += 1;
+    const record = parseManagedRuntimeTurnStateRecord(value);
+    await this.#beforeSave?.(record);
+    this.#records.set(turnStateKey(record.conversationId, record.turnId), record);
+    return parseManagedRuntimeTurnStateRecord(record);
+  }
+}
+
 function transportFor(
   fetch: ManagedRuntimeFetch,
   timeoutMs = 2_000,
@@ -152,6 +213,7 @@ function transportFor(
     provider_id: "handrail-runtime",
     model_id: "runtime-selected-v1",
   }),
+  turnStateStore?: ManagedRuntimeTurnStateStore,
 ) {
   return createManagedRuntimeTransport({
     baseUrl: "https://runtime.example.test/base/path",
@@ -159,6 +221,7 @@ function transportFor(
     fetch,
     timeoutMs,
     createUsageReceiptIdentity,
+    ...(turnStateStore === undefined ? {} : { turnStateStore }),
   });
 }
 
@@ -623,7 +686,7 @@ describe("ManagedRuntimeTransport", () => {
       resumeFrom: {
         lastAppliedEventId: "req_managed:1",
         lastAppliedCursor: "req_managed:1",
-        lastAppliedRevision: 1,
+        lastAppliedRevision: 6,
       },
     });
     expect(resumed.ok).toBe(true);
@@ -638,6 +701,197 @@ describe("ManagedRuntimeTransport", () => {
     expect(new Headers(calls[0]?.headers).get("idempotency-key")).toBe(
       new Headers(calls[1]?.headers).get("idempotency-key"),
     );
+  });
+
+  it("persists before exposing a handle and restores it in a second transport", async () => {
+    const replayEvents: StreamEvent[] = [
+      started,
+      {
+        ...envelope("response.text.delta", 1),
+        type: "response.text.delta",
+        delta: "persisted",
+      },
+      { ...completed, sequence: 2 },
+    ];
+    const calls: RequestInit[] = [];
+    let releaseSave!: () => void;
+    const saveGate = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+    let reportSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => {
+      reportSaveStarted = resolve;
+    });
+    let saveCompleted = false;
+    const store = new FakeManagedRuntimeTurnStateStore(async () => {
+      reportSaveStarted();
+      await saveGate;
+      saveCompleted = true;
+    });
+    const fetch: ManagedRuntimeFetch = async (_url, init = {}) => {
+      calls.push(init);
+      return streamResponse(replayEvents.map((event) => sseFrame(event)).join(""));
+    };
+    const firstTransport = transportFor(fetch, 2_000, undefined, store);
+    let startSettled = false;
+    const pendingStart = startTurn(firstTransport).finally(() => {
+      startSettled = true;
+    });
+
+    await saveStarted;
+    await Promise.resolve();
+    expect(startSettled).toBe(false);
+    releaseSave();
+    const first = await pendingStart;
+    expect(first.ok).toBe(true);
+    expect(saveCompleted).toBe(true);
+    expect(store.saveCalls).toBe(1);
+    if (!first.ok) return;
+    await collect(first.value.observation.events);
+    await first.value.observation.result;
+
+    const secondTransport = transportFor(fetch, 2_000, undefined, store);
+    const resumed = await secondTransport.resumeTurn({
+      conversationId: first.value.conversationId,
+      turnId: first.value.turnId,
+      resumeFrom: {
+        lastAppliedEventId: "req_managed:0",
+        lastAppliedCursor: "req_managed:0",
+        lastAppliedRevision: 0,
+      },
+    });
+    expect(resumed.ok).toBe(true);
+    expect(store.loadCalls).toBe(1);
+    if (!resumed.ok) return;
+    expect((await collect(resumed.value.events)).map((event) => event.sequence)).toEqual([
+      1, 2,
+    ]);
+    expect((await resumed.value.result).status).toBe("completed");
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.body).toBe(calls[1]?.body);
+    expect(typeof calls[0]?.body).toBe("string");
+    expect(new Headers(calls[0]?.headers).get("idempotency-key")).toBe(
+      new Headers(calls[1]?.headers).get("idempotency-key"),
+    );
+  });
+
+  it("aborts an opened stream and bounds persistence save failures", async () => {
+    const secret = "private durable store diagnostic";
+    let signal: AbortSignal | undefined;
+    let saveCalls = 0;
+    const store: ManagedRuntimeTurnStateStore = {
+      async load() {
+        return null;
+      },
+      async save() {
+        saveCalls += 1;
+        throw new ManagedRuntimeTurnStateStoreUnavailableError(
+          "save",
+          secret,
+          false,
+        );
+      },
+    };
+    const transport = transportFor(
+      async (_url, init) => {
+        signal = init?.signal ?? undefined;
+        return streamResponse(sseFrame(started), { stayOpen: true });
+      },
+      2_000,
+      undefined,
+      store,
+    );
+
+    const result = await startTurn(transport);
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "unavailable", retryable: false },
+    });
+    expect(saveCalls).toBe(1);
+    expect(signal?.aborted).toBe(true);
+    expect(JSON.stringify(result)).not.toContain(secret);
+  });
+
+  it.each([
+    {
+      name: "missing",
+      load: async () => null,
+      error: { code: "not_found", retryable: false },
+    },
+    {
+      name: "malformed",
+      load: async () =>
+        ({ malformed: "private malformed record contents" }) as unknown as ManagedRuntimeTurnStateRecord,
+      error: { code: "internal_error", retryable: false },
+    },
+    {
+      name: "identity-mismatched",
+      load: async () =>
+        durableTurnState({ conversationId: "private mismatched conversation" }),
+      error: { code: "internal_error", retryable: false },
+    },
+    {
+      name: "retryable unavailable",
+      load: async () => {
+        throw new ManagedRuntimeTurnStateStoreUnavailableError(
+          "load",
+          "private retryable store diagnostic",
+          true,
+        );
+      },
+      error: { code: "unavailable", retryable: true },
+    },
+    {
+      name: "non-retryable unavailable",
+      load: async () => {
+        throw new ManagedRuntimeTurnStateStoreUnavailableError(
+          "load",
+          "private non-retryable store diagnostic",
+          false,
+        );
+      },
+      error: { code: "unavailable", retryable: false },
+    },
+  ])("fails once with a bounded error for $name durable state", async ({ load, error }) => {
+    let loadCalls = 0;
+    let fetchCalls = 0;
+    const store: ManagedRuntimeTurnStateStore = {
+      async load(conversationId, turnId) {
+        loadCalls += 1;
+        expect([conversationId, turnId]).toEqual([
+          "conversation_managed",
+          "req_managed",
+        ]);
+        return load();
+      },
+      async save(value) {
+        return value;
+      },
+    };
+    const transport = transportFor(
+      async () => {
+        fetchCalls += 1;
+        return streamResponse(sseFrame(started) + sseFrame(completed));
+      },
+      2_000,
+      undefined,
+      store,
+    );
+
+    const result = await transport.resumeTurn({
+      conversationId: "conversation_managed",
+      turnId: "req_managed",
+      resumeFrom: {
+        lastAppliedEventId: null,
+        lastAppliedCursor: null,
+        lastAppliedRevision: null,
+      },
+    });
+    expect(result).toMatchObject({ ok: false, error });
+    expect(loadCalls).toBe(1);
+    expect(fetchCalls).toBe(0);
+    expect(JSON.stringify(result)).not.toContain("private");
+    if (!result.ok) expect(result.error.message.length).toBeLessThanOrEqual(128);
   });
 
   it("validates requests, idempotency keys, and resume checkpoints before POST", async () => {
@@ -672,5 +926,108 @@ describe("ManagedRuntimeTransport", () => {
     });
     expect(resumed).toMatchObject({ ok: false, error: { code: "invalid_request" } });
     expect(calls).toBe(1);
+  });
+
+  it.each([
+    {
+      name: "disagreeing managed sequences",
+      checkpoint: {
+        lastAppliedEventId: "req_managed:1",
+        lastAppliedCursor: "req_managed:2",
+        lastAppliedRevision: 6,
+      },
+    },
+    {
+      name: "an event ID owned by another request",
+      checkpoint: {
+        lastAppliedEventId: "other_turn:1",
+        lastAppliedCursor: "req_managed:1",
+        lastAppliedRevision: 6,
+      },
+    },
+    {
+      name: "a cursor owned by another request",
+      checkpoint: {
+        lastAppliedEventId: "req_managed:1",
+        lastAppliedCursor: "other_turn:1",
+        lastAppliedRevision: 6,
+      },
+    },
+    {
+      name: "a missing managed event ID",
+      checkpoint: {
+        lastAppliedEventId: null,
+        lastAppliedCursor: "req_managed:1",
+        lastAppliedRevision: 6,
+      },
+    },
+    {
+      name: "a missing managed cursor",
+      checkpoint: {
+        lastAppliedEventId: "req_managed:1",
+        lastAppliedCursor: null,
+        lastAppliedRevision: 6,
+      },
+    },
+    {
+      name: "a malformed managed cursor",
+      checkpoint: {
+        lastAppliedEventId: "req_managed:0",
+        lastAppliedCursor: "req_managed:",
+        lastAppliedRevision: 0,
+      },
+    },
+    {
+      name: "a negative durable revision",
+      checkpoint: {
+        lastAppliedEventId: "req_managed:1",
+        lastAppliedCursor: "req_managed:1",
+        lastAppliedRevision: -1,
+      },
+    },
+    {
+      name: "a fractional durable revision",
+      checkpoint: {
+        lastAppliedEventId: "req_managed:1",
+        lastAppliedCursor: "req_managed:1",
+        lastAppliedRevision: 1.5,
+      },
+    },
+    {
+      name: "an unsafe durable revision",
+      checkpoint: {
+        lastAppliedEventId: "req_managed:1",
+        lastAppliedCursor: "req_managed:1",
+        lastAppliedRevision: Number.MAX_SAFE_INTEGER + 1,
+      },
+    },
+  ])("rejects $name before POST", async ({ checkpoint }) => {
+    let calls = 0;
+    const store: ManagedRuntimeTurnStateStore = {
+      async load() {
+        return durableTurnState();
+      },
+      async save(value) {
+        return value;
+      },
+    };
+    const transport = transportFor(
+      async () => {
+        calls += 1;
+        return streamResponse(sseFrame(started) + sseFrame(completed));
+      },
+      2_000,
+      undefined,
+      store,
+    );
+
+    const resumed = await transport.resumeTurn({
+      conversationId: "conversation_managed",
+      turnId: "req_managed",
+      resumeFrom: checkpoint,
+    });
+
+    expect(resumed).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    expect(calls).toBe(0);
   });
 });

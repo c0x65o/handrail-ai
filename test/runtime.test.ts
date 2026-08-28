@@ -465,7 +465,7 @@ describe("createConversationRuntime", () => {
 
     expect(outcome).toMatchObject({ status: "completed", checkpoint: {
       lastAppliedEventId: "remote-turn-1:3",
-      lastAppliedRevision: 3,
+      lastAppliedRevision: 9,
     } });
     expect(runtime.getSnapshot().messages).toMatchObject([
       {
@@ -870,7 +870,7 @@ describe("createConversationRuntime", () => {
       resumeFrom: {
         lastAppliedEventId: "remote-turn-1:2",
         lastAppliedCursor: "remote-turn-1:2",
-        lastAppliedRevision: 2,
+        lastAppliedRevision: 7,
       },
     }]);
     expect(runtime.getSnapshot().messages.filter((message) => message.role === "assistant"))
@@ -895,19 +895,21 @@ describe("createConversationRuntime", () => {
     ]);
   });
 
-  it("passes an acknowledged opaque checkpoint unchanged to an automatic retry", async () => {
+  it("stamps an opaque transport checkpoint at the durable revision before automatic retry", async () => {
     const eventStore = new InMemoryConversationEventStore();
     const transport = new FakeTransport();
-    const firstCheckpoint = opaqueCheckpoint(6, "automatic-first");
-    const finalCheckpoint = opaqueCheckpoint(10, "automatic-final");
+    const firstTransportCheckpoint = opaqueCheckpoint(1, "automatic-first");
+    const firstDurableCheckpoint = opaqueCheckpoint(6, "automatic-first");
+    const finalTransportCheckpoint = opaqueCheckpoint(2, "automatic-final");
+    const finalDurableCheckpoint = opaqueCheckpoint(10, "automatic-final");
     transport.startObservations.push(observation([
       startedFrame(),
       deltaFrame(1, "Opaque"),
-    ], "disconnected", { checkpoint: firstCheckpoint }));
+    ], "disconnected", { checkpoint: firstTransportCheckpoint }));
     transport.resumeObservations.push(observation([
       deltaFrame(1, "Opaque"),
       completedFrame(2),
-    ], "completed", { checkpoint: finalCheckpoint }));
+    ], "completed", { checkpoint: finalTransportCheckpoint }));
     const runtime = await createConversationRuntime({
       conversationId,
       clientId,
@@ -927,9 +929,9 @@ describe("createConversationRuntime", () => {
       request: { prompt: "Resume from an opaque point" },
     });
 
-    expect(transport.resumes[0]?.resumeFrom).toEqual(firstCheckpoint);
-    expect(transport.resumes[0]?.resumeFrom).not.toBe(firstCheckpoint);
-    expect(outcome.checkpoint).toEqual(finalCheckpoint);
+    expect(transport.resumes[0]?.resumeFrom).toEqual(firstDurableCheckpoint);
+    expect(transport.resumes[0]?.resumeFrom).not.toBe(firstTransportCheckpoint);
+    expect(outcome.checkpoint).toEqual(finalDurableCheckpoint);
   });
 
   it("accepts a terminal checkpoint at its post-persistence durable revision", async () => {
@@ -960,14 +962,15 @@ describe("createConversationRuntime", () => {
     expect(runtime.getSnapshot().revision).toBe(6);
   });
 
-  it("hydrates an acknowledged opaque checkpoint for restoreActiveTurn", async () => {
+  it("persists and hydrates an opaque transport checkpoint at its durable revision", async () => {
     const eventStore = new InMemoryConversationEventStore();
     const transport = new FakeTransport();
+    const transportCheckpoint = opaqueCheckpoint(1, "restart-durable");
     const durableCheckpoint = opaqueCheckpoint(6, "restart-durable");
     transport.startObservations.push(observation([
       startedFrame(),
       deltaFrame(1, "Before restart"),
-    ], "disconnected", { checkpoint: durableCheckpoint }));
+    ], "disconnected", { checkpoint: transportCheckpoint }));
     const sources = deterministicSources();
     const runtimeBeforeRestart = await createConversationRuntime({
       conversationId,
@@ -982,12 +985,28 @@ describe("createConversationRuntime", () => {
       request: { prompt: "Persist the cursor" },
     });
     expect(disconnected.checkpoint).toEqual(durableCheckpoint);
+    const history = await eventStore.read({ conversationId, limit: 100 });
+    expect(history.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: expect.objectContaining({
+          metadata: {
+            handrail_runtime: {
+              checkpoint: {
+                last_applied_event_id: durableCheckpoint.lastAppliedEventId,
+                last_applied_cursor: durableCheckpoint.lastAppliedCursor,
+                last_applied_revision: 6,
+              },
+            },
+          },
+        }),
+      }),
+    ]));
     runtimeBeforeRestart.destroy();
 
     transport.resumeObservations.push(observation([
       deltaFrame(1, "Before restart"),
       completedFrame(2),
-    ], "completed", { checkpoint: opaqueCheckpoint(10, "restart-final") }));
+    ], "completed", { checkpoint: opaqueCheckpoint(2, "restart-final") }));
     const runtimeAfterRestart = await createConversationRuntime({
       conversationId,
       clientId,
@@ -1004,11 +1023,12 @@ describe("createConversationRuntime", () => {
   it("does not advance the prior checkpoint when checkpoint persistence fails", async () => {
     const eventStore = new CheckpointFailingEventStore();
     const transport = new FakeTransport();
-    const priorCheckpoint = opaqueCheckpoint(1, "prior-safe");
+    const priorTransportCheckpoint = opaqueCheckpoint(1, "prior-safe");
+    const priorDurableCheckpoint = opaqueCheckpoint(6, "prior-safe");
     transport.startObservations.push(observation([
       startedFrame(),
       deltaFrame(1, "Durable"),
-    ], "disconnected", { checkpoint: priorCheckpoint }));
+    ], "disconnected", { checkpoint: priorTransportCheckpoint }));
     const runtime = await createConversationRuntime({
       conversationId,
       clientId,
@@ -1036,8 +1056,8 @@ describe("createConversationRuntime", () => {
     ], "completed", { checkpoint: opaqueCheckpoint(2, "after-recovery") }));
     expect((await runtime.resumeTurn(disconnected.turnId)).status).toBe("completed");
     expect(transport.resumes.map(({ resumeFrom }) => resumeFrom)).toEqual([
-      priorCheckpoint,
-      priorCheckpoint,
+      priorDurableCheckpoint,
+      priorDurableCheckpoint,
     ]);
   });
 
@@ -1282,7 +1302,7 @@ describe("createConversationRuntime", () => {
     ]);
     expect(disconnected.checkpoint).toMatchObject({
       lastAppliedEventId: "remote-turn-1:1",
-      lastAppliedRevision: 1,
+      lastAppliedRevision: 6,
     });
     expect(runtimeBeforeRestart.getSnapshot().messages[1]).toMatchObject({
       role: "assistant",
@@ -1317,7 +1337,7 @@ describe("createConversationRuntime", () => {
       resumeFrom: {
         lastAppliedEventId: "remote-turn-1:1",
         lastAppliedCursor: "remote-turn-1:1",
-        lastAppliedRevision: 1,
+        lastAppliedRevision: 6,
       },
     }]);
     expect(runtimeAfterRestart.getSnapshot().messages[1]).toMatchObject({

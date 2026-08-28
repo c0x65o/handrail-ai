@@ -307,33 +307,45 @@ function eventSequenceFromCheckpoint(
   point: TurnResumePoint,
   turnId: string,
 ): number | null {
-  const candidates: number[] = [];
-  for (const [name, value] of [
-    ["lastAppliedEventId", point.lastAppliedEventId],
-    ["lastAppliedCursor", point.lastAppliedCursor],
-  ] as const) {
-    if (value === null) continue;
+  const eventId = point.lastAppliedEventId;
+  const cursor = point.lastAppliedCursor;
+  if (
+    point.lastAppliedRevision !== null &&
+    (!Number.isSafeInteger(point.lastAppliedRevision) || point.lastAppliedRevision < 0)
+  ) {
+    throw new TypeError("lastAppliedRevision is invalid");
+  }
+  if (eventId === null && cursor === null) {
+    if (point.lastAppliedRevision === null) return null;
+    throw new TypeError("The managed resume checkpoint fields are incomplete");
+  }
+  if (eventId === null || cursor === null) {
+    throw new TypeError("The managed resume checkpoint fields are incomplete");
+  }
+
+  const sequences = [
+    ["lastAppliedEventId", eventId],
+    ["lastAppliedCursor", cursor],
+  ] as const;
+  const decodedSequences = sequences.map(([name, value]) => {
     const prefix = `${turnId}:`;
     if (!value.startsWith(prefix)) {
       throw new TypeError(`${name} does not belong to the managed turn`);
     }
-    const sequence = Number(value.slice(prefix.length));
+    const encodedSequence = value.slice(prefix.length);
+    if (!/^(?:0|[1-9]\d*)$/u.test(encodedSequence)) {
+      throw new TypeError(`${name} does not contain a valid sequence`);
+    }
+    const sequence = Number(encodedSequence);
     if (!Number.isSafeInteger(sequence) || sequence < 0) {
       throw new TypeError(`${name} does not contain a valid sequence`);
     }
-    candidates.push(sequence);
+    return sequence;
+  });
+  if (decodedSequences[0] !== decodedSequences[1]) {
+    throw new TypeError("The managed event ID and cursor disagree");
   }
-  if (point.lastAppliedRevision !== null) {
-    if (!Number.isSafeInteger(point.lastAppliedRevision) || point.lastAppliedRevision < 0) {
-      throw new TypeError("lastAppliedRevision is invalid");
-    }
-    candidates.push(point.lastAppliedRevision);
-  }
-  if (candidates.length === 0) return null;
-  if (candidates.some((candidate) => candidate !== candidates[0])) {
-    throw new TypeError("The managed resume checkpoint fields disagree");
-  }
-  return candidates[0] ?? null;
+  return decodedSequences[0]!;
 }
 
 function containsSensitiveMaterial(
