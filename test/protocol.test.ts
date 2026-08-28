@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  AI_RUNTIME_ATTACHMENT_ID_GRAMMAR,
+  AI_RUNTIME_CONTENT_REFERENCE_GRAMMAR,
+  AI_RUNTIME_IMAGE_MIME_TYPES,
   AI_RUNTIME_PROTOCOL_LIMITS,
   AI_RUNTIME_PROTOCOL_VERSION,
   AI_RUNTIME_STREAM_EVENT_TYPES,
@@ -112,6 +115,25 @@ const request = (): RequestFixture => ({
   },
 });
 
+const attachmentReference = (overrides: Record<string, unknown> = {}) => ({
+  attachment_id: "att_01K3QW8KJQH9T0A7N4R2M6P5XC",
+  content_ref: "ref_upload_01K3QW8Q2Q4JE8H5J3RB9SNMVA",
+  media_type: "image/png",
+  byte_size: 248_123,
+  filename: "delivery-photo.png",
+  ...overrides,
+});
+
+const imagePart = (
+  attachmentOverrides: Record<string, unknown> = {},
+  partOverrides: Record<string, unknown> = {},
+) => ({
+  type: "image",
+  attachment: attachmentReference(attachmentOverrides),
+  alt_text: "A parcel beside the front door",
+  ...partOverrides,
+});
+
 const utf8ByteLength = (value: string) => new TextEncoder().encode(value).byteLength;
 
 function metadataWithSerializedByteLength(targetBytes: number, fill: string) {
@@ -179,6 +201,202 @@ describe("chat request protocol", () => {
     });
 
     expect(parseChatRequest(fixture)).toBe(fixture);
+  });
+
+  it("round-trips mixed text and image content without mutation and as JSON", () => {
+    const fixture = request();
+    fixture.messages = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Is this parcel damaged?" },
+          imagePart(),
+          { type: "text", text: "Focus on the upper-right corner." },
+        ],
+      },
+    ];
+
+    const parsed = parseChatRequest(fixture);
+    expect(parsed).toBe(fixture);
+    expect(isChatRequest(fixture)).toBe(true);
+    expect(JSON.parse(JSON.stringify(parsed))).toEqual(fixture);
+  });
+
+  it("exports the exact image allowlist, identifier grammars, and conservative bounds", () => {
+    expect(AI_RUNTIME_IMAGE_MIME_TYPES).toEqual([
+      "image/jpeg",
+      "image/png",
+      "image/gif",
+      "image/webp",
+    ]);
+    expect(AI_RUNTIME_IMAGE_MIME_TYPES).not.toContain("image/svg+xml");
+    expect(AI_RUNTIME_IMAGE_MIME_TYPES.every((type) => !type.includes("*"))).toBe(true);
+    expect(AI_RUNTIME_ATTACHMENT_ID_GRAMMAR).toBe(
+      "^att_[A-Za-z0-9][A-Za-z0-9._-]{0,251}$",
+    );
+    expect(AI_RUNTIME_CONTENT_REFERENCE_GRAMMAR).toBe(
+      "^ref_[A-Za-z0-9][A-Za-z0-9._-]{0,251}$",
+    );
+    expect(AI_RUNTIME_PROTOCOL_LIMITS).toMatchObject({
+      attachmentIdLength: 256,
+      attachmentContentReferenceLength: 256,
+      attachmentFilenameLength: 255,
+      attachmentAltTextLength: 1_024,
+      imageAttachmentMinBytes: 1,
+      imageAttachmentMaxBytes: 10 * 1024 * 1024,
+      imageAttachmentsPerMessage: 4,
+      imageAttachmentsPerRequest: 8,
+    });
+  });
+
+  it.each(["image/svg+xml", "image/*", "application/octet-stream"])(
+    "rejects unsupported image media type %s",
+    (mediaType) => {
+      const fixture = request();
+      fixture.messages = [{ role: "user", content: [imagePart({ media_type: mediaType })] }];
+      expect(() => parseChatRequest(fixture)).toThrow(/media_type.*must be one of/);
+    },
+  );
+
+  it.each([
+    AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMinBytes - 1,
+    AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMaxBytes + 1,
+    1.5,
+    Number.NaN,
+  ])("rejects invalid image byte size %s", (byteSize) => {
+    const fixture = request();
+    fixture.messages = [{ role: "user", content: [imagePart({ byte_size: byteSize })] }];
+    expect(() => parseChatRequest(fixture)).toThrow(/byte_size.*integer/);
+  });
+
+  it.each(AI_RUNTIME_IMAGE_MIME_TYPES)(
+    "accepts %s at the exported byte boundaries",
+    (mediaType) => {
+      for (const byteSize of [
+        AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMinBytes,
+        AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMaxBytes,
+      ]) {
+        const fixture = request();
+        fixture.messages = [
+          {
+            role: "user",
+            content: [imagePart({ media_type: mediaType, byte_size: byteSize })],
+          },
+        ];
+        expect(parseChatRequest(fixture)).toBe(fixture);
+      }
+    },
+  );
+
+  it("bounds alt text and accepts only safe bounded filenames", () => {
+    const invalidParts = [
+      imagePart({ filename: "../private/image.png" }),
+      imagePart({ filename: "image\u0000.png" }),
+      imagePart({ filename: "x".repeat(AI_RUNTIME_PROTOCOL_LIMITS.attachmentFilenameLength + 1) }),
+      imagePart(
+        {},
+        { alt_text: "x".repeat(AI_RUNTIME_PROTOCOL_LIMITS.attachmentAltTextLength + 1) },
+      ),
+    ];
+
+    for (const part of invalidParts) {
+      const fixture = request();
+      fixture.messages = [{ role: "user", content: [part] }];
+      expect(() => parseChatRequest(fixture)).toThrow(/filename|alt_text/);
+    }
+  });
+
+  it("enforces image counts per message and across the request", () => {
+    const tooManyInMessage = request();
+    tooManyInMessage.messages = [
+      {
+        role: "user",
+        content: Array.from(
+          { length: AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentsPerMessage + 1 },
+          (_, index) => imagePart({ attachment_id: `att_message_${index}` }),
+        ),
+      },
+    ];
+    expect(() => parseChatRequest(tooManyInMessage)).toThrow(/at most 4 image parts/);
+
+    const tooManyInRequest = request();
+    tooManyInRequest.messages = Array.from(
+      { length: 3 },
+      (_, messageIndex) => ({
+        role: "user",
+        content: Array.from({ length: 3 }, (_, imageIndex) =>
+          imagePart({ attachment_id: `att_request_${messageIndex}_${imageIndex}` }),
+        ),
+      }),
+    );
+    expect(() => parseChatRequest(tooManyInRequest)).toThrow(/across the request/);
+  });
+
+  it.each([
+    ["attachment_id", ""],
+    ["attachment_id", "attachment 1"],
+    ["attachment_id", "https://uploads.example/attachment"],
+    ["content_ref", ""],
+    ["content_ref", "upload/attachment-1"],
+  ])("rejects malformed image %s", (field, value) => {
+    const fixture = request();
+    fixture.messages = [{ role: "user", content: [imagePart({ [field]: value })] }];
+    expect(() => parseChatRequest(fixture)).toThrow(new RegExp(field));
+  });
+
+  it.each([
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB",
+    "blob:https://app.example/8c695b0a-e28e-4ad0-9b72",
+    "http://uploads.example/image.png",
+    "https://uploads.example/image.png",
+    "https://storage.example/image.png?X-Amz-Credential=secret&X-Amz-Signature=signed",
+  ])("rejects URL or embedded image content references", (contentRef) => {
+    const fixture = request();
+    fixture.messages = [{ role: "user", content: [imagePart({ content_ref: contentRef })] }];
+    expect(() => parseChatRequest(fixture)).toThrow(/content_ref.*opaque identifier/);
+  });
+
+  it("rejects unknown fields and credential-bearing image fields or values", () => {
+    const fixtures = [
+      imagePart({}, { image_url: "https://example.test/image.png" }),
+      imagePart({ bytes: [137, 80, 78, 71] }),
+      imagePart({ api_key: "not-allowed" }),
+      imagePart({ content_ref: "ref_sk-live-1234567890" }),
+      imagePart({}, { alt_text: "Bearer abcdefghijklmnop" }),
+      imagePart({}, { future_option: true }),
+    ];
+
+    for (const part of fixtures) {
+      const fixture = request();
+      fixture.messages = [{ role: "user", content: [part] }];
+      expect(() => parseChatRequest(fixture)).toThrow(/supported field|credential material/);
+    }
+  });
+
+  it("rejects binary, File-like, provider-native, and non-JSON image blocks", () => {
+    class FileLike {
+      readonly name = "image.png";
+      readonly size = 4;
+      readonly type = "image/png";
+    }
+
+    const fixtures: unknown[] = [
+      { type: "image", attachment: new Uint8Array([137, 80, 78, 71]) },
+      { type: "image", attachment: new FileLike() },
+      {
+        type: "image",
+        source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" },
+      },
+      { type: "image_url", image_url: { url: "https://example.test/image.png" } },
+      imagePart({ byte_size: 10n }),
+      imagePart({}, { alt_text: Symbol("not-json") }),
+    ];
+
+    for (const part of fixtures) {
+      const fixture = request();
+      fixture.messages = [{ role: "user", content: [part] }];
+      expect(() => parseChatRequest(fixture)).toThrow(ProtocolValidationError);
+    }
   });
 
   it("rejects unknown request fields and server-owned identifiers", () => {

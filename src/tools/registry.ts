@@ -141,6 +141,15 @@ function includesAll(available: ReadonlySet<string>, required: readonly string[]
   return required.every((value) => available.has(value));
 }
 
+function compareNames(
+  left: Pick<ToolRegistration, "definition">,
+  right: Pick<ToolRegistration, "definition">,
+): number {
+  if (left.definition.name < right.definition.name) return -1;
+  if (left.definition.name > right.definition.name) return 1;
+  return 0;
+}
+
 export class ToolRegistry<TExecutor = unknown, TContext = unknown> {
   readonly #registrations = new Map<string, ToolRegistration<TExecutor, TContext>>();
 
@@ -165,14 +174,13 @@ export class ToolRegistry<TExecutor = unknown, TContext = unknown> {
   list(): readonly ToolDefinition[] {
     return Object.freeze(
       [...this.#registrations.values()]
-        .sort((left, right) => left.definition.name.localeCompare(right.definition.name))
+        .sort(compareNames)
         .map((registration) => registration.definition),
     );
   }
 
   discover(query: ToolDiscoveryQuery<TContext>): readonly ToolDefinition[] {
     const capabilities = new Set(query.capabilities ?? []);
-    const tags = new Set(query.tags ?? []);
 
     return Object.freeze(
       [...this.#registrations.values()]
@@ -188,7 +196,7 @@ export class ToolRegistry<TExecutor = unknown, TContext = unknown> {
           }
           return registration.discover?.(query.context) ?? true;
         })
-        .sort((left, right) => left.definition.name.localeCompare(right.definition.name))
+        .sort(compareNames)
         .map((registration) => registration.definition),
     );
   }

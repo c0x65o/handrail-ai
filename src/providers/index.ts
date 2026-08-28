@@ -36,6 +36,7 @@ export interface ProviderRequestContext {
 }
 
 export interface ProviderAdapterInvocation {
+  /** A trusted host or transport resolves opaque image content_ref values before native input. */
   readonly messages: readonly ChatMessage[];
   readonly tools: readonly ToolDefinition[];
   readonly tool_results: readonly ApplicationToolResult[];

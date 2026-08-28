@@ -41,7 +41,25 @@ const normalizedUsage: ProviderUsage = {
 
 function invocation(signal = new AbortController().signal): ProviderAdapterInvocation {
   return {
-    messages: [{ role: "user", content: [{ type: "text", text: "Hello" }] }],
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "What is shown in this image?" },
+          {
+            type: "image",
+            attachment: {
+              attachment_id: "att_provider_fixture_1",
+              content_ref: "ref_provider_fixture_1",
+              media_type: "image/webp",
+              byte_size: 12_345,
+              filename: "fixture.webp",
+            },
+            alt_text: "Provider adapter fixture",
+          },
+        ],
+      },
+    ],
     tools: [
       {
         name: "lookup_weather",
@@ -315,5 +333,21 @@ describe("provider adapter contract", () => {
 
   it("has a provider-neutral TypeScript invocation surface", () => {
     expect(invocationHasNoNativeKeys).toBe(true);
+  });
+
+  it("exposes provider-neutral image references to adapters as serializable message content", () => {
+    const input = invocation();
+    const part = input.messages[0]!.content[1]!;
+
+    expect(part.type).toBe("image");
+    if (part.type !== "image") throw new Error("expected an image content part");
+    expect(part.attachment).toEqual({
+      attachment_id: "att_provider_fixture_1",
+      content_ref: "ref_provider_fixture_1",
+      media_type: "image/webp",
+      byte_size: 12_345,
+      filename: "fixture.webp",
+    });
+    expect(JSON.parse(JSON.stringify(input.messages))).toEqual(input.messages);
   });
 });

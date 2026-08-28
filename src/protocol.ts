@@ -66,7 +66,7 @@ export const AI_RUNTIME_PROTOCOL_LIMITS = {
   attachmentFilenameLength: 255,
   attachmentAltTextLength: 1_024,
   imageAttachmentMinBytes: 1,
-  imageAttachmentMaxBytes: 10 * 1024 * 1024,
+  imageAttachmentMaxBytes: 10_485_760,
   imageAttachmentsPerMessage: 4,
   imageAttachmentsPerRequest: 8,
   jsonDepth: 20,
@@ -681,7 +681,11 @@ function validateSafeFilename(value: unknown, path: string): void {
     maxLength: AI_RUNTIME_PROTOCOL_LIMITS.attachmentFilenameLength,
   });
   rejectCredentialMaterial(parsed, path);
-  if (parsed === "." || parsed === ".." || /[\u0000-\u001f\u007f<>:"/\\|?*]/.test(parsed)) {
+  const hasUnsafeCharacter = [...parsed].some((character) => {
+    const codePoint = character.codePointAt(0)!;
+    return codePoint <= 31 || codePoint === 127 || '<>:"/\\|?*'.includes(character);
+  });
+  if (parsed === "." || parsed === ".." || hasUnsafeCharacter) {
     fail(path, "must be a safe filename without path separators or control characters");
   }
 }
