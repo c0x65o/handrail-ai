@@ -1,8 +1,19 @@
-/**
- * Optional React entry point for @handrail/ai.
- *
- * React bindings are added through this subpath so the core and browser entry
- * points remain framework-independent. The first bindings will be introduced
- * separately; this module intentionally exports no runtime API yet.
- */
-export {};
+/** Optional React entry point for @handrail/ai. */
+export {
+  ChatDialogClose,
+  ChatDialogContent,
+  ChatDialogDescription,
+  ChatDialogOverlay,
+  ChatDialogPortal,
+  ChatDialogRoot,
+  ChatDialogTitle,
+  ChatDialogTrigger,
+  type ChatDialogCloseProps,
+  type ChatDialogContentProps,
+  type ChatDialogDescriptionProps,
+  type ChatDialogOverlayProps,
+  type ChatDialogPortalProps,
+  type ChatDialogRootProps,
+  type ChatDialogTitleProps,
+  type ChatDialogTriggerProps,
+} from "./dialog.js";

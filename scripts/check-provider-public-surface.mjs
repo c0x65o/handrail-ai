@@ -20,8 +20,19 @@ function declarationFiles(directory) {
 const files = declarationFiles(distDirectory);
 assert(files.length > 0, "build declarations before checking the public surface");
 
-const declarations = files.map((path) => readFileSync(path, "utf8")).join("\n");
+const runtimeNeutralFiles = files.filter(
+  (path) =>
+    !/[\\/]react[\\/]/u.test(path) &&
+    !/[\\/]providers[\\/](?!index\.d\.ts$)[^\\/]+\.d\.ts$/u.test(path),
+);
+const runtimeNeutralDeclarations = runtimeNeutralFiles
+  .map((path) => readFileSync(path, "utf8"))
+  .join("\n");
 const packageEntry = readFileSync(join(distDirectory, "index.d.ts"), "utf8");
+const openAIEntry = readFileSync(
+  join(distDirectory, "providers", "openai.d.ts"),
+  "utf8",
+);
 
 assert.match(
   packageEntry,
@@ -33,8 +44,21 @@ assert.match(
   /export \* from ["']\.\/transports\/index\.js["'];/,
   "the package entry point must export the conversation transport contract",
 );
+assert.match(
+  openAIEntry,
+  /export declare (?:class OpenAIProviderAdapter|function createOpenAIProviderAdapter)/,
+  "the opt-in OpenAI entry must export its provider adapter",
+);
+assert.doesNotMatch(
+  packageEntry,
+  /providers\/openai/,
+  "the core package entry must not export the OpenAI adapter",
+);
 
-const externalImports = [...declarations.matchAll(/from ["']([^"']+)["']/g)]
+const declarationsCheckedForSdkImports = `${runtimeNeutralDeclarations}\n${openAIEntry}`;
+const externalImports = [
+  ...declarationsCheckedForSdkImports.matchAll(/from ["']([^"']+)["']/g),
+]
   .map((match) => match[1])
   .filter((specifier) => specifier && !specifier.startsWith("."));
 assert.deepEqual(
@@ -64,10 +88,12 @@ const forbiddenMarkers = [
 
 for (const marker of forbiddenMarkers) {
   assert.doesNotMatch(
-    declarations,
+    runtimeNeutralDeclarations,
     marker,
     `public declarations contain provider-native marker ${marker.source}`,
   );
 }
 
-stdout.write(`checked ${files.length} declaration files: public surface is runtime-neutral\n`);
+stdout.write(
+  `checked ${runtimeNeutralFiles.length} neutral and ${files.length - runtimeNeutralFiles.length} opt-in provider declaration files\n`,
+);

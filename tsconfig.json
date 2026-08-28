@@ -8,7 +8,8 @@
     "paths": {
       "@handrail/ai": ["./src/index.ts"],
       "@handrail/ai/browser": ["./src/browser/index.ts"],
-      "@handrail/ai/react": ["./src/react/index.ts"]
+      "@handrail/ai/react": ["./src/react/index.ts"],
+      "@handrail/ai/providers/openai": ["./src/providers/openai.ts"]
     },
     "jsx": "react-jsx",
     "strict": true,

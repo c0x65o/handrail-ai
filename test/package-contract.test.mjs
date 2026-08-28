@@ -22,8 +22,17 @@ test("declares the React subpath as an optional peer boundary", () => {
   assert.equal(packageJson.sideEffects, false);
 });
 
+test("declares OpenAI as an explicit opt-in provider boundary", () => {
+  assert.deepEqual(packageJson.exports["./providers/openai"], {
+    types: "./dist/providers/openai.d.ts",
+    import: "./dist/providers/openai.js",
+    default: "./dist/providers/openai.js",
+  });
+  assert.equal(packageJson.dependencies.openai, undefined);
+});
+
 test("resolves every public ESM export from the built package", async () => {
-  for (const exportName of [".", "./browser", "./react"]) {
+  for (const exportName of Object.keys(packageJson.exports)) {
     const target = packageJson.exports[exportName].import;
     const moduleUrl = pathToFileURL(path.join(packageRoot, target)).href;
     const imported = await import(moduleUrl);
@@ -73,6 +82,8 @@ test("dry pack contains only intended package assets", () => {
     "dist/browser/index.d.ts",
     "dist/react/index.js",
     "dist/react/index.d.ts",
+    "dist/providers/openai.js",
+    "dist/providers/openai.d.ts",
   ]) {
     assert.ok(packedFiles.has(expected), `missing packed file ${expected}`);
   }

@@ -76,6 +76,8 @@ export interface ReadConversationEventsResult {
 /** A compact, JSON-safe state snapshot after applying `revision`. */
 export interface ConversationEventCheckpoint {
   readonly conversationId: ConversationId;
+  /** Projection schema used to encode `state`; absent checkpoints are legacy. */
+  readonly schemaVersion?: number;
   readonly revision: ConversationRevision;
   readonly state: ConversationJsonValue;
 }
@@ -491,10 +493,12 @@ export class InMemoryConversationEventStore implements ConversationEventStore {
             "A checkpoint revision cannot be reused with different state.",
           );
         }
-        return {
-          status: "idempotent",
-          checkpoint: cloneJson(current),
-        };
+        if (checkpoint.schemaVersion === current.schemaVersion) {
+          return {
+            status: "idempotent",
+            checkpoint: cloneJson(current),
+          };
+        }
       }
     }
 

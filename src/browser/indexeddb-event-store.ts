@@ -345,7 +345,9 @@ export class IndexedDBConversationEventStore implements ConversationEventStore {
                 "A checkpoint revision cannot be reused with different state.",
               );
             }
-            return { status: "idempotent", checkpoint: cloneJson(current) };
+            if (checkpoint.schemaVersion === current.schemaVersion) {
+              return { status: "idempotent", checkpoint: cloneJson(current) };
+            }
           }
         }
 

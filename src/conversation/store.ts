@@ -53,8 +53,16 @@ interface SelectorSubscription {
 /** Create an isolated, framework-free external store for one conversation. */
 export function createConversationStore(
   conversationId: ConversationId | null = null,
+  initialState: ConversationState = createInitialConversationState(conversationId),
 ): ConversationStore {
-  let snapshot = createInitialConversationState(conversationId);
+  if (
+    conversationId !== null &&
+    initialState.conversation_id !== null &&
+    initialState.conversation_id !== conversationId
+  ) {
+    throw new TypeError("Initial conversation state belongs to another conversation");
+  }
+  let snapshot = initialState;
   let mutationBoundary: Promise<void> = Promise.resolve();
   let destroyed = false;
   const listeners = new Set<ConversationStoreListener>();
