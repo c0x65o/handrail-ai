@@ -680,8 +680,8 @@ describe("ConversationProvider and hooks", () => {
       "turn.status_changed",
       "message.text_appended",
       "message.text_appended",
-      "turn.completed",
       "usage.receipt_linked",
+      "turn.completed",
     ]);
     expect(new Set(history.entries.map(({ event }) => event.event_id)).size).toBe(10);
     const firstProjection = coordinator.store.getSnapshot();
