@@ -63,9 +63,9 @@ describe("checked React presentation recipes", () => {
       );
       expect(document.querySelectorAll("style, link[rel='stylesheet']")).toHaveLength(0);
       expect(document.querySelectorAll("[style]")).toHaveLength(0);
-      for (const element of document.querySelectorAll("[class]")) {
+      document.querySelectorAll("[class]").forEach((element) => {
         expect(element.className).toMatch(/^app-/u);
-      }
+      });
       expect(document.documentElement.getAttribute("style")).toBe(documentStyleBefore);
       expect(document.body.getAttribute("style")).toBe(bodyStyleBefore);
       rendered.unmount();
