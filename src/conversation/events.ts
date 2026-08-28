@@ -2,6 +2,7 @@ export const CONVERSATION_EVENT_VERSION = 1 as const;
 
 export const CONVERSATION_EVENT_TYPES = [
   "message.created",
+  "message.text_appended",
   "message.attachment_referenced",
   "turn.started",
   "turn.status_changed",
@@ -41,6 +42,7 @@ export const CONVERSATION_EVENT_SOURCE_TYPES = [
 export const CONVERSATION_EVENT_LIMITS = {
   identifierLength: 256,
   textLength: 1_000_000,
+  textChunkBytes: 1_000_000,
   titleLength: 4_096,
   filenameLength: 1_024,
   jsonDepth: 20,
@@ -135,6 +137,13 @@ export interface MessageCreatedPayload {
   message_id: ConversationMessageId;
   role: ConversationMessageRole;
   content: ConversationMessageContentPart[];
+}
+
+export interface MessageTextAppendedPayload {
+  type: "message.text_appended";
+  turn_id: ConversationTurnId;
+  message_id: ConversationMessageId;
+  text: string;
 }
 
 export interface ConversationAttachmentReference {
@@ -328,6 +337,7 @@ export interface ConversationTitleUpdatedPayload {
 
 export type ConversationEventPayload =
   | MessageCreatedPayload
+  | MessageTextAppendedPayload
   | MessageAttachmentReferencedPayload
   | TurnStartedPayload
   | TurnStatusChangedPayload
@@ -945,6 +955,22 @@ function validatePayload(
       object.content.forEach((part, index) =>
         validateTextPart(part, `${path}.content[${index}]`),
       );
+      return;
+    }
+    case "message.text_appended": {
+      requiredKeys(object, ["turn_id", "message_id", "text"], path);
+      allowedKeys(object, ["type", "turn_id", "message_id", "text"], path);
+      identifier(object.turn_id, `${path}.turn_id`);
+      identifier(object.message_id, `${path}.message_id`);
+      const text = stringValue(object.text, `${path}.text`, {
+        maxLength: CONVERSATION_EVENT_LIMITS.textLength,
+      });
+      if (utf8ByteLength(text) > CONVERSATION_EVENT_LIMITS.textChunkBytes) {
+        fail(
+          `${path}.text`,
+          `must be at most ${CONVERSATION_EVENT_LIMITS.textChunkBytes} UTF-8 bytes`,
+        );
+      }
       return;
     }
     case "message.attachment_referenced":

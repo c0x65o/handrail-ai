@@ -184,8 +184,9 @@ class FakeConversationSyncAdapter
   }
 
   async subscribePresence(
-    _input: SubscribePresenceInput,
+    input: SubscribePresenceInput,
   ): Promise<SubscribePresenceResult> {
+    expect(input.conversationId).toBe(this.events[0]?.conversation_id);
     const queue = new AsyncQueue<ConversationPresenceStreamUpdate>();
     this.presenceSubscribers.add(queue);
     const subscription: ConversationPresenceSubscription = {
