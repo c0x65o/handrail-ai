@@ -5,6 +5,7 @@ import {
   InMemoryConversationEventStore,
   createRetryPolicy,
   createConversationRuntime,
+  parseNormalizedUsageReceipt,
   type AppendConversationEventsInput,
   type AppendConversationEventsResult,
   type AuthoritativeAttribution,
@@ -46,6 +47,41 @@ const attribution: AuthoritativeAttribution = {
   automation: { id: null, source: "server_derived", trust: "authoritative" },
 };
 
+function usageReceipt(options: {
+  readonly usageReceiptId?: string;
+  readonly receiptConversationId?: string;
+  readonly turnId?: string;
+  readonly attemptIndex?: number;
+  readonly terminalStatus?: "completed" | "cancelled" | "failed";
+} = {}) {
+  return parseNormalizedUsageReceipt({
+    version: 1,
+    usage_receipt_id: options.usageReceiptId ?? "usage_runtime_1",
+    conversation_id: options.receiptConversationId ?? conversationId,
+    turn_id: options.turnId ?? "turn_2",
+    logical_request_id: "logical_runtime_1",
+    trace_id: "trace-runtime-1",
+    attempt: {
+      id: `attempt_runtime_${options.attemptIndex ?? 0}`,
+      index: options.attemptIndex ?? 0,
+    },
+    continuation: { id: "continuation_runtime_0", index: 0 },
+    provider_id: "generic-direct",
+    model_id: "generic-model-v1",
+    attribution,
+    source: "provider",
+    terminal_status: options.terminalStatus ?? "completed",
+    tokens: {
+      input_tokens: { status: "reported", value: 4 },
+      cached_input_tokens: { status: "reported", value: 1 },
+      output_tokens: { status: "reported", value: 2 },
+      reasoning_tokens: { status: "reported", value: 0 },
+      total_tokens: { status: "reported", value: 6 },
+    },
+    provider_cost: { status: "unavailable" },
+  });
+}
+
 function frame(
   type: StreamEvent["type"],
   sequence: number,
@@ -66,6 +102,16 @@ const deltaFrame = (sequence: number, delta: string) =>
   frame("response.text.delta", sequence, { delta });
 const completedFrame = (sequence: number, outcome = "stop") =>
   frame("response.completed", sequence, { outcome });
+const cancelledFrame = (sequence: number) =>
+  frame("response.cancelled", sequence, { reason: "runtime_shutdown" });
+const failedFrame = (sequence: number) => frame("response.error", sequence, {
+  error: {
+    category: "upstream",
+    code: "upstream_unavailable",
+    message: "Unavailable",
+    retryable: false,
+  },
+});
 
 function checkpointFor(raw: unknown): TurnResumePoint {
   const event = raw as { request_id: string; sequence: number };
@@ -77,9 +123,22 @@ function checkpointFor(raw: unknown): TurnResumePoint {
   };
 }
 
+function opaqueCheckpoint(revision: number, label = `opaque-${revision}`): TurnResumePoint {
+  return {
+    lastAppliedEventId: `event/${label}`,
+    lastAppliedCursor: `cursor:${label}:not-derived-from-the-request`,
+    lastAppliedRevision: revision,
+  };
+}
+
 function observation(
   frames: readonly unknown[],
   status: TurnObservationResult["status"],
+  options: {
+    readonly usageReceipt?: unknown;
+    readonly error?: TransportError;
+    readonly checkpoint?: unknown;
+  } = {},
 ): TurnObservation<unknown> {
   let disconnected = false;
   let settled = false;
@@ -111,14 +170,32 @@ function observation(
           }
           yield value;
         }
+        const resultCheckpoint = Object.hasOwn(options, "checkpoint")
+          ? options.checkpoint
+          : checkpoint;
         if (status === "failed") {
           settle({
             status: "failed",
-            checkpoint,
-            error: { code: "internal_error", message: "failed", retryable: false },
-          });
+            checkpoint: resultCheckpoint,
+            error: options.error ?? {
+              code: "internal_error",
+              message: "failed",
+              retryable: false,
+            },
+            ...(options.usageReceipt === undefined
+              ? {}
+              : { usageReceipt: options.usageReceipt }),
+          } as TurnObservationResult);
+        } else if (status === "disconnected") {
+          settle({ status, checkpoint: resultCheckpoint } as TurnObservationResult);
         } else {
-          settle({ status, checkpoint } as TurnObservationResult);
+          settle({
+            status,
+            checkpoint: resultCheckpoint,
+            ...(options.usageReceipt === undefined
+              ? {}
+              : { usageReceipt: options.usageReceipt }),
+          } as TurnObservationResult);
         }
       },
     },
@@ -296,6 +373,33 @@ class TrackingEventStore implements ConversationEventStore {
   }
 }
 
+class CheckpointFailingEventStore implements ConversationEventStore {
+  readonly inner = new InMemoryConversationEventStore();
+  failCheckpointWrites = false;
+
+  append(input: AppendConversationEventsInput): Promise<AppendConversationEventsResult> {
+    if (
+      this.failCheckpointWrites &&
+      input.events.some((event) => {
+        const runtime = event.metadata?.handrail_runtime;
+        return runtime !== null && typeof runtime === "object" &&
+          !Array.isArray(runtime) && Object.hasOwn(runtime, "checkpoint");
+      })
+    ) {
+      return Promise.reject(new Error("checkpoint persistence failed"));
+    }
+    return this.inner.append(input);
+  }
+
+  read(input: ReadConversationEventsInput): Promise<ReadConversationEventsResult> {
+    return this.inner.read(input);
+  }
+
+  getLatestRevision(id: ConversationId): Promise<ConversationRevision | null> {
+    return this.inner.getLatestRevision(id);
+  }
+}
+
 function deterministicSources() {
   let id = 0;
   let tick = 0;
@@ -392,6 +496,255 @@ describe("createConversationRuntime", () => {
     )).toHaveLength(0);
   });
 
+  it("returns a validated generic observation receipt in a frozen result array", async () => {
+    const eventStore = new InMemoryConversationEventStore();
+    const transport = new FakeTransport();
+    const receipt = usageReceipt();
+    transport.startObservations.push(observation([
+      startedFrame(),
+      completedFrame(1),
+    ], "completed", { usageReceipt: receipt }));
+    const runtime = await createConversationRuntime({
+      conversationId,
+      clientId,
+      transport,
+      eventStore,
+      ...deterministicSources(),
+    });
+
+    const outcome = await runtime.sendMessage({
+      content: "Measure this turn",
+      request: { prompt: "Measure this turn" },
+    });
+
+    expect(outcome).toMatchObject({ status: "completed" });
+    expect(outcome.usageReceipts).toEqual([receipt]);
+    expect(Object.isFrozen(outcome.usageReceipts)).toBe(true);
+    expect(runtime.getSnapshot().usage_receipt_links).toMatchObject([{
+      turn_id: outcome.turnId,
+      usage_receipt_id: receipt.usage_receipt_id,
+    }]);
+    const history = await eventStore.read({ conversationId, limit: 100 });
+    const linkedEvents = history.entries.filter(
+      ({ event }) => event.payload.type === "usage.receipt_linked",
+    );
+    expect(linkedEvents.map(({ event }) => event.payload)).toEqual([{
+      type: "usage.receipt_linked",
+      turn_id: outcome.turnId,
+      usage_receipt_id: receipt.usage_receipt_id,
+    }]);
+    const durableReceiptJson = JSON.stringify(linkedEvents);
+    expect(durableReceiptJson).not.toContain("input_tokens");
+    expect(durableReceiptJson).not.toContain("provider_cost");
+    expect(durableReceiptJson).not.toContain("generic-direct");
+    expect(durableReceiptJson).not.toContain("generic-model-v1");
+    expect(durableReceiptJson).not.toContain("prompt_tokens");
+  });
+
+  it("deduplicates receipt IDs while retaining distinct receipts across observation retries", async () => {
+    const eventStore = new InMemoryConversationEventStore();
+    const transport = new FakeTransport();
+    const first = usageReceipt({
+      usageReceiptId: "usage_retry_first",
+      terminalStatus: "failed",
+    });
+    const repeated = usageReceipt({
+      usageReceiptId: "usage_retry_first",
+      attemptIndex: 1,
+      terminalStatus: "failed",
+    });
+    const second = usageReceipt({
+      usageReceiptId: "usage_retry_second",
+      attemptIndex: 2,
+    });
+    const retryableError: TransportError = {
+      code: "unavailable",
+      message: "Retry observation",
+      retryable: true,
+    };
+    transport.startObservations.push(observation([
+      startedFrame(),
+    ], "failed", { usageReceipt: first, error: retryableError }));
+    transport.resumeObservations.push(
+      observation([], "failed", {
+        usageReceipt: repeated,
+        error: retryableError,
+      }),
+      observation([completedFrame(1)], "completed", { usageReceipt: second }),
+    );
+    const runtime = await createConversationRuntime({
+      conversationId,
+      clientId,
+      transport,
+      eventStore,
+      retryPolicy: createRetryPolicy({
+        maximumAttempts: 3,
+        initialDelayMs: 0,
+        jitterRatio: 0,
+        sleep: async (_delayMs, signal) => signal.throwIfAborted(),
+      }),
+      ...deterministicSources(),
+    });
+
+    const outcome = await runtime.sendMessage({
+      content: "Retry with receipts",
+      request: { prompt: "Retry with receipts" },
+    });
+
+    expect(outcome.status).toBe("completed");
+    expect(outcome.usageReceipts).toEqual([first, second]);
+    expect(outcome.usageReceipts.map((receipt) => receipt.usage_receipt_id)).toEqual([
+      "usage_retry_first",
+      "usage_retry_second",
+    ]);
+    expect(transport.resumes).toHaveLength(2);
+    expect(runtime.getSnapshot().usage_receipt_links.map(
+      (link) => link.usage_receipt_id,
+    )).toEqual(["usage_retry_first", "usage_retry_second"]);
+    const history = await eventStore.read({ conversationId, limit: 100 });
+    expect(history.entries.filter(
+      ({ event }) =>
+        event.payload.type === "usage.receipt_linked" &&
+        event.payload.usage_receipt_id === first.usage_receipt_id,
+    )).toHaveLength(1);
+  });
+
+  it("replays a durable receipt link and does not append it when redelivered after restart", async () => {
+    const eventStore = new InMemoryConversationEventStore();
+    const transport = new FakeTransport();
+    const sources = deterministicSources();
+    const receipt = usageReceipt({ usageReceiptId: "usage_restart" });
+    transport.startObservations.push(observation([
+      startedFrame(),
+    ], "completed", { usageReceipt: receipt }));
+    const runtimeBeforeRestart = await createConversationRuntime({
+      conversationId,
+      clientId,
+      transport,
+      eventStore,
+      retryPolicy: createRetryPolicy({ maximumAttempts: 1 }),
+      ...sources,
+    });
+
+    const interrupted = await runtimeBeforeRestart.sendMessage({
+      content: "Resume receipt link",
+      request: { prompt: "Resume receipt link" },
+    });
+    expect(interrupted.status).toBe("interrupted");
+    expect(interrupted.usageReceipts).toEqual([receipt]);
+    expect(runtimeBeforeRestart.getSnapshot().usage_receipt_links).toHaveLength(1);
+    runtimeBeforeRestart.destroy();
+
+    transport.resumeObservations.push(observation([
+      completedFrame(1),
+    ], "completed", { usageReceipt: receipt }));
+    const runtimeAfterRestart = await createConversationRuntime({
+      conversationId,
+      clientId,
+      transport,
+      eventStore,
+      ...sources,
+    });
+    expect(runtimeAfterRestart.getSnapshot().usage_receipt_links).toMatchObject([{
+      turn_id: receipt.turn_id,
+      usage_receipt_id: receipt.usage_receipt_id,
+    }]);
+
+    const resumed = await runtimeAfterRestart.restoreActiveTurn();
+
+    expect(resumed?.status).toBe("completed");
+    expect(resumed?.usageReceipts).toEqual([receipt]);
+    expect(runtimeAfterRestart.getSnapshot().usage_receipt_links).toHaveLength(1);
+    const history = await eventStore.read({ conversationId, limit: 100 });
+    expect(history.entries.filter(
+      ({ event }) => event.payload.type === "usage.receipt_linked",
+    )).toHaveLength(1);
+  });
+
+  it("omits malformed and conversation/turn-mismatched observation receipts", async () => {
+    const valid = usageReceipt();
+    const invalidReceipts: readonly unknown[] = [
+      { ...valid, provider_native_usage: { prompt_tokens: 4 } },
+      usageReceipt({ receiptConversationId: "conversation_other" }),
+      usageReceipt({ turnId: "turn_other" }),
+    ];
+
+    for (const invalid of invalidReceipts) {
+      const eventStore = new InMemoryConversationEventStore();
+      const transport = new FakeTransport();
+      transport.startObservations.push(observation([
+        startedFrame(),
+        completedFrame(1),
+      ], "completed", { usageReceipt: invalid }));
+      const runtime = await createConversationRuntime({
+        conversationId,
+        clientId,
+        transport,
+        eventStore,
+        ...deterministicSources(),
+      });
+
+      const outcome = await runtime.sendMessage({
+        content: "Reject invalid receipt",
+        request: { prompt: "Reject invalid receipt" },
+      });
+
+      expect(outcome.status).toBe("completed");
+      expect(outcome.usageReceipts).toEqual([]);
+      expect(Object.isFrozen(outcome.usageReceipts)).toBe(true);
+      expect(runtime.getSnapshot().usage_receipt_links).toEqual([]);
+      const history = await eventStore.read({ conversationId, limit: 100 });
+      expect(history.entries.some(
+        ({ event }) => event.payload.type === "usage.receipt_linked",
+      )).toBe(false);
+    }
+  });
+
+  it("retains valid receipts from cancelled and failed terminal observations", async () => {
+    const cases = [
+      {
+        status: "cancelled" as const,
+        terminal: cancelledFrame(1),
+        receipt: usageReceipt({
+          usageReceiptId: "usage_cancelled",
+          terminalStatus: "cancelled",
+        }),
+      },
+      {
+        status: "failed" as const,
+        terminal: failedFrame(1),
+        receipt: usageReceipt({
+          usageReceiptId: "usage_failed",
+          terminalStatus: "failed",
+        }),
+      },
+    ];
+
+    for (const current of cases) {
+      const transport = new FakeTransport();
+      transport.startObservations.push(observation([
+        startedFrame(),
+        current.terminal,
+      ], current.status, { usageReceipt: current.receipt }));
+      const runtime = await createConversationRuntime({
+        conversationId,
+        clientId,
+        transport,
+        eventStore: new InMemoryConversationEventStore(),
+        ...deterministicSources(),
+      });
+
+      const outcome = await runtime.sendMessage({
+        content: `Observe ${current.status}`,
+        request: { prompt: `Observe ${current.status}` },
+      });
+
+      expect(outcome.status).toBe(current.status);
+      expect(outcome.usageReceipts).toEqual([current.receipt]);
+      expect(Object.isFrozen(outcome.usageReceipts)).toBe(true);
+    }
+  });
+
   it("retries a normalized pre-start failure with the exact logical identities", async () => {
     const eventStore = new InMemoryConversationEventStore();
     const transport = new FakeTransport();
@@ -481,7 +834,7 @@ describe("createConversationRuntime", () => {
       tool,
       deltaFrame(2, "Recovered once"),
       usage,
-    ], "disconnected"));
+    ], "disconnected", { checkpoint: checkpointFor(deltaFrame(2, "Recovered once")) }));
     transport.resumeObservations.push(observation([
       deltaFrame(2, "Recovered once"),
       structuredClone(usage),
@@ -507,6 +860,9 @@ describe("createConversationRuntime", () => {
     });
 
     expect(outcome.status).toBe("completed");
+    expect(outcome.usageReceipts).toEqual([]);
+    expect(Object.isFrozen(outcome.usageReceipts)).toBe(true);
+    expect(JSON.stringify(outcome)).not.toContain("input_tokens");
     expect(transport.starts).toHaveLength(1);
     expect(transport.resumes).toEqual([{
       conversationId,
@@ -537,6 +893,209 @@ describe("createConversationRuntime", () => {
       },
       { type: "turn.attempt_started", attempt: 2, operation: "resume" },
     ]);
+  });
+
+  it("passes an acknowledged opaque checkpoint unchanged to an automatic retry", async () => {
+    const eventStore = new InMemoryConversationEventStore();
+    const transport = new FakeTransport();
+    const firstCheckpoint = opaqueCheckpoint(1, "automatic-first");
+    const finalCheckpoint = opaqueCheckpoint(2, "automatic-final");
+    transport.startObservations.push(observation([
+      startedFrame(),
+      deltaFrame(1, "Opaque"),
+    ], "disconnected", { checkpoint: firstCheckpoint }));
+    transport.resumeObservations.push(observation([
+      deltaFrame(1, "Opaque"),
+      completedFrame(2),
+    ], "completed", { checkpoint: finalCheckpoint }));
+    const runtime = await createConversationRuntime({
+      conversationId,
+      clientId,
+      transport,
+      eventStore,
+      retryPolicy: createRetryPolicy({
+        maximumAttempts: 2,
+        initialDelayMs: 0,
+        jitterRatio: 0,
+        sleep: async (_delayMs, signal) => signal.throwIfAborted(),
+      }),
+      ...deterministicSources(),
+    });
+
+    const outcome = await runtime.sendMessage({
+      content: "Resume from an opaque point",
+      request: { prompt: "Resume from an opaque point" },
+    });
+
+    expect(transport.resumes[0]?.resumeFrom).toEqual(firstCheckpoint);
+    expect(transport.resumes[0]?.resumeFrom).not.toBe(firstCheckpoint);
+    expect(outcome.checkpoint).toEqual(finalCheckpoint);
+  });
+
+  it("hydrates an acknowledged opaque checkpoint for restoreActiveTurn", async () => {
+    const eventStore = new InMemoryConversationEventStore();
+    const transport = new FakeTransport();
+    const durableCheckpoint = opaqueCheckpoint(1, "restart-durable");
+    transport.startObservations.push(observation([
+      startedFrame(),
+      deltaFrame(1, "Before restart"),
+    ], "disconnected", { checkpoint: durableCheckpoint }));
+    const sources = deterministicSources();
+    const runtimeBeforeRestart = await createConversationRuntime({
+      conversationId,
+      clientId,
+      transport,
+      eventStore,
+      retryPolicy: createRetryPolicy({ maximumAttempts: 1 }),
+      ...sources,
+    });
+    const disconnected = await runtimeBeforeRestart.sendMessage({
+      content: "Persist the cursor",
+      request: { prompt: "Persist the cursor" },
+    });
+    expect(disconnected.checkpoint).toEqual(durableCheckpoint);
+    runtimeBeforeRestart.destroy();
+
+    transport.resumeObservations.push(observation([
+      deltaFrame(1, "Before restart"),
+      completedFrame(2),
+    ], "completed", { checkpoint: opaqueCheckpoint(2, "restart-final") }));
+    const runtimeAfterRestart = await createConversationRuntime({
+      conversationId,
+      clientId,
+      transport,
+      eventStore,
+      ...sources,
+    });
+
+    expect((await runtimeAfterRestart.restoreActiveTurn())?.status).toBe("completed");
+    expect(transport.resumes[0]?.resumeFrom).toEqual(durableCheckpoint);
+  });
+
+  it("does not advance the prior checkpoint when checkpoint persistence fails", async () => {
+    const eventStore = new CheckpointFailingEventStore();
+    const transport = new FakeTransport();
+    const priorCheckpoint = opaqueCheckpoint(1, "prior-safe");
+    transport.startObservations.push(observation([
+      startedFrame(),
+      deltaFrame(1, "Durable"),
+    ], "disconnected", { checkpoint: priorCheckpoint }));
+    const runtime = await createConversationRuntime({
+      conversationId,
+      clientId,
+      transport,
+      eventStore,
+      retryPolicy: createRetryPolicy({ maximumAttempts: 1 }),
+      ...deterministicSources(),
+    });
+    const disconnected = await runtime.sendMessage({
+      content: "Keep the prior point",
+      request: { prompt: "Keep the prior point" },
+    });
+
+    eventStore.failCheckpointWrites = true;
+    transport.resumeObservations.push(observation([
+      completedFrame(2),
+    ], "completed", { checkpoint: opaqueCheckpoint(2, "failed-write") }));
+    await expect(runtime.resumeTurn(disconnected.turnId)).rejects.toThrow(
+      "checkpoint persistence failed",
+    );
+
+    eventStore.failCheckpointWrites = false;
+    transport.resumeObservations.push(observation([
+      completedFrame(2),
+    ], "completed", { checkpoint: opaqueCheckpoint(2, "after-recovery") }));
+    expect((await runtime.resumeTurn(disconnected.turnId)).status).toBe("completed");
+    expect(transport.resumes.map(({ resumeFrom }) => resumeFrom)).toEqual([
+      priorCheckpoint,
+      priorCheckpoint,
+    ]);
+  });
+
+  it("rejects malformed or observation-ahead checkpoints without advancing the prior point", async () => {
+    const invalidCheckpoints: readonly unknown[] = [
+      {
+        lastAppliedEventId: "event/partial",
+        lastAppliedCursor: "cursor:partial",
+      },
+      opaqueCheckpoint(99, "ahead-of-observation"),
+    ];
+
+    for (const invalidCheckpoint of invalidCheckpoints) {
+      const eventStore = new InMemoryConversationEventStore();
+      const transport = new FakeTransport();
+      const priorCheckpoint = opaqueCheckpoint(1, "valid-prior");
+      transport.startObservations.push(observation([
+        startedFrame(),
+        deltaFrame(1, "Prior"),
+      ], "disconnected", { checkpoint: priorCheckpoint }));
+      const runtime = await createConversationRuntime({
+        conversationId,
+        clientId,
+        transport,
+        eventStore,
+        retryPolicy: createRetryPolicy({ maximumAttempts: 1 }),
+        ...deterministicSources(),
+      });
+      const first = await runtime.sendMessage({
+        content: "Reject unsafe checkpoint",
+        request: { prompt: "Reject unsafe checkpoint" },
+      });
+
+      transport.resumeObservations.push(observation([
+        deltaFrame(2, " effect"),
+      ], "disconnected", { checkpoint: invalidCheckpoint }));
+      const invalid = await runtime.resumeTurn(first.turnId);
+      expect(invalid).toMatchObject({
+        status: "interrupted",
+        checkpoint: priorCheckpoint,
+        error: { code: "invalid_protocol" },
+      });
+
+      transport.resumeObservations.push(observation([
+        deltaFrame(2, " effect"),
+        completedFrame(3),
+      ], "completed", { checkpoint: opaqueCheckpoint(3, "valid-final") }));
+      expect((await runtime.resumeTurn(first.turnId)).status).toBe("completed");
+      expect(transport.resumes.map(({ resumeFrom }) => resumeFrom)).toEqual([
+        priorCheckpoint,
+        priorCheckpoint,
+      ]);
+    }
+  });
+
+  it("keeps the all-null checkpoint until the transport acknowledges a point", async () => {
+    const eventStore = new InMemoryConversationEventStore();
+    const transport = new FakeTransport();
+    const emptyCheckpoint: TurnResumePoint = {
+      lastAppliedEventId: null,
+      lastAppliedCursor: null,
+      lastAppliedRevision: null,
+    };
+    transport.startObservations.push(observation([
+      startedFrame(),
+    ], "disconnected", { checkpoint: emptyCheckpoint }));
+    const runtime = await createConversationRuntime({
+      conversationId,
+      clientId,
+      transport,
+      eventStore,
+      retryPolicy: createRetryPolicy({ maximumAttempts: 1 }),
+      ...deterministicSources(),
+    });
+    const disconnected = await runtime.sendMessage({
+      content: "No checkpoint yet",
+      request: { prompt: "No checkpoint yet" },
+    });
+    expect(disconnected.checkpoint).toEqual(emptyCheckpoint);
+
+    transport.resumeObservations.push(observation([
+      completedFrame(1),
+    ], "completed", { checkpoint: emptyCheckpoint }));
+    const completed = await runtime.resumeTurn(disconnected.turnId);
+
+    expect(transport.resumes[0]?.resumeFrom).toEqual(emptyCheckpoint);
+    expect(completed.checkpoint).toEqual(emptyCheckpoint);
   });
 
   it("projects a tool-call terminal without entering a tool loop", async () => {
@@ -629,6 +1188,8 @@ describe("createConversationRuntime", () => {
     expect(malformed).toMatchObject({ status: "interrupted", error: {
       code: "invalid_protocol",
     } });
+    expect(malformed.usageReceipts).toEqual([]);
+    expect(Object.isFrozen(malformed.usageReceipts)).toBe(true);
     expect(malformedRuntime.getSnapshot().turns[0]?.status).toBe("running");
 
     const conflictingTransport = new FakeTransport();
@@ -678,6 +1239,8 @@ describe("createConversationRuntime", () => {
       request: { prompt: "Resume me" },
     });
     expect(disconnected.status).toBe("disconnected");
+    expect(disconnected.usageReceipts).toEqual([]);
+    expect(Object.isFrozen(disconnected.usageReceipts)).toBe(true);
     expect(runtimeBeforeRestart.getSnapshot().turns[0]?.status).toBe("running");
     expect(runtimeBeforeRestart.getSnapshot().turns[0]?.retry_history).toMatchObject([
       { type: "turn.attempt_started", attempt: 1, operation: "start" },

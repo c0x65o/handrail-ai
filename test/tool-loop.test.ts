@@ -7,6 +7,7 @@ import {
   ToolRegistry,
   createConversationRuntime,
   parseChatRequest,
+  parseNormalizedUsageReceipt,
   runToolLoop,
   type ApplicationToolExecutor,
   type ApplicationToolPolicy,
@@ -40,9 +41,43 @@ interface ScriptedResponse {
   readonly calls?: readonly { id: string; name?: string; arguments?: Record<string, unknown> }[];
   readonly outcome: "stop" | "length" | "tool_calls";
   readonly text?: string;
+  readonly usageReceiptId?: string;
 }
 
-function observation(script: ScriptedResponse): TurnObservation<unknown> {
+function usageReceipt(
+  usageReceiptId: string,
+  turnId: string,
+  requestId: string,
+): NormalizedUsageReceipt {
+  return parseNormalizedUsageReceipt({
+    version: 1,
+    usage_receipt_id: usageReceiptId,
+    conversation_id: conversationId,
+    turn_id: turnId,
+    logical_request_id: "logical_tool_loop",
+    trace_id: `trace_${requestId}`,
+    attempt: { id: `attempt_${requestId}`, index: 0 },
+    continuation: { id: `continuation_${requestId}`, index: 0 },
+    provider_id: "generic-direct",
+    model_id: "generic-model-v1",
+    attribution,
+    source: "provider",
+    terminal_status: "completed",
+    tokens: {
+      input_tokens: { status: "reported", value: 4 },
+      cached_input_tokens: { status: "reported", value: 1 },
+      output_tokens: { status: "reported", value: 2 },
+      reasoning_tokens: { status: "reported", value: 0 },
+      total_tokens: { status: "reported", value: 6 },
+    },
+    provider_cost: { status: "unavailable" },
+  });
+}
+
+function observation(
+  script: ScriptedResponse,
+  receipt?: NormalizedUsageReceipt,
+): TurnObservation<unknown> {
   const frames: unknown[] = [{
     type: "response.started",
     protocol_version: AI_RUNTIME_PROTOCOL_VERSION,
@@ -89,7 +124,11 @@ function observation(script: ScriptedResponse): TurnObservation<unknown> {
   };
   return {
     events: { async *[Symbol.asyncIterator]() { yield* frames; } },
-    result: Promise.resolve({ status: "completed", checkpoint } satisfies TurnObservationResult),
+    result: Promise.resolve({
+      status: "completed",
+      checkpoint,
+      ...(receipt === undefined ? {} : { usageReceipt: receipt }),
+    } satisfies TurnObservationResult),
     disconnect() {},
   };
 }
@@ -112,7 +151,16 @@ class ScriptedTransport implements ConversationTransport<unknown, ChatRequest> {
       conversationId: input.conversationId,
       mutationId: input.mutationId,
       turnId: `remote_${script.requestId}`,
-      observation: observation(script),
+      observation: observation(
+        script,
+        script.usageReceiptId === undefined
+          ? undefined
+          : usageReceipt(
+              script.usageReceiptId,
+              input.conversationTurnId,
+              script.requestId,
+            ),
+      ),
     } };
   }
 
@@ -400,9 +448,49 @@ describe("runToolLoop", () => {
     expect(wall.runtime.getSnapshot().tool_loop_budget_exhaustions).toHaveLength(1);
   });
 
-  it("deduplicates cumulative usage observations by receipt identity", async () => {
+  it("collects and deduplicates runtime receipts across two continuations", async () => {
     const h = await harness([
-      { requestId: "usage_1", calls: [{ id: "call_usage" }], outcome: "tool_calls" },
+      {
+        requestId: "runtime_usage_1",
+        calls: [{ id: "call_usage_1" }],
+        outcome: "tool_calls",
+        usageReceiptId: "receipt_runtime_first",
+      },
+      {
+        requestId: "runtime_usage_2",
+        calls: [{ id: "call_usage_2" }],
+        outcome: "tool_calls",
+        usageReceiptId: "receipt_runtime_first",
+      },
+      {
+        requestId: "runtime_usage_3",
+        outcome: "stop",
+        usageReceiptId: "receipt_runtime_terminal",
+      },
+    ]);
+
+    const result = await run(h);
+
+    expect(result).toMatchObject({
+      status: "completed",
+      iterations: 2,
+      totalToolCalls: 2,
+    });
+    expect(h.transport.starts).toHaveLength(3);
+    expect(result.usageReceipts.map((receipt) => receipt.usage_receipt_id)).toEqual([
+      "receipt_runtime_first",
+      "receipt_runtime_terminal",
+    ]);
+  });
+
+  it("merges callback receipts additively and deduplicates by receipt identity", async () => {
+    const h = await harness([
+      {
+        requestId: "usage_1",
+        calls: [{ id: "call_usage" }],
+        outcome: "tool_calls",
+        usageReceiptId: "receipt_runtime",
+      },
       { requestId: "usage_2", outcome: "stop" },
     ]);
     const duplicate = { usage_receipt_id: "receipt_same" } as NormalizedUsageReceipt;
@@ -412,7 +500,7 @@ describe("runToolLoop", () => {
         turn.requestId === "usage_1" ? [duplicate] : [duplicate, unique],
     });
     expect(result.usageReceipts.map((receipt) => receipt.usage_receipt_id)).toEqual([
-      "receipt_same", "receipt_unique",
+      "receipt_runtime", "receipt_same", "receipt_unique",
     ]);
   });
 });

@@ -188,6 +188,9 @@ export async function runToolLoop<TContext = unknown, TDiscoveryContext = unknow
   }
 
   const collectUsage = async (): Promise<void> => {
+    for (const receipt of turn.usageReceipts) {
+      receipts.set(receipt.usage_receipt_id, receipt);
+    }
     const observed = await options.collectUsageReceipts?.(turn) ?? [];
     for (const receipt of observed) receipts.set(receipt.usage_receipt_id, receipt);
   };

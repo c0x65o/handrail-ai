@@ -229,9 +229,6 @@ export async function continueBoundedToolLoop(
   runtime: ConversationRuntime<ChatRequest>,
   initialTurn: ConversationRuntimeTurnResult,
   request: ChatRequest,
-  collectUsageReceipts: (
-    turn: ConversationRuntimeTurnResult,
-  ) => readonly NormalizedUsageReceipt[] | Promise<readonly NormalizedUsageReceipt[]>,
   writeReceipt: (receipt: NormalizedUsageReceipt) => Promise<void>,
 ) {
   const result = await runToolLoop({
@@ -247,7 +244,6 @@ export async function continueBoundedToolLoop(
       maxElapsedMs: 30_000,
       parallelism: 1,
     },
-    collectUsageReceipts,
   });
   await persistUsageReceipts(result.usageReceipts, writeReceipt);
   return result;

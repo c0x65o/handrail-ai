@@ -47,6 +47,10 @@ import type {
   TurnObservationResult,
   TurnResumePoint,
 } from "./transports/types.js";
+import {
+  parseNormalizedUsageReceipt,
+  type NormalizedUsageReceipt,
+} from "./usage.js";
 
 const RUNTIME_METADATA_KEY = "handrail_runtime";
 
@@ -103,6 +107,8 @@ export interface ConversationRuntimeTurnResult {
   readonly outcome: "stop" | "length" | "tool_calls" | null;
   /** The latest transport frame whose effects are durably represented. */
   readonly checkpoint: TurnResumePoint;
+  /** Validated usage receipts observed for this durable turn, deduplicated by receipt ID. */
+  readonly usageReceipts: readonly NormalizedUsageReceipt[];
   readonly error?: ConversationRuntimeError;
 }
 
@@ -184,6 +190,7 @@ interface RuntimeMetadata {
   readonly sequence?: number;
   readonly frameType?: StreamEvent["type"];
   readonly resumeSafe?: boolean;
+  readonly checkpoint?: TurnResumePoint;
 }
 
 interface TurnProtocolState {
@@ -191,6 +198,7 @@ interface TurnProtocolState {
   requestId: string | null;
   traceId: string | null;
   safeSequence: number | null;
+  checkpoint: TurnResumePoint;
 }
 
 interface EventDraft {
@@ -258,6 +266,10 @@ export async function createConversationRuntime<TRequest>(
   const now = options.now ?? (() => new Date());
   const retryPolicy = options.retryPolicy ?? createRetryPolicy();
   const protocolByTurn = new Map<string, TurnProtocolState>();
+  const usageReceiptsByTurn = new Map<
+    string,
+    Map<string, NormalizedUsageReceipt>
+  >();
   const durableFrameKeys = new Set<string>();
   const activeObservations = new Map<string, TurnObservation<unknown>>();
   const runningTurns = new Map<string, Promise<ConversationRuntimeTurnResult>>();
@@ -363,6 +375,9 @@ export async function createConversationRuntime<TRequest>(
       traceId: protocol?.traceId ?? null,
       outcome: turn?.outcome ?? null,
       checkpoint: checkpointFor(protocol),
+      usageReceipts: Object.freeze([
+        ...(usageReceiptsByTurn.get(turnId)?.values() ?? []),
+      ]),
       ...(error === undefined
         ? {}
         : {
@@ -376,6 +391,55 @@ export async function createConversationRuntime<TRequest>(
             }),
           }),
     });
+  };
+
+  const captureUsageReceipt = (
+    turnId: ConversationTurnId,
+    transportResult: TurnObservationResult,
+  ): Promise<void> => {
+    if (
+      transportResult.status === "disconnected" ||
+      transportResult.usageReceipt === undefined ||
+      transportResult.usageReceipt === null
+    ) {
+      return Promise.resolve();
+    }
+    try {
+      const receipt = parseNormalizedUsageReceipt(transportResult.usageReceipt);
+      if (
+        receipt.conversation_id !== options.conversationId ||
+        receipt.turn_id !== turnId
+      ) {
+        return Promise.resolve();
+      }
+      let receipts = usageReceiptsByTurn.get(turnId);
+      if (receipts === undefined) {
+        receipts = new Map<string, NormalizedUsageReceipt>();
+        usageReceiptsByTurn.set(turnId, receipts);
+      }
+      if (!receipts.has(receipt.usage_receipt_id)) {
+        receipts.set(receipt.usage_receipt_id, receipt);
+      }
+      if (
+        store.getSnapshot().usage_receipt_links.some(
+          (link) => link.usage_receipt_id === receipt.usage_receipt_id,
+        )
+      ) {
+        return Promise.resolve();
+      }
+      return persist([{
+        actor: { type: "assistant" },
+        source: runtimeSource(),
+        payload: {
+          type: "usage.receipt_linked",
+          turn_id: turnId,
+          usage_receipt_id: receipt.usage_receipt_id,
+        },
+      }]).then(() => undefined);
+    } catch {
+      // Observation receipts are untrusted transport output. Invalid values are omitted.
+      return Promise.resolve();
+    }
   };
 
   const observeTransport = async (
@@ -437,6 +501,9 @@ export async function createConversationRuntime<TRequest>(
       } catch (cause) {
         frameState.failure ??= runtimeFailure(cause);
       }
+      if (transportResult !== null) {
+        await captureUsageReceipt(turnId, transportResult);
+      }
 
       if (destroyed) throw new ConversationRuntimeDestroyedError();
       if (frameState.failure !== null) {
@@ -447,6 +514,40 @@ export async function createConversationRuntime<TRequest>(
         const observationError = transportResult?.status === "failed"
           ? transportResult.error
           : undefined;
+        if (transportResult?.status === "disconnected") {
+          let checkpoint: TurnResumePoint | null;
+          try {
+            checkpoint = validatedObservationCheckpoint(
+              transportResult.checkpoint,
+              protocol.checkpoint,
+              protocol.safeSequence,
+            );
+          } catch (cause) {
+            return result(turnId, "interrupted", runtimeFailure(cause));
+          }
+          if (checkpoint !== null && !checkpointsEqual(checkpoint, protocol.checkpoint)) {
+            const turn = store.getSnapshot().turns.find(
+              (candidate) => candidate.turn_id === turnId,
+            );
+            const status = turn?.status;
+            if (
+              status !== "queued" && status !== "running" &&
+              status !== "waiting_for_tool_result"
+            ) {
+              return result(turnId, "interrupted", {
+                code: "invalid_protocol",
+                message: "A transport checkpoint cannot be applied to a terminal turn",
+                retryable: false,
+              });
+            }
+            await persist([{
+              actor: { type: "assistant" },
+              source: runtimeSource(),
+              metadata: metadataFor({ checkpoint }),
+              payload: { type: "turn.status_changed", turn_id: turnId, status },
+            }]);
+          }
+        }
         return result(
           turnId,
           disconnected ? "disconnected" : "interrupted",
@@ -459,12 +560,26 @@ export async function createConversationRuntime<TRequest>(
               },
         );
       }
-      if (!terminalMatchesResult(frameState.terminal, transportResult)) {
+      if (
+        transportResult === null ||
+        !terminalMatchesResult(frameState.terminal, transportResult)
+      ) {
         return result(turnId, "interrupted", {
           code: "terminal_result_conflict",
           message: "The terminal response frame conflicts with the transport result",
           retryable: false,
         });
+      }
+
+      let checkpoint: TurnResumePoint | null;
+      try {
+        checkpoint = validatedObservationCheckpoint(
+          transportResult.checkpoint,
+          protocol.checkpoint,
+          frameState.terminal.sequence,
+        );
+      } catch (cause) {
+        return result(turnId, "interrupted", runtimeFailure(cause));
       }
 
       await persist(
@@ -473,6 +588,9 @@ export async function createConversationRuntime<TRequest>(
           frameState.terminal,
           runtimeSource(),
           requestedCancellationReasons.get(turnId),
+          checkpoint !== null && !checkpointsEqual(checkpoint, protocol.checkpoint)
+            ? checkpoint
+            : undefined,
         ),
       );
       protocol.safeSequence = frameState.terminal.sequence;
@@ -1062,6 +1180,7 @@ function draftsForTerminal(
   terminal: TerminalStreamEvent,
   source: ConversationEventSource,
   requestedCancellationReason?: ConversationTurnCancellationReason,
+  checkpoint?: TurnResumePoint,
 ): EventDraft[] {
   const metadata = metadataFor({
     ...(state.protocol.transportTurnId === null
@@ -1072,6 +1191,7 @@ function draftsForTerminal(
     sequence: terminal.sequence,
     frameType: terminal.type,
     resumeSafe: true,
+    ...(checkpoint === undefined ? {} : { checkpoint }),
   });
   if (terminal.type === "response.completed") {
     return [{
@@ -1397,13 +1517,20 @@ function runtimeFailure(cause: unknown): ConversationRuntimeError {
 }
 
 function metadataFor(metadata: RuntimeMetadata): ConversationEventMetadata {
-  const runtime: Record<string, string | number | boolean> = {};
+  const runtime: ConversationEventMetadata = {};
   if (metadata.transportTurnId !== undefined) runtime.transport_turn_id = metadata.transportTurnId;
   if (metadata.requestId !== undefined) runtime.request_id = metadata.requestId;
   if (metadata.traceId !== undefined) runtime.trace_id = metadata.traceId;
   if (metadata.sequence !== undefined) runtime.sequence = metadata.sequence;
   if (metadata.frameType !== undefined) runtime.frame_type = metadata.frameType;
   if (metadata.resumeSafe !== undefined) runtime.resume_safe = metadata.resumeSafe;
+  if (metadata.checkpoint !== undefined) {
+    runtime.checkpoint = {
+      last_applied_event_id: metadata.checkpoint.lastAppliedEventId,
+      last_applied_cursor: metadata.checkpoint.lastAppliedCursor,
+      last_applied_revision: metadata.checkpoint.lastAppliedRevision,
+    };
+  }
   return { [RUNTIME_METADATA_KEY]: runtime };
 }
 
@@ -1412,6 +1539,7 @@ function runtimeMetadata(metadata: ConversationEventMetadata | undefined): Runti
   const raw = metadata[RUNTIME_METADATA_KEY];
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
   const value = raw as Record<string, unknown>;
+  const checkpoint = runtimeCheckpoint(value.checkpoint);
   return {
     ...(typeof value.transport_turn_id === "string"
       ? { transportTurnId: value.transport_turn_id }
@@ -1423,6 +1551,7 @@ function runtimeMetadata(metadata: ConversationEventMetadata | undefined): Runti
       ? { frameType: value.frame_type as StreamEvent["type"] }
       : {}),
     ...(typeof value.resume_safe === "boolean" ? { resumeSafe: value.resume_safe } : {}),
+    ...(checkpoint === undefined ? {} : { checkpoint }),
   };
 }
 
@@ -1442,6 +1571,7 @@ function rememberRuntimeMetadata(
   if (metadata.transportTurnId !== undefined) protocol.transportTurnId = metadata.transportTurnId;
   if (metadata.requestId !== undefined) protocol.requestId = metadata.requestId;
   if (metadata.traceId !== undefined) protocol.traceId = metadata.traceId;
+  if (metadata.checkpoint !== undefined) protocol.checkpoint = metadata.checkpoint;
   if (metadata.requestId !== undefined && metadata.sequence !== undefined) {
     durableFrameKeys.add(frameKey(metadata.requestId, metadata.sequence));
     if (metadata.resumeSafe === true) {
@@ -1486,21 +1616,89 @@ function protocolState(
     requestId: null,
     traceId: null,
     safeSequence: null,
+    checkpoint: EMPTY_CHECKPOINT,
   };
   states.set(turnId, created);
   return created;
 }
 
 function checkpointFor(protocol: TurnProtocolState | undefined): TurnResumePoint {
-  if (protocol?.requestId === null || protocol?.requestId === undefined || protocol.safeSequence === null) {
-    return EMPTY_CHECKPOINT;
+  return protocol?.checkpoint ?? EMPTY_CHECKPOINT;
+}
+
+function validatedObservationCheckpoint(
+  raw: unknown,
+  current: TurnResumePoint,
+  maximumDurableRevision: number | null,
+): TurnResumePoint | null {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new TypeError("The transport returned an invalid checkpoint");
   }
-  const eventId = frameKey(protocol.requestId, protocol.safeSequence);
+  const value = raw as Record<string, unknown>;
+  const expectedKeys = [
+    "lastAppliedEventId",
+    "lastAppliedCursor",
+    "lastAppliedRevision",
+  ];
+  if (
+    Object.keys(value).length !== expectedKeys.length ||
+    expectedKeys.some((key) => !Object.hasOwn(value, key))
+  ) {
+    throw new TypeError("The transport checkpoint must contain exactly one complete resume point");
+  }
+  const eventId = value.lastAppliedEventId;
+  const cursor = value.lastAppliedCursor;
+  const revision = value.lastAppliedRevision;
+  if (eventId === null && cursor === null && revision === null) return null;
+  if (
+    typeof eventId !== "string" || eventId.length === 0 || eventId.length > 4_096 ||
+    typeof cursor !== "string" || cursor.length === 0 || cursor.length > 4_096 ||
+    typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0
+  ) {
+    throw new TypeError("The transport checkpoint fields are invalid or incomplete");
+  }
+  if (maximumDurableRevision === null || revision > maximumDurableRevision) {
+    throw new TypeError("The transport checkpoint exceeds durably applied observation effects");
+  }
+  if (
+    current.lastAppliedRevision !== null &&
+    (revision < current.lastAppliedRevision ||
+      (revision === current.lastAppliedRevision &&
+        (eventId !== current.lastAppliedEventId || cursor !== current.lastAppliedCursor)))
+  ) {
+    throw new TypeError("The transport checkpoint conflicts with the prior durable point");
+  }
   return Object.freeze({
     lastAppliedEventId: eventId,
-    lastAppliedCursor: eventId,
-    lastAppliedRevision: protocol.safeSequence,
+    lastAppliedCursor: cursor,
+    lastAppliedRevision: revision as number,
   });
+}
+
+function runtimeCheckpoint(raw: unknown): TurnResumePoint | undefined {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const value = raw as Record<string, unknown>;
+  const eventId = value.last_applied_event_id;
+  const cursor = value.last_applied_cursor;
+  const revision = value.last_applied_revision;
+  if (
+    typeof eventId !== "string" || eventId.length === 0 ||
+    typeof cursor !== "string" || cursor.length === 0 ||
+    typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    lastAppliedEventId: eventId,
+    lastAppliedCursor: cursor,
+    lastAppliedRevision: revision as number,
+  });
+}
+
+function checkpointsEqual(left: TurnResumePoint, right: TurnResumePoint): boolean {
+  return left.lastAppliedEventId === right.lastAppliedEventId &&
+    left.lastAppliedCursor === right.lastAppliedCursor &&
+    left.lastAppliedRevision === right.lastAppliedRevision;
 }
 
 function frameKey(requestId: string, sequence: number): string {
