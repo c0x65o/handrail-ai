@@ -11,9 +11,12 @@ const result = await build({
   configFile: false,
   root: fixtureDirectory,
   logLevel: "warn",
+  define: {
+    "process.env.NODE_ENV": JSON.stringify("production"),
+  },
   build: {
     lib: {
-      entry: path.join(fixtureDirectory, "consumer.ts"),
+      entry: path.join(fixtureDirectory, "consumer.tsx"),
       formats: ["es"],
       fileName: "consumer",
     },
@@ -38,13 +41,28 @@ if (!bundledCode.includes("parseChatRequest")) {
   throw new Error("Vite consumer bundle did not retain the public protocol entry point");
 }
 
+if (!bundledCode.includes("createConversationStore")) {
+  throw new Error("Vite consumer bundle did not retain the headless conversation store");
+}
+
 if (!bundledCode.includes("IndexedDBConversationEventStore")) {
   throw new Error("Vite consumer bundle did not retain the opt-in browser entry point");
 }
 
-const nodeRuntimeDependency = bundledCode.match(/\b(?:Buffer|process)\b|node:/u)?.[0];
+if (!bundledCode.includes("reactSubpathElement")) {
+  throw new Error("Vite consumer bundle did not retain the React subpath consumer");
+}
+
+const nodeRuntimeDependency = bundledCode.match(
+  /\bBuffer\s*\.|\bprocess\.env\b|(?:from\s*|import\s*\()?["']node:/u,
+)?.[0];
 if (nodeRuntimeDependency) {
+  const dependencyOffset = bundledCode.indexOf(nodeRuntimeDependency);
+  const dependencyContext = bundledCode.slice(
+    Math.max(0, dependencyOffset - 60),
+    dependencyOffset + nodeRuntimeDependency.length + 60,
+  );
   throw new Error(
-    `Vite consumer bundle retained the Node runtime dependency ${JSON.stringify(nodeRuntimeDependency)}`,
+    `Vite consumer bundle retained the Node runtime dependency ${JSON.stringify(nodeRuntimeDependency)} near ${JSON.stringify(dependencyContext)}`,
   );
 }
