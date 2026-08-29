@@ -1,6 +1,10 @@
 import { Ajv2020, type ValidateFunction } from "ajv/dist/2020.js";
 
 import {
+  normalizeCitationRecords,
+  type CitationRecordSet,
+} from "../citations.js";
+import {
   type ApplicationToolResult,
   type JsonObject,
   type JsonValue,
@@ -22,10 +26,21 @@ export interface ApplicationToolExecutorContext<TContext = unknown> {
   readonly toolCallId: string;
 }
 
-export type ApplicationToolOutput =
+export type ApplicationToolContentOutput =
   | JsonValue
   | ToolResultContentPart
   | readonly ToolResultContentPart[];
+
+/** Explicit trusted-host envelope for tool content plus provider-neutral provenance. */
+export interface ApplicationToolOutputProjection {
+  readonly type: "handrail.application_tool_output";
+  readonly content: ApplicationToolContentOutput;
+  readonly citation_records: CitationRecordSet;
+}
+
+export type ApplicationToolOutput =
+  | ApplicationToolContentOutput
+  | ApplicationToolOutputProjection;
 
 export type ApplicationToolExecutor<TContext = unknown> = (
   arguments_: JsonObject,
@@ -284,10 +299,17 @@ function result(
   name: string,
   content: ToolResultContentPart[],
   isError: boolean,
+  citationRecords?: CitationRecordSet,
 ): ApplicationToolResult {
   content.forEach(Object.freeze);
   Object.freeze(content);
-  return Object.freeze({ tool_call_id: toolCallId, name, content, is_error: isError });
+  return Object.freeze({
+    tool_call_id: toolCallId,
+    name,
+    content,
+    is_error: isError,
+    ...(citationRecords === undefined ? {} : { citation_records: citationRecords }),
+  });
 }
 
 function errorResult(toolCallId: string, name: string, message: string): ApplicationToolResult {
@@ -464,8 +486,44 @@ function resemblesContentPart(value: unknown): boolean {
   return type !== undefined && "value" in type && (type.value === "text" || type.value === "json");
 }
 
-function normalizeOutput(
-  output: ApplicationToolOutput,
+interface NormalizedApplicationToolOutput {
+  readonly content: ToolResultContentPart[];
+  readonly citationRecords?: CitationRecordSet;
+}
+
+function outputProjection(value: unknown): {
+  readonly content: unknown;
+  readonly citationRecords: unknown;
+} | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const type = Object.getOwnPropertyDescriptor(value, "type");
+  if (
+    type === undefined ||
+    !("value" in type) ||
+    type.value !== "handrail.application_tool_output"
+  ) return null;
+  if (Object.getPrototypeOf(value) !== Object.prototype) throw new InvalidOutput();
+  const keys = Reflect.ownKeys(value);
+  if (
+    keys.length !== 3 ||
+    keys.some((key) => typeof key !== "string") ||
+    !keys.includes("content") ||
+    !keys.includes("citation_records")
+  ) throw new InvalidOutput();
+  for (const key of keys as string[]) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !descriptor.enumerable || !("value" in descriptor)) {
+      throw new InvalidOutput();
+    }
+  }
+  return {
+    content: (value as { content: unknown }).content,
+    citationRecords: (value as { citation_records: unknown }).citation_records,
+  };
+}
+
+function normalizeContentOutput(
+  output: ApplicationToolContentOutput,
   limits: BoundedToolExecutorLimits,
 ): ToolResultContentPart[] {
   try {
@@ -502,6 +560,33 @@ function normalizeOutput(
       }
       throw new InvalidOutput();
     });
+  } catch {
+    throw new InvalidOutput();
+  }
+}
+
+function normalizeOutput(
+  output: ApplicationToolOutput,
+  limits: BoundedToolExecutorLimits,
+  toolCallId: string,
+): NormalizedApplicationToolOutput {
+  try {
+    const projection = outputProjection(output);
+    const content = normalizeContentOutput(
+      (projection?.content ?? output) as ApplicationToolContentOutput,
+      limits,
+    );
+    if (projection === null) return { content };
+
+    const citationRecords = normalizeCitationRecords(projection.citationRecords);
+    if (citationRecords.citations.length === 0) throw new InvalidOutput();
+    for (const citation of citationRecords.citations) {
+      if (
+        citation.target.type !== "tool_result" ||
+        citation.target.tool_call_id !== toolCallId
+      ) throw new InvalidOutput();
+    }
+    return { content, citationRecords };
   } catch {
     throw new InvalidOutput();
   }
@@ -627,10 +712,15 @@ export class BoundedToolExecutor<TContext = unknown, TDiscoveryContext = unknown
                 signal: controller.signal,
                 toolCallId,
               }))
-              .then((output) => normalizeOutput(output, this.#limits));
+              .then((output) => normalizeOutput(output, this.#limits, toolCallId));
             void invocation.then(release, release);
-            const content = await raceWithSignal(invocation, controller.signal);
-            return resultForExecution(toolCallId, name, content);
+            const normalized = await raceWithSignal(invocation, controller.signal);
+            return resultForExecution(
+              toolCallId,
+              name,
+              normalized.content,
+              normalized.citationRecords,
+            );
           } catch (error: unknown) {
             if (error instanceof ExecutionCancelled) {
               return errorResult(
@@ -674,6 +764,7 @@ function resultForExecution(
   toolCallId: string,
   name: string,
   content: ToolResultContentPart[],
+  citationRecords?: CitationRecordSet,
 ): ApplicationToolResult {
-  return result(toolCallId, name, content, false);
+  return result(toolCallId, name, content, false, citationRecords);
 }

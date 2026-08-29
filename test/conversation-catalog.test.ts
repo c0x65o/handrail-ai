@@ -109,7 +109,11 @@ describe("ConversationCatalog descriptor validation", () => {
     ["tool_inputs", { query: "private" }],
     ["toolResults", [{ secret: true }]],
     ["attachment", { data: "binary" }],
+    ["bytes", [0, 1, 2]],
+    ["payload", "base64:AAAA"],
     ["content_reference", "content_ref:abc"],
+    ["file_id", "opaque-file-1"],
+    ["url", "https://storage.example/attachment"],
     ["credential", "value"],
     ["accessToken", "value"],
     ["authorization_context", { role: "admin" }],
@@ -190,6 +194,26 @@ describe("ConversationCatalog descriptor validation", () => {
       ));
     expectInvalid(() => parseConversationCatalogMetadata({ score: Infinity }));
   });
+
+  it("accepts values exactly at each structural maximum", () => {
+    expect(parseConversationCatalogMetadata({
+      ["k".repeat(CONVERSATION_CATALOG_LIMITS.metadataKeyLength)]:
+        "x".repeat(CONVERSATION_CATALOG_LIMITS.metadataStringLength),
+      list: Array.from(
+        { length: CONVERSATION_CATALOG_LIMITS.metadataArrayLength },
+        () => true,
+      ),
+      nested: { a: { b: { c: true } } },
+    })).toBeTypeOf("object");
+    expect(parseConversationCatalogMetadata(
+      Object.fromEntries(
+        Array.from(
+          { length: CONVERSATION_CATALOG_LIMITS.metadataObjectKeys },
+          (_, index) => [`safe-${index}`, true],
+        ),
+      ),
+    )).toBeTypeOf("object");
+  });
 });
 
 describe("ConversationCatalog input bounds", () => {
@@ -220,6 +244,25 @@ describe("ConversationCatalog input bounds", () => {
       parseConversationCatalogIdempotencyKey(
         "x".repeat(CONVERSATION_CATALOG_LIMITS.idempotencyKeyLength + 1),
       ));
+  });
+
+  it("accepts exact scalar maxima", () => {
+    expect(parseConversationCatalogTitle(
+      "x".repeat(CONVERSATION_CATALOG_LIMITS.titleLength),
+    )).toHaveLength(CONVERSATION_CATALOG_LIMITS.titleLength);
+    expect(parseConversationCatalogIdempotencyKey(
+      "x".repeat(CONVERSATION_CATALOG_LIMITS.idempotencyKeyLength),
+    )).toHaveLength(CONVERSATION_CATALOG_LIMITS.idempotencyKeyLength);
+    expect(parseConversationCatalogPageSize(
+      CONVERSATION_CATALOG_LIMITS.pageSizeMaximum,
+    )).toBe(CONVERSATION_CATALOG_LIMITS.pageSizeMaximum);
+    expect(parseConversationCatalogVersion(Number.MAX_SAFE_INTEGER)).toBe(
+      Number.MAX_SAFE_INTEGER,
+    );
+    expect(parseGetConversationInput({
+      authorizationContext: "host",
+      conversationId: "x".repeat(CONVERSATION_CATALOG_LIMITS.identifierLength),
+    }).conversationId).toHaveLength(CONVERSATION_CATALOG_LIMITS.identifierLength);
   });
 
   it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(

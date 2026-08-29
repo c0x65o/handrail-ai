@@ -90,6 +90,10 @@ function invocation(signal = new AbortController().signal): ProviderAdapterInvoc
 type Scenario = "text" | "tool" | "cancel" | "provider_error" | "client_error" | "policy_error";
 
 class FakeProviderAdapter implements ProviderAdapter {
+  readonly provider_context = {
+    supported: false,
+    reason: "provider_not_supported",
+  } as const;
   readonly metadata = {
     provider_id: "fake",
     model_id: "fake-model-v1",
@@ -100,6 +104,7 @@ class FakeProviderAdapter implements ProviderAdapter {
       parallel_tool_calls: false,
       reasoning: true,
       document_input: { supported: false },
+      provider_context: this.provider_context,
       context_window_tokens: 8_192,
       max_output_tokens: 1_024,
     },

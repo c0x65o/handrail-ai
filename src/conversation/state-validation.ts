@@ -289,7 +289,7 @@ function isToolCall(value: Record<string, unknown>): boolean {
     (value.started_at === null || typeof value.started_at === "string") &&
     (value.approval_required_at === null || typeof value.approval_required_at === "string") &&
     isNullableAttribution(value.attribution) &&
-    (value.result === null || isToolResult(value.result));
+    (value.result === null || isToolResult(value.result, value.tool_call_id as string));
 }
 
 function isApprovalProposal(value: Record<string, unknown>): boolean {
@@ -349,11 +349,30 @@ function isToolLoopBudgetExhaustion(value: Record<string, unknown>): boolean {
     typeof value.exhausted_at === "string" && isAttribution(value.attribution);
 }
 
-function isToolResult(value: unknown): boolean {
-  return isPlainRecord(value) && Array.isArray(value.content) &&
-    value.content.every((part) => isTextPart(part) || isJsonPart(part)) &&
-    typeof value.is_error === "boolean" && typeof value.recorded_at === "string" &&
-    isAttribution(value.attribution);
+function isToolResult(value: unknown, toolCallId: string): boolean {
+  if (!isPlainRecord(value)) return false;
+  const expectedKeys = Object.hasOwn(value, "citation_records")
+    ? ["content", "is_error", "citation_records", "recorded_at", "attribution"]
+    : ["content", "is_error", "recorded_at", "attribution"];
+  if (
+    !hasExactKeys(value, expectedKeys) ||
+    !Array.isArray(value.content) ||
+    !value.content.every((part) => isTextPart(part) || isJsonPart(part)) ||
+    typeof value.is_error !== "boolean" ||
+    typeof value.recorded_at !== "string" ||
+    !isAttribution(value.attribution)
+  ) return false;
+  if (!Object.hasOwn(value, "citation_records")) return true;
+  try {
+    const records = normalizeCitationRecords(value.citation_records);
+    return records.citations.length > 0 &&
+      JSON.stringify(records) === JSON.stringify(value.citation_records) &&
+      records.citations.every((citation) =>
+        citation.target.type === "tool_result" &&
+        citation.target.tool_call_id === toolCallId);
+  } catch {
+    return false;
+  }
 }
 
 function isUsageLink(value: Record<string, unknown>): boolean {

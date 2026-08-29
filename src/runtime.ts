@@ -55,6 +55,25 @@ import {
   parseNormalizedUsageReceipt,
   type NormalizedUsageReceipt,
 } from "./usage.js";
+import {
+  assessProviderContextCheckpoint,
+  createProviderContextFingerprint,
+  normalizeProviderContextError,
+  parseProviderContextCompactionResult,
+  parseProviderContextIdempotencyKey,
+  parseProviderContextMeasurementResult,
+  type ProviderContextCapability,
+  type ProviderContextCheckpoint,
+  type ProviderContextFingerprint,
+  type ProviderContextFingerprintInput,
+  type ProviderContextHistoryPosition,
+  type ProviderContextIdempotencyKey,
+} from "./provider-context.js";
+import {
+  ProviderContextCheckpointStoreError,
+  type ProviderContextCheckpointRecord,
+  type ProviderContextCheckpointStore,
+} from "./provider-context-checkpoint-store.js";
 
 /*
  * Runtime append retries are deliberately separate from provider retries. A
@@ -62,6 +81,7 @@ import {
  * changing canonical log must still reject in bounded time.
  */
 const MAX_RUNTIME_APPEND_REVISION_RETRIES = 2;
+const MAX_PROVIDER_CONTEXT_RETRY_ATTEMPTS = 10;
 
 const RUNTIME_METADATA_KEY = "handrail_runtime";
 
@@ -72,6 +92,46 @@ export type ConversationRuntimeIdKind =
   | "mutation"
   | "event"
   | "idempotency";
+
+export interface ConversationRuntimeProviderContextThresholdPolicy {
+  /** Compact when the measured provider input reaches this many tokens. */
+  readonly compactAtInputTokens: number;
+  /** Ask the provider capability to compact to no more than this many tokens. */
+  readonly targetInputTokens: number;
+  /** Bounded attempts for explicitly retryable capability/store failures. Defaults to 3. */
+  readonly maximumAttempts?: number;
+}
+
+export interface ConversationRuntimeProviderContextProjectionInput<TRequest> {
+  readonly request: TRequest;
+  readonly state: ConversationState;
+  readonly checkpoint: ProviderContextCheckpoint | null;
+}
+
+export interface ConversationRuntimeProviderContextProjection<TRequest, TProviderInput> {
+  /** Ephemeral input passed only to the provider-context capability. */
+  readonly input: TProviderInput;
+  /** Transport request with the supplied checkpoint applied, or the canonical request. */
+  readonly request: TRequest;
+}
+
+/**
+ * Optional provider-neutral acceleration for initial turn starts. Canonical
+ * conversation events remain authoritative and are never stored here.
+ */
+export interface ConversationRuntimeProviderContextOptions<TRequest, TProviderInput = unknown> {
+  readonly capability: ProviderContextCapability<TProviderInput>;
+  readonly checkpointStore: ProviderContextCheckpointStore;
+  readonly threshold: ConversationRuntimeProviderContextThresholdPolicy;
+  readonly fingerprintInput:
+    | ProviderContextFingerprintInput
+    | ((input: Readonly<{ request: TRequest; state: ConversationState }>) =>
+        ProviderContextFingerprintInput | Promise<ProviderContextFingerprintInput>);
+  readonly project: (
+    input: ConversationRuntimeProviderContextProjectionInput<TRequest>,
+  ) => ConversationRuntimeProviderContextProjection<TRequest, TProviderInput> |
+    Promise<ConversationRuntimeProviderContextProjection<TRequest, TProviderInput>>;
+}
 
 export interface ConversationRuntimeOptions<TRequest> {
   readonly conversationId: ConversationId;
@@ -86,6 +146,8 @@ export interface ConversationRuntimeOptions<TRequest> {
   readonly replayBatchSize?: number;
   /** Bounded retry behavior. Defaults to createRetryPolicy(). */
   readonly retryPolicy?: RetryPolicy;
+  /** Optional provider-context acceleration. Unsupported capabilities are a no-op. */
+  readonly providerContext?: ConversationRuntimeProviderContextOptions<TRequest, unknown>;
 }
 
 export interface ConversationRuntimeSendMessageInput<TRequest> {
@@ -132,6 +194,7 @@ export interface ConversationRuntimeContinueTurnInput<TRequest> {
 export type ConversationRuntimeToolLoopEvent = Extract<
   ConversationEventPayload,
   { readonly type:
+    | "citation.records_linked"
     | "tool_call.discovered"
     | "tool_call.started"
     | "tool_call.approval_required"
@@ -249,6 +312,13 @@ class CancellationRequestedError extends Error {
   constructor() {
     super("Authoritative turn cancellation was requested");
     this.name = "CancellationRequestedError";
+  }
+}
+
+class ProviderContextPreflightCancelledError extends Error {
+  constructor() {
+    super("The provider-context operation was cancelled.");
+    this.name = "ProviderContextPreflightCancelledError";
   }
 }
 
@@ -722,7 +792,7 @@ export async function createConversationRuntime<TRequest>(
   const runTurnWithRetry = (
     turnId: ConversationTurnId,
     operationKind: RetryOperationKind,
-    attemptOperation: () => Promise<RetryOperationResult<
+    attemptOperation: (signal: AbortSignal) => Promise<RetryOperationResult<
       ConversationRuntimeTurnResult,
       RuntimeRetryFailure
     >>,
@@ -734,7 +804,7 @@ export async function createConversationRuntime<TRequest>(
     const operation = (async () => {
       try {
         const execution = await executeWithRetry(
-          () => attemptOperation(),
+          () => attemptOperation(controller.signal),
           {
           policy: retryPolicy,
           signal: controller.signal,
@@ -795,6 +865,13 @@ export async function createConversationRuntime<TRequest>(
           return result(turnId, "interrupted", {
             code: "cancellation_requested",
             message: "Authoritative cancellation was requested while retrying",
+            retryable: false,
+          });
+        }
+        if (cause instanceof ProviderContextPreflightCancelledError) {
+          return result(turnId, "interrupted", {
+            code: "cancelled",
+            message: "The provider-context operation was cancelled.",
             retryable: false,
           });
         }
@@ -892,21 +969,164 @@ export async function createConversationRuntime<TRequest>(
     return startPersistedTurn(turnId, startMutationId, idempotencyKey, input.request);
   };
 
+  const prepareProviderContextRequest = async (
+    request: TRequest,
+    idempotencyKey: string,
+    signal: AbortSignal,
+  ): Promise<TRequest> => {
+    const configuration = options.providerContext;
+    if (configuration === undefined || !configuration.capability.supported) {
+      return request;
+    }
+    const capability = configuration.capability;
+    try {
+      const threshold = validateProviderContextThreshold(configuration.threshold);
+      throwIfRuntimeAborted(signal);
+      const state = store.getSnapshot();
+      const fingerprintInput = typeof configuration.fingerprintInput === "function"
+        ? await configuration.fingerprintInput({ request, state })
+        : configuration.fingerprintInput;
+      throwIfRuntimeAborted(signal);
+      const contextFingerprint = createProviderContextFingerprint(fingerprintInput);
+      const historyPosition: ProviderContextHistoryPosition = Object.freeze({
+        conversation_id: options.conversationId,
+        revision: state.revision ?? 0,
+        event_id: state.last_event_id,
+      });
+      const load = () => configuration.checkpointStore.load({
+        conversation_id: options.conversationId,
+        context_fingerprint: contextFingerprint,
+        signal,
+      });
+      let record = await retryCheckpointStoreOperation(
+        load,
+        threshold.maximumAttempts,
+        signal,
+      ).catch((cause) => providerContextFallback(cause, signal, null));
+      let checkpoint: ProviderContextCheckpoint | null = null;
+      if (record !== null) {
+        const assessment = assessProviderContextCheckpoint(record.checkpoint, {
+          provider_id: fingerprintInput.model.provider_id,
+          context_fingerprint: contextFingerprint,
+          history_position: historyPosition,
+        });
+        if (assessment.valid && validCheckpointRecordVersion(record.store_version)) {
+          checkpoint = assessment.checkpoint;
+        } else {
+          const expectedVersion = validCheckpointRecordVersion(record.store_version)
+            ? record.store_version
+            : null;
+          await invalidateProviderContextCheckpoint(
+            configuration.checkpointStore,
+            options.conversationId,
+            contextFingerprint,
+            expectedVersion,
+            providerContextIdempotencyKey(idempotencyKey, "invalidate"),
+            threshold.maximumAttempts,
+            signal,
+          );
+          record = null;
+        }
+      }
+
+      const projected = await configuration.project({ request, state, checkpoint });
+      throwIfRuntimeAborted(signal);
+      const measurement = parseProviderContextMeasurementResult(
+        await retryProviderContextOperation(
+          () => capability.measure({
+            input: projected.input,
+            context_fingerprint: contextFingerprint,
+            history_position: historyPosition,
+            checkpoint,
+            signal,
+          }),
+          threshold.maximumAttempts,
+          signal,
+        ),
+      );
+      if (!providerContextPositionMatches(
+        measurement.context_fingerprint,
+        measurement.history_position,
+        contextFingerprint,
+        historyPosition,
+      )) {
+        return request;
+      }
+      if (measurement.input_tokens < threshold.compactAtInputTokens) {
+        return projected.request;
+      }
+
+      const compactionKey = providerContextIdempotencyKey(idempotencyKey, "compact");
+      const compacted = parseProviderContextCompactionResult(
+        await retryProviderContextOperation(
+          () => capability.compact({
+            input: projected.input,
+            context_fingerprint: contextFingerprint,
+            history_position: historyPosition,
+            checkpoint,
+            signal,
+            idempotency_key: compactionKey,
+            target_input_tokens: threshold.targetInputTokens,
+          }),
+          threshold.maximumAttempts,
+          signal,
+        ),
+      );
+      if (compacted.status === "invalidated") {
+        if (checkpoint !== null) {
+          await invalidateProviderContextCheckpoint(
+            configuration.checkpointStore,
+            options.conversationId,
+            contextFingerprint,
+            record?.store_version ?? null,
+            providerContextIdempotencyKey(idempotencyKey, "invalidate-result"),
+            threshold.maximumAttempts,
+            signal,
+          );
+        }
+        return request;
+      }
+      if (!providerContextPositionMatches(
+        compacted.measurement.context_fingerprint,
+        compacted.measurement.history_position,
+        contextFingerprint,
+        historyPosition,
+      )) {
+        return request;
+      }
+
+      const effectiveCheckpoint = compacted.checkpoint;
+      if (compacted.status === "compacted" && effectiveCheckpoint !== null) {
+        await saveProviderContextCheckpoint(
+          configuration.checkpointStore,
+          effectiveCheckpoint,
+          fingerprintInput.model.provider_id,
+          record,
+          providerContextIdempotencyKey(idempotencyKey, "save"),
+          threshold.maximumAttempts,
+          signal,
+        );
+      }
+      throwIfRuntimeAborted(signal);
+      return (await configuration.project({
+        request,
+        state,
+        checkpoint: effectiveCheckpoint,
+      })).request;
+    } catch (cause) {
+      return providerContextFallback(cause, signal, request);
+    }
+  };
+
   const startPersistedTurn = (
     turnId: ConversationTurnId,
     startMutationId: ConversationClientMutationId,
     idempotencyKey: string,
     request: TRequest,
   ): Promise<ConversationRuntimeTurnResult> => {
-    const startInput = Object.freeze({
-      conversationId: options.conversationId,
-      conversationTurnId: turnId,
-      mutationId: startMutationId,
-      idempotencyKey,
-      request,
-    });
     const protocol = protocolState(protocolByTurn, turnId);
-    return runTurnWithRetry(turnId, "start", async () => {
+    let preparedRequest: Promise<TRequest> | null = null;
+    return runTurnWithRetry(turnId, "start", async (signal) => {
       if (protocol.transportTurnId !== null) {
         const resumed = await options.transport.resumeTurn({
           conversationId: options.conversationId,
@@ -930,6 +1150,20 @@ export async function createConversationRuntime<TRequest>(
         );
       }
 
+      preparedRequest ??= prepareProviderContextRequest(
+        request,
+        idempotencyKey,
+        signal,
+      );
+      const projectedRequest = await preparedRequest;
+      throwIfRuntimeAborted(signal);
+      const startInput = Object.freeze({
+        conversationId: options.conversationId,
+        conversationTurnId: turnId,
+        mutationId: startMutationId,
+        idempotencyKey,
+        request: projectedRequest,
+      });
       const started = await options.transport.startTurn(startInput);
       if (!started.ok) {
         const outcome = result(turnId, "failed", started.error);
@@ -1020,13 +1254,15 @@ export async function createConversationRuntime<TRequest>(
     events: readonly ConversationRuntimeToolLoopEvent[],
   ): Promise<void> => {
     assertUsable();
-    await persist(events.map((payload): EventDraft => ({
-      actor: {
-        type: payload.type === "tool_loop.budget_exhausted" ? "system" : "tool",
-      },
-      source: runtimeSource(),
-      payload,
-    })));
+    await persistGenerated(() => events
+      .filter((payload) => !toolLoopEventAlreadyRecorded(store.getSnapshot(), payload))
+      .map((payload): EventDraft => ({
+        actor: {
+          type: payload.type === "tool_loop.budget_exhausted" ? "system" : "tool",
+        },
+        source: runtimeSource(),
+        payload,
+      })));
   };
 
   const stopObserving = (turnId: ConversationTurnId): boolean => {
@@ -1184,11 +1420,226 @@ export async function createConversationRuntime<TRequest>(
   });
 }
 
+function validateProviderContextThreshold(
+  value: ConversationRuntimeProviderContextThresholdPolicy,
+): Required<ConversationRuntimeProviderContextThresholdPolicy> {
+  const maximumAttempts = value.maximumAttempts ?? 3;
+  if (
+    !Number.isSafeInteger(value.compactAtInputTokens) ||
+    value.compactAtInputTokens <= 0 ||
+    !Number.isSafeInteger(value.targetInputTokens) ||
+    value.targetInputTokens <= 0 ||
+    value.targetInputTokens > value.compactAtInputTokens ||
+    !Number.isSafeInteger(maximumAttempts) ||
+    maximumAttempts <= 0 ||
+    maximumAttempts > MAX_PROVIDER_CONTEXT_RETRY_ATTEMPTS
+  ) {
+    throw new TypeError("The provider-context threshold policy is invalid");
+  }
+  return Object.freeze({
+    compactAtInputTokens: value.compactAtInputTokens,
+    targetInputTokens: value.targetInputTokens,
+    maximumAttempts,
+  });
+}
+
+function throwIfRuntimeAborted(signal: AbortSignal): void {
+  if (!signal.aborted) return;
+  throw signal.reason ?? new ProviderContextPreflightCancelledError();
+}
+
+function providerContextFallback<T>(
+  cause: unknown,
+  signal: AbortSignal,
+  fallback: T,
+): T {
+  throwIfRuntimeAborted(signal);
+  if (normalizeProviderContextError(cause, signal).code === "cancelled") {
+    throw new ProviderContextPreflightCancelledError();
+  }
+  return fallback;
+}
+
+async function retryProviderContextOperation<T>(
+  operation: () => Promise<T>,
+  maximumAttempts: number,
+  signal: AbortSignal,
+): Promise<T> {
+  for (let attempt = 1; ; attempt += 1) {
+    throwIfRuntimeAborted(signal);
+    try {
+      return await operation();
+    } catch (cause) {
+      throwIfRuntimeAborted(signal);
+      const safe = normalizeProviderContextError(cause, signal);
+      if (!safe.retryable || attempt >= maximumAttempts) throw safe;
+    }
+  }
+}
+
+async function retryCheckpointStoreOperation<T>(
+  operation: () => Promise<T>,
+  maximumAttempts: number,
+  signal: AbortSignal,
+): Promise<T> {
+  for (let attempt = 1; ; attempt += 1) {
+    throwIfRuntimeAborted(signal);
+    try {
+      return await operation();
+    } catch (cause) {
+      throwIfRuntimeAborted(signal);
+      if (
+        !(cause instanceof ProviderContextCheckpointStoreError) ||
+        !cause.retryable ||
+        attempt >= maximumAttempts
+      ) {
+        throw cause;
+      }
+    }
+  }
+}
+
+async function invalidateProviderContextCheckpoint(
+  store: ProviderContextCheckpointStore,
+  conversationId: string,
+  contextFingerprint: ProviderContextFingerprint,
+  expectedVersion: number | null,
+  idempotencyKey: ProviderContextIdempotencyKey,
+  maximumAttempts: number,
+  signal: AbortSignal,
+): Promise<void> {
+  try {
+    await retryCheckpointStoreOperation(
+      () => store.invalidate({
+        conversation_id: conversationId,
+        context_fingerprint: contextFingerprint,
+        expected_version: expectedVersion,
+        idempotency_key: idempotencyKey,
+        signal,
+      }),
+      maximumAttempts,
+      signal,
+    );
+  } catch (cause) {
+    providerContextFallback(cause, signal, undefined);
+  }
+}
+
+async function saveProviderContextCheckpoint(
+  store: ProviderContextCheckpointStore,
+  checkpoint: ProviderContextCheckpoint,
+  providerId: string,
+  initialRecord: ProviderContextCheckpointRecord | null,
+  idempotencyKey: ProviderContextIdempotencyKey,
+  maximumAttempts: number,
+  signal: AbortSignal,
+): Promise<ProviderContextCheckpoint> {
+  let expectedVersion = initialRecord?.store_version ?? null;
+  for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
+    throwIfRuntimeAborted(signal);
+    try {
+      const saved = await store.save({
+        conversation_id: checkpoint.history_position.conversation_id,
+        context_fingerprint: checkpoint.context_fingerprint,
+        checkpoint,
+        expected_version: expectedVersion,
+        idempotency_key: idempotencyKey,
+        signal,
+      });
+      return saved.checkpoint;
+    } catch (cause) {
+      throwIfRuntimeAborted(signal);
+      if (
+        cause instanceof ProviderContextCheckpointStoreError &&
+        cause.code === "version_conflict"
+      ) {
+        let current: ProviderContextCheckpointRecord | null;
+        try {
+          current = await retryCheckpointStoreOperation(
+            () => store.load({
+              conversation_id: checkpoint.history_position.conversation_id,
+              context_fingerprint: checkpoint.context_fingerprint,
+              signal,
+            }),
+            maximumAttempts,
+            signal,
+          );
+        } catch (loadCause) {
+          return providerContextFallback(loadCause, signal, checkpoint);
+        }
+        if (current !== null) {
+          const assessment = assessProviderContextCheckpoint(current.checkpoint, {
+            provider_id: providerId,
+            context_fingerprint: checkpoint.context_fingerprint,
+            history_position: checkpoint.history_position,
+          });
+          if (
+            assessment.valid &&
+            assessment.checkpoint.history_position.revision ===
+              checkpoint.history_position.revision &&
+            assessment.checkpoint.history_position.event_id ===
+              checkpoint.history_position.event_id
+          ) {
+            return assessment.checkpoint;
+          }
+          expectedVersion = validCheckpointRecordVersion(current.store_version)
+            ? current.store_version
+            : null;
+          continue;
+        }
+        expectedVersion = null;
+        continue;
+      }
+      if (
+        cause instanceof ProviderContextCheckpointStoreError &&
+        cause.retryable &&
+        attempt < maximumAttempts
+      ) {
+        continue;
+      }
+      return providerContextFallback(cause, signal, checkpoint);
+    }
+  }
+  return checkpoint;
+}
+
+function validCheckpointRecordVersion(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) > 0;
+}
+
+function providerContextPositionMatches(
+  actualFingerprint: ProviderContextFingerprint,
+  actualPosition: ProviderContextHistoryPosition,
+  expectedFingerprint: ProviderContextFingerprint,
+  expectedPosition: ProviderContextHistoryPosition,
+): boolean {
+  return actualFingerprint === expectedFingerprint &&
+    actualPosition.conversation_id === expectedPosition.conversation_id &&
+    actualPosition.revision === expectedPosition.revision &&
+    actualPosition.event_id === expectedPosition.event_id;
+}
+
+function providerContextIdempotencyKey(
+  identity: string,
+  operation: string,
+): ProviderContextIdempotencyKey {
+  let hash = 2_166_136_261;
+  const value = `${identity}\u0000${operation}`;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return parseProviderContextIdempotencyKey(
+    `provider-context:${operation}:${(hash >>> 0).toString(16).padStart(8, "0")}`,
+  );
+}
+
 function assertRebasedDraftsRemainCompatible(
   state: ConversationState,
   drafts: readonly EventDraft[],
 ): void {
   for (const { payload } of drafts) {
+    if (isPostTurnRuntimeEvidence(payload)) continue;
     if (!("turn_id" in payload) || payload.type === "turn.started") continue;
     const turn = state.turns.find((candidate) => candidate.turn_id === payload.turn_id);
     if (turn === undefined) {
@@ -1201,6 +1652,68 @@ function assertRebasedDraftsRemainCompatible(
       throw new TypeError("The canonical conversation no longer has the expected active turn");
     }
   }
+}
+
+function isPostTurnRuntimeEvidence(payload: ConversationEventPayload): boolean {
+  return payload.type === "citation.records_linked" ||
+    payload.type === "tool_call.discovered" ||
+    payload.type === "tool_call.started" ||
+    payload.type === "tool_call.approval_required" ||
+    payload.type === "tool_call.result_recorded" ||
+    payload.type === "tool_loop.budget_exhausted";
+}
+
+function toolLoopEventAlreadyRecorded(
+  state: ConversationState,
+  payload: ConversationRuntimeToolLoopEvent,
+): boolean {
+  if (payload.type === "tool_call.result_recorded") {
+    const result = state.tool_calls.find(
+      (call) => call.turn_id === payload.turn_id &&
+        call.tool_call_id === payload.tool_call_id,
+    )?.result;
+    if (result === null || result === undefined) return false;
+    const expected = {
+      content: payload.content,
+      is_error: payload.is_error,
+      ...(payload.citation_records === undefined
+        ? {}
+        : { citation_records: payload.citation_records }),
+    };
+    const actual = {
+      content: result.content,
+      is_error: result.is_error,
+      ...(result.citation_records === undefined
+        ? {}
+        : { citation_records: result.citation_records }),
+    };
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+      throw new TypeError("A durable tool result conflicts with a retry");
+    }
+    return true;
+  }
+  if (payload.type === "citation.records_linked") {
+    for (const source of payload.sources) {
+      const existing = state.citation_sources.find(
+        (candidate) => candidate.source_id === source.source_id,
+      );
+      if (existing === undefined) return false;
+      if (JSON.stringify(existing) !== JSON.stringify(source)) {
+        throw new TypeError("A durable citation source conflicts with a retry");
+      }
+    }
+    for (const citation of payload.citations) {
+      const existing = state.citations.find(
+        (candidate) => candidate.citation_id === citation.citation_id,
+      );
+      if (existing === undefined) return false;
+      if (JSON.stringify(existing) !== JSON.stringify(citation)) {
+        throw new TypeError("A durable citation link conflicts with a retry");
+      }
+    }
+    return true;
+  }
+  return false;
 }
 
 function normalizeMessageContent(

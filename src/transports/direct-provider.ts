@@ -22,6 +22,11 @@ import {
   UNSUPPORTED_PROVIDER_DOCUMENT_INPUT,
 } from "../providers/index.js";
 import {
+  describeProviderContextCapability,
+  parseProviderContextCapabilityDescriptor,
+  type ProviderContextCapability,
+} from "../provider-context.js";
+import {
   projectProviderUsageToReceipt,
   type KnownUsageValueStatus,
   type NormalizedUsageReceipt,
@@ -33,6 +38,7 @@ import type {
   AuthoritativeCancelTurnResult,
   CancelTurnInput,
   ConversationTransport,
+  ConversationTransportCapabilities,
   StartTurnInput,
   TransportError,
   TransportResult,
@@ -110,6 +116,10 @@ export interface DirectProviderTurnHandle
 
 export interface DirectProviderTransport
   extends ConversationTransport<StreamEvent, ChatRequest> {
+  readonly capabilities: ConversationTransportCapabilities & {
+    /** Provider-context operations negotiated directly from the configured adapter. */
+    readonly providerContext: ProviderContextCapability;
+  };
   startTurn(
     input: StartTurnInput<ChatRequest>,
   ): Promise<TransportResult<DirectProviderTurnHandle>>;
@@ -469,6 +479,28 @@ export function createDirectProviderTransport(
       options.resolveDocumentReference !== undefined)
       ? providerDocumentInput
       : UNSUPPORTED_PROVIDER_DOCUMENT_INPUT;
+  const declaredProviderContext = parseProviderContextCapabilityDescriptor(
+    options.adapter.metadata.capabilities.provider_context,
+  );
+  const operationalProviderContext = describeProviderContextCapability(
+    options.adapter.provider_context,
+  );
+  if (
+    declaredProviderContext.supported !== operationalProviderContext.supported ||
+    (declaredProviderContext.supported &&
+      operationalProviderContext.supported &&
+      declaredProviderContext.version !== operationalProviderContext.version) ||
+    (!declaredProviderContext.supported &&
+      !operationalProviderContext.supported &&
+      declaredProviderContext.reason !== operationalProviderContext.reason)
+  ) {
+    throw new TypeError(
+      "provider-context metadata must match the adapter capability",
+    );
+  }
+  const providerContext = operationalProviderContext.supported
+    ? options.adapter.provider_context
+    : operationalProviderContext;
   const turns = new Map<string, ActiveTurn>();
   const turnKey = (conversationId: string, turnId: string): string =>
     `${conversationId.length}:${conversationId}${turnId}`;
@@ -498,6 +530,7 @@ export function createDirectProviderTransport(
         capability: { cancelTurn },
       },
       documentInput,
+      providerContext,
       attachmentUpload: { supported: false },
       presence: { supported: false },
       synchronization: { supported: false },

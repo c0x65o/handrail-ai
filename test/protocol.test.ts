@@ -660,6 +660,76 @@ describe("chat request protocol", () => {
     expect(() => parseChatRequest(malformedContent)).toThrow(/value/);
   });
 
+  it("accepts only normalized tool-result citation projections linked to that call", () => {
+    const cited = request();
+    cited.continuation_of = "req_previous";
+    cited.tool_results.push({
+      tool_call_id: "call_1",
+      name: "lookup_order",
+      content: [{ type: "text", text: "safe result" }],
+      is_error: false,
+      citation_records: {
+        sources: [{
+          source_id: "source_1",
+          type: "web",
+          label: "Example",
+          locator: "https://example.com/source",
+        }],
+        citations: [{
+          citation_id: "citation_1",
+          source_id: "source_1",
+          order: 0,
+          target: { type: "tool_result", tool_call_id: "call_1" },
+        }],
+      },
+    });
+    expect(parseChatRequest(cited).tool_results[0]).toBe(cited.tool_results[0]);
+
+    for (const citationRecords of [
+      {
+        sources: [{
+          source_id: "source_1",
+          type: "web",
+          label: "Private",
+          locator: "http://127.0.0.1/private",
+        }],
+        citations: [{
+          citation_id: "citation_1",
+          source_id: "source_1",
+          order: 0,
+          target: { type: "tool_result", tool_call_id: "call_1" },
+        }],
+      },
+      {
+        sources: [{
+          source_id: "source_1",
+          type: "web",
+          label: "Native",
+          provider_payload: { annotation: "private" },
+        }],
+        citations: [{
+          citation_id: "citation_1",
+          source_id: "source_1",
+          order: 0,
+          target: { type: "tool_result", tool_call_id: "call_1" },
+        }],
+      },
+      {
+        sources: [{ source_id: "source_1", type: "tool", label: "Other" }],
+        citations: [{
+          citation_id: "citation_1",
+          source_id: "source_1",
+          order: 0,
+          target: { type: "tool_result", tool_call_id: "call_other" },
+        }],
+      },
+    ]) {
+      const invalid = structuredClone(cited);
+      invalid.tool_results[0]!.citation_records = citationRecords;
+      expect(() => parseChatRequest(invalid)).toThrow(/citation_records/);
+    }
+  });
+
   it("rejects credential-bearing fields throughout public request data", () => {
     const fixtures = [
       { ...request(), metadata: { api_key: "not-allowed" } },

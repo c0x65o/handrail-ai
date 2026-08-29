@@ -19,6 +19,7 @@ export {
 export {
   useConversationComposer,
   type ConversationComposerAttachment,
+  type ConversationComposerAttachmentIntakeOptions,
   type ConversationComposerAttachmentStatus,
   type ConversationComposerDropProps,
   type ConversationComposerEnterBehavior,

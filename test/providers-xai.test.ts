@@ -124,9 +124,17 @@ describe("XAIProviderAdapter", () => {
         parallel_tool_calls: false,
         reasoning: true,
         document_input: { supported: false },
+        provider_context: {
+          supported: false,
+          reason: "provider_not_supported",
+        },
         context_window_tokens: null,
         max_output_tokens: null,
       },
+    });
+    expect(adapter.provider_context).toEqual({
+      supported: false,
+      reason: "provider_not_supported",
     });
     expect(request).toHaveBeenCalledOnce();
     expect(output.result).toMatchObject({ status: "completed", outcome: "stop" });

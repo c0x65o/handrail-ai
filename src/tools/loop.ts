@@ -1,4 +1,6 @@
 import type { ConversationToolCallRecord } from "../conversation/state.js";
+import { CONVERSATION_CITATION_RECORDS_VERSION } from "../conversation/events.js";
+import type { CitationRecordSet } from "../citations.js";
 import {
   parseChatRequest,
   type ApplicationToolResult,
@@ -118,7 +120,32 @@ function resultFromDurableCall(call: ConversationToolCallRecord): ApplicationToo
       ? { type: "text", text: part.text }
       : { type: "json", value: cloneProtocolJson(part.value) }),
     is_error: call.result.is_error,
+    ...(call.result.citation_records === undefined
+      ? {}
+      : { citation_records: call.result.citation_records }),
   };
+}
+
+function providerToolResult(result: ApplicationToolResult): ApplicationToolResult {
+  return {
+    tool_call_id: result.tool_call_id,
+    name: result.name,
+    content: result.content,
+    is_error: result.is_error,
+  };
+}
+
+function citationRecordsAreLinked(
+  records: CitationRecordSet,
+  snapshot: ReturnType<ConversationRuntime<ChatRequest>["getSnapshot"]>,
+): boolean {
+  return records.sources.every((source) => snapshot.citation_sources.some(
+    (candidate) => candidate.source_id === source.source_id &&
+      JSON.stringify(candidate) === JSON.stringify(source),
+  )) && records.citations.every((citation) => snapshot.citations.some(
+    (candidate) => candidate.citation_id === citation.citation_id &&
+      JSON.stringify(candidate) === JSON.stringify(citation),
+  ));
 }
 
 function cloneProtocolJson(value: unknown): JsonValue {
@@ -367,6 +394,9 @@ export async function runToolLoop<TContext = unknown, TDiscoveryContext = unknow
         tool_call_id: result.tool_call_id as never,
         content: result.content,
         is_error: result.is_error,
+        ...(result.citation_records === undefined
+          ? {}
+          : { citation_records: result.citation_records }),
       }));
     const approvalEvents = [...approvals]
       .filter((id) => latest.tool_calls.find((call) => call.tool_call_id === id)
@@ -376,7 +406,31 @@ export async function runToolLoop<TContext = unknown, TDiscoveryContext = unknow
         turn_id: turn.turnId,
         tool_call_id: id as never,
       }));
-    await recordEvents([...resultEvents, ...approvalEvents]);
+    await recordEvents(resultEvents);
+
+    const afterResults = options.runtime.getSnapshot();
+    const citationEvents = calls
+      .map((call) => afterResults.tool_calls.find(
+        (candidate) => candidate.turn_id === turn.turnId &&
+          candidate.tool_call_id === call.tool_call_id,
+      ))
+      .filter((call): call is ConversationToolCallRecord =>
+        call?.result?.citation_records !== undefined)
+      .filter((call) =>
+        !citationRecordsAreLinked(call.result!.citation_records!, afterResults))
+      .map((call) => ({
+        type: "citation.records_linked" as const,
+        citation_records_version: CONVERSATION_CITATION_RECORDS_VERSION,
+        target: {
+          type: "tool_result" as const,
+          turn_id: turn.turnId,
+          tool_call_id: call.tool_call_id,
+        },
+        sources: [...call.result!.citation_records!.sources],
+        citations: [...call.result!.citation_records!.citations],
+      }));
+    await recordEvents(citationEvents);
+    await recordEvents(approvalEvents);
 
     if (approvals.size > 0) {
       return Object.freeze({
@@ -396,7 +450,7 @@ export async function runToolLoop<TContext = unknown, TDiscoveryContext = unknow
     const continuation = parseChatRequest({
       ...request,
       continuation_of: turn.requestId,
-      tool_results: calls.map((call) => results.get(call.tool_call_id)!),
+      tool_results: calls.map((call) => providerToolResult(results.get(call.tool_call_id)!)),
     });
     if (aborted()) return Object.freeze({ ...base(), status: "cancelled" });
     request = continuation;

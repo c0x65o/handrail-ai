@@ -24,7 +24,10 @@ import {
   type OpenAIProviderContextInput,
   type OpenAIProviderContextMeasureRequestFunction,
 } from "./openai-context.js";
-import type { ProviderContextCapability } from "../provider-context.js";
+import {
+  describeProviderContextCapability,
+  type ProviderContextCapability,
+} from "../provider-context.js";
 
 export * from "./openai-context.js";
 
@@ -454,6 +457,7 @@ export class OpenAIProviderAdapter implements ProviderAdapter {
         parallel_tool_calls: false,
         reasoning: true,
         document_input: { supported: false },
+        provider_context: describeProviderContextCapability(this.provider_context),
         context_window_tokens: options.context_window_tokens ?? null,
         max_output_tokens: options.max_output_tokens ?? null,
       },

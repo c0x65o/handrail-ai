@@ -9,6 +9,10 @@ import {
   type ProtocolMetadata,
   type StreamEvent,
 } from "../protocol.js";
+import {
+  PROVIDER_CONTEXT_NOT_SUPPORTED,
+  type ProviderContextCapability,
+} from "../provider-context.js";
 import type {
   ClientRequestError,
   ProviderAdapter,
@@ -560,6 +564,7 @@ function envelope(
 
 export class AnthropicProviderAdapter implements ProviderAdapter {
   readonly metadata: ProviderAdapterMetadata;
+  readonly provider_context: ProviderContextCapability = PROVIDER_CONTEXT_NOT_SUPPORTED;
   private readonly request: AnthropicMessagesRequestFunction;
   private readonly resolveImageReference:
     | AnthropicImageReferenceResolver
@@ -584,6 +589,7 @@ export class AnthropicProviderAdapter implements ProviderAdapter {
         parallel_tool_calls: false,
         reasoning: options.supports_reasoning ?? true,
         document_input: { supported: false },
+        provider_context: this.provider_context,
         context_window_tokens: options.context_window_tokens ?? null,
         max_output_tokens: options.max_output_tokens ?? null,
       },

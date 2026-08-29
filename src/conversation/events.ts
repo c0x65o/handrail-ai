@@ -9,6 +9,7 @@ import {
 import {
   normalizeCitationRecords,
   type Citation,
+  type CitationRecordSet,
   type CitationSource,
 } from "../citations.js";
 
@@ -466,6 +467,8 @@ export interface ToolCallResultRecordedPayload {
   tool_call_id: ConversationToolCallId;
   content: ConversationToolResultContentPart[];
   is_error: boolean;
+  /** Durable recovery state until the separate citation link event is accepted. */
+  citation_records?: CitationRecordSet;
 }
 
 export interface ConversationAssistantMessageCitationTarget {
@@ -1636,7 +1639,14 @@ function validatePayload(
       );
       allowedKeys(
         object,
-        ["type", "turn_id", "tool_call_id", "content", "is_error"],
+        [
+          "type",
+          "turn_id",
+          "tool_call_id",
+          "content",
+          "is_error",
+          "citation_records",
+        ],
         path,
       );
       identifier(object.turn_id, `${path}.turn_id`);
@@ -1648,6 +1658,37 @@ function validatePayload(
         validateToolResultPart(part, `${path}.content[${index}]`),
       );
       booleanValue(object.is_error, `${path}.is_error`);
+      if (Object.hasOwn(object, "citation_records")) {
+        let records: CitationRecordSet;
+        try {
+          records = normalizeCitationRecords(object.citation_records);
+        } catch (error) {
+          fail(
+            `${path}.citation_records`,
+            error instanceof Error ? error.message : "contains invalid citation records",
+          );
+        }
+        if (records.citations.length === 0) {
+          fail(`${path}.citation_records.citations`, "must contain at least one citation link");
+        }
+        if (JSON.stringify(records) !== JSON.stringify(object.citation_records)) {
+          fail(
+            `${path}.citation_records`,
+            "must already be normalized and identity-deduplicated",
+          );
+        }
+        for (const citation of records.citations) {
+          if (
+            citation.target.type !== "tool_result" ||
+            citation.target.tool_call_id !== object.tool_call_id
+          ) {
+            fail(
+              `${path}.citation_records.citations`,
+              "must contain only links to this tool result",
+            );
+          }
+        }
+      }
       return;
     case "tool_loop.budget_exhausted":
       requiredKeys(object, ["turn_id", "budget", "limit"], path);

@@ -319,7 +319,7 @@ function useExampleComposer(
       attachmentContentRefs: attachments.map((attachment) => attachment.content_ref),
     }),
     enterBehavior: "send",
-    imageIntake: { previews: false },
+    attachmentIntake: { previews: false },
     onCancel: stop,
   });
 }
@@ -348,7 +348,7 @@ function ConversationBody({
         />
       </div>
       <Composer className={`${className}__composer`}>
-        <AttachmentList aria-label="Pending image attachments" />
+        <AttachmentList aria-label="Pending attachments" />
         <ErrorList />
         <Form aria-label="Send a support message">
           <label>
@@ -356,8 +356,8 @@ function ConversationBody({
             <Textarea aria-label="Message" placeholder="Write a message" />
           </label>
           <label>
-            Add images
-            <FileInput aria-label="Attach images" />
+            Add attachments
+            <FileInput aria-label="Attach files" />
           </label>
           <Submit>Send</Submit>
           <Stop>Stop</Stop>
@@ -530,12 +530,12 @@ function CustomHooksChat({ runtime, uploader }: ReactPresentationRecipeProps) {
       </div>
       <ul aria-label="People in this conversation"><li>Support agent online</li></ul>
       <p role="status" aria-live="polite" aria-label="Typing status">Support agent is typing.</p>
-      <ul aria-label="Pending image attachments">
+      <ul aria-label="Pending attachments">
         {composer.attachments.map((attachment) => (
           <li key={attachment.id}>
             {attachment.filename ?? attachment.mediaType}
             <button type="button" onClick={() => composer.removeAttachment(attachment.id)}>
-              Remove {attachment.filename ?? "image"}
+              Remove {attachment.filename ?? "attachment"}
             </button>
           </li>
         ))}
@@ -546,8 +546,8 @@ function CustomHooksChat({ runtime, uploader }: ReactPresentationRecipeProps) {
           <textarea aria-label="Custom message" {...composer.getTextareaProps()} />
         </label>
         <label>
-          Add images
-          <input type="file" aria-label="Attach custom images" {...composer.getFileInputProps()} />
+          Add attachments
+          <input type="file" aria-label="Attach custom files" {...composer.getFileInputProps()} />
         </label>
         <button type="submit" disabled={!composer.canSend || composer.isSending}>Send</button>
         <button type="button" disabled={activeTurnId === null} onClick={() => void composer.stop()}>

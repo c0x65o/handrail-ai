@@ -194,6 +194,25 @@ function attachmentName(attachment: AttachmentPrimitiveValue): string {
     ("mediaType" in attachment ? attachment.mediaType : attachmentId(attachment));
 }
 
+function isComposerAttachment(
+  attachment: AttachmentPrimitiveValue,
+): attachment is ConversationComposerAttachment {
+  return "progress" in attachment && "status" in attachment && "kind" in attachment;
+}
+
+function attachmentKind(attachment: AttachmentPrimitiveValue): "image" | "document" {
+  if (isComposerAttachment(attachment)) return attachment.kind;
+  return attachmentReference(attachment)?.media_type === "application/pdf"
+    ? "document"
+    : "image";
+}
+
+function attachmentMediaType(attachment: AttachmentPrimitiveValue): string {
+  return isComposerAttachment(attachment)
+    ? attachment.mediaType
+    : attachmentReference(attachment)?.media_type ?? "unknown";
+}
+
 function latestTurn(state: ConversationState | undefined): ConversationTurnRecord | undefined {
   if (!state || state.turns.length === 0) return undefined;
   if (state.active_turn_id !== null) {
@@ -686,7 +705,9 @@ export const TypingIndicator = forwardRef<HTMLSpanElement, TypingIndicatorProps>
 
 interface AttachmentContextValue {
   readonly attachment: AttachmentPrimitiveValue;
+  readonly onCancel?: (attachmentId: string) => void | boolean | Promise<void | boolean>;
   readonly onRemove?: (attachmentId: string) => void | boolean | Promise<void | boolean>;
+  readonly onRetry?: (attachmentId: string) => void | boolean | Promise<void | boolean>;
 }
 
 const AttachmentContext = createContext<AttachmentContextValue | null>(null);
@@ -696,7 +717,9 @@ export interface AttachmentListProps
   attachments?: readonly AttachmentPrimitiveValue[];
   children?: ReactNode;
   composer?: ConversationComposerResult;
+  onCancel?: (attachmentId: string) => void | boolean | Promise<void | boolean>;
   onRemove?: (attachmentId: string) => void | boolean | Promise<void | boolean>;
+  onRetry?: (attachmentId: string) => void | boolean | Promise<void | boolean>;
   renderAttachment?: AttachmentRenderer;
   renderError?: ErrorRenderer;
 }
@@ -707,7 +730,9 @@ export const AttachmentList = forwardRef<HTMLUListElement, AttachmentListProps>(
       attachments: explicitAttachments,
       children,
       composer: explicitComposer,
+      onCancel,
       onRemove,
+      onRetry,
       renderAttachment,
       renderError,
       ...props
@@ -716,7 +741,9 @@ export const AttachmentList = forwardRef<HTMLUListElement, AttachmentListProps>(
   ) {
     const composer = useResolvedComposer(explicitComposer);
     const attachments = explicitAttachments ?? composer?.attachments ?? [];
+    const cancel = onCancel ?? composer?.cancelAttachment;
     const remove = onRemove ?? composer?.removeAttachment;
+    const retry = onRetry ?? composer?.retryAttachment;
     return (
       <ul
         {...props}
@@ -728,7 +755,9 @@ export const AttachmentList = forwardRef<HTMLUListElement, AttachmentListProps>(
             key={attachmentId(attachment)}
             attachment={attachment}
             index={index}
+            {...(cancel === undefined ? {} : { onCancel: cancel })}
             {...(remove === undefined ? {} : { onRemove: remove })}
+            {...(retry === undefined ? {} : { onRetry: retry })}
             {...(renderAttachment === undefined ? {} : { renderAttachment })}
             {...(renderError === undefined ? {} : { renderError })}
           />
@@ -742,7 +771,9 @@ export interface AttachmentItemProps extends Omit<LiHTMLAttributes<HTMLLIElement
   attachment: AttachmentPrimitiveValue;
   children?: ReactNode;
   index?: number;
+  onCancel?: (attachmentId: string) => void | boolean | Promise<void | boolean>;
   onRemove?: (attachmentId: string) => void | boolean | Promise<void | boolean>;
+  onRetry?: (attachmentId: string) => void | boolean | Promise<void | boolean>;
   renderAttachment?: AttachmentRenderer;
   renderError?: ErrorRenderer;
 }
@@ -753,7 +784,9 @@ export const AttachmentItem = forwardRef<HTMLLIElement, AttachmentItemProps>(
       attachment,
       children,
       index = 0,
+      onCancel,
       onRemove,
+      onRetry,
       renderAttachment,
       renderError,
       ...props
@@ -761,26 +794,151 @@ export const AttachmentItem = forwardRef<HTMLLIElement, AttachmentItemProps>(
     forwardedRef,
   ) {
     const value = useMemo<AttachmentContextValue>(
-      () => ({ attachment, ...(onRemove === undefined ? {} : { onRemove }) }),
-      [attachment, onRemove],
+      () => ({
+        attachment,
+        ...(onCancel === undefined ? {} : { onCancel }),
+        ...(onRemove === undefined ? {} : { onRemove }),
+        ...(onRetry === undefined ? {} : { onRetry }),
+      }),
+      [attachment, onCancel, onRemove, onRetry],
     );
     const attachmentError = "error" in attachment ? attachment.error : undefined;
+    const name = attachmentName(attachment);
+    const kind = attachmentKind(attachment);
+    const composerAttachment = isComposerAttachment(attachment) ? attachment : undefined;
     return (
       <AttachmentContext.Provider value={value}>
-        <li {...props} ref={forwardedRef}>
+        <li
+          {...props}
+          ref={forwardedRef}
+          aria-label={props["aria-label"] ?? (
+            composerAttachment === undefined
+              ? `${name}, ${kind} attachment`
+              : `${name}, ${kind} attachment, ${composerAttachment.status}`
+          )}
+        >
           {children ?? <>
             {renderAttachment
               ? renderAttachment(attachment, index)
-              : <span>{attachmentName(attachment)}</span>}
+              : <>
+                <span>{name}</span>
+                <span>Kind: {kind}</span>
+                <span>Type: {attachmentMediaType(attachment)}</span>
+                {composerAttachment === undefined ? null : <>
+                  <span role="status">Status: {composerAttachment.status}</span>
+                  <progress
+                    aria-label={`${name} upload progress`}
+                    max={Math.max(composerAttachment.progress.totalBytes, 1)}
+                    value={Math.min(
+                      composerAttachment.progress.uploadedBytes,
+                      Math.max(composerAttachment.progress.totalBytes, 1),
+                    )}
+                  />
+                </>}
+              </>}
             {attachmentError === undefined ? null : (
               <span role="alert">
                 {renderError ? renderError(attachmentError) : attachmentError.message}
               </span>
             )}
+            {composerAttachment?.retryable && onRetry ? <AttachmentRetry /> : null}
+            {composerAttachment?.cancellable && onCancel ? <AttachmentCancel /> : null}
             {onRemove === undefined ? null : <AttachmentRemove />}
           </>}
         </li>
       </AttachmentContext.Provider>
+    );
+  },
+);
+
+export interface AttachmentRetryProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+  attachment?: AttachmentPrimitiveValue;
+  attachmentId?: string;
+  onRetry?: (attachmentId: string) => void | boolean | Promise<void | boolean>;
+}
+
+export const AttachmentRetry = forwardRef<HTMLButtonElement, AttachmentRetryProps>(
+  function AttachmentRetry(
+    {
+      attachment: explicitAttachment,
+      attachmentId: explicitId,
+      children,
+      disabled,
+      onClick,
+      onRetry,
+      type,
+      ...props
+    },
+    forwardedRef,
+  ) {
+    const context = useContext(AttachmentContext);
+    const attachment = explicitAttachment ?? context?.attachment;
+    const id = explicitId ?? (attachment ? attachmentId(attachment) : undefined);
+    const retry = onRetry ?? context?.onRetry;
+    const retryable = attachment !== undefined && isComposerAttachment(attachment)
+      ? attachment.retryable
+      : true;
+    return (
+      <button
+        {...props}
+        ref={forwardedRef}
+        type={type ?? "button"}
+        disabled={Boolean(disabled || !retry || !id || !retryable)}
+        aria-label={props["aria-label"] ??
+          `Retry ${attachment ? attachmentName(attachment) : "attachment"}`}
+        onClick={(event) => {
+          onClick?.(event);
+          if (!event.defaultPrevented && retry && id) void retry(id);
+        }}
+      >
+        {children ?? "Retry"}
+      </button>
+    );
+  },
+);
+
+export interface AttachmentCancelProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+  attachment?: AttachmentPrimitiveValue;
+  attachmentId?: string;
+  onCancel?: (attachmentId: string) => void | boolean | Promise<void | boolean>;
+}
+
+export const AttachmentCancel = forwardRef<HTMLButtonElement, AttachmentCancelProps>(
+  function AttachmentCancel(
+    {
+      attachment: explicitAttachment,
+      attachmentId: explicitId,
+      children,
+      disabled,
+      onCancel,
+      onClick,
+      type,
+      ...props
+    },
+    forwardedRef,
+  ) {
+    const context = useContext(AttachmentContext);
+    const attachment = explicitAttachment ?? context?.attachment;
+    const id = explicitId ?? (attachment ? attachmentId(attachment) : undefined);
+    const cancel = onCancel ?? context?.onCancel;
+    const cancellable = attachment !== undefined && isComposerAttachment(attachment)
+      ? attachment.cancellable
+      : true;
+    return (
+      <button
+        {...props}
+        ref={forwardedRef}
+        type={type ?? "button"}
+        disabled={Boolean(disabled || !cancel || !id || !cancellable)}
+        aria-label={props["aria-label"] ??
+          `Cancel ${attachment ? attachmentName(attachment) : "attachment"}`}
+        onClick={(event) => {
+          onClick?.(event);
+          if (!event.defaultPrevented && cancel && id) void cancel(id);
+        }}
+      >
+        {children ?? "Cancel"}
+      </button>
     );
   },
 );

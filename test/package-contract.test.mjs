@@ -108,6 +108,11 @@ test("exports the conversation catalog contract from the built core entry", asyn
   assert.equal(typeof imported.paginateConversationCatalogDescriptors, "function");
   assert.equal(typeof imported.authorizeConversationCatalogRequest, "function");
   assert.equal(typeof imported.ConversationCatalogError, "function");
+  assert.equal(typeof imported.InMemoryConversationCatalog, "function");
+  assert.equal(
+    typeof imported.IN_MEMORY_CONVERSATION_CATALOG_LIMITS,
+    "object",
+  );
 });
 
 test("imports core and browser entries when React resolution is unavailable", () => {

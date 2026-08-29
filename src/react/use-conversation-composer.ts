@@ -13,16 +13,29 @@ import {
   type KeyboardEvent,
 } from "react";
 
-import type { AttachmentUploadFailure, AttachmentUploadItem } from "../attachments/types.js";
+import type {
+  AttachmentSelection,
+  AttachmentUploadFailure,
+  AttachmentUploadItem,
+  AttachmentUploadKind,
+} from "../attachments/types.js";
 import type { AttachmentUploader } from "../attachments/uploader.js";
 import {
   intakeClipboardImages,
   intakeDroppedImages,
+  intakeDroppedPdfs,
   intakeFileInputImages,
+  intakeFileInputPdfs,
   type BrowserAttachmentSource,
+  type BrowserDropImageIntakeResult,
+  type BrowserDropPdfIntakeResult,
   type BrowserImageIntakeOptions,
   type BrowserImageIntakeRejection,
+  type BrowserImageIntakeResult,
   type BrowserImagePreview,
+  type BrowserPdfIntakeOptions,
+  type BrowserPdfIntakeRejection,
+  type BrowserPdfIntakeResult,
 } from "../browser/attachments.js";
 import type {
   ConversationAttachmentId,
@@ -31,9 +44,12 @@ import type {
 } from "../conversation/events.js";
 import type { PresenceController } from "../presence/controller.js";
 import {
+  AI_RUNTIME_DOCUMENT_MIME_TYPES,
   AI_RUNTIME_IMAGE_MIME_TYPES,
   AI_RUNTIME_PROTOCOL_LIMITS,
   type AttachmentReference,
+  type AttachmentMimeType,
+  type DocumentMimeType,
   type ImageMimeType,
 } from "../protocol.js";
 import type {
@@ -48,6 +64,17 @@ export interface ConversationComposerImageIntakeOptions {
   readonly acceptedMediaTypes?: readonly ImageMimeType[];
   readonly maxFileBytes?: number;
   readonly maxSelectionCount?: number;
+  readonly previews?: BrowserImageIntakeOptions["previews"];
+}
+
+export interface ConversationComposerAttachmentIntakeOptions {
+  /** Defaults to every protocol image MIME type and application/pdf. */
+  readonly acceptedMediaTypes?: readonly AttachmentMimeType[];
+  /** Per-kind byte limits, bounded by the protocol maxima. */
+  readonly maxFileBytes?: Readonly<Partial<Record<AttachmentUploadKind, number>>>;
+  /** Per-kind selection limits, bounded by the protocol per-message maxima. */
+  readonly maxSelectionCount?: Readonly<Partial<Record<AttachmentUploadKind, number>>>;
+  /** Image-only object-URL previews. Documents never create previews. */
   readonly previews?: BrowserImageIntakeOptions["previews"];
 }
 
@@ -72,6 +99,15 @@ export interface UseConversationComposerOptions<TRequest = undefined> {
   readonly enterBehavior?: ConversationComposerEnterBehavior;
   /** Overrides the provider store identity for lifecycle switching. */
   readonly conversationId?: ConversationId;
+  /**
+   * Opts into mixed image/PDF intake. When present, this option takes precedence
+   * over imageIntake, including when both are supplied.
+   */
+  readonly attachmentIntake?: ConversationComposerAttachmentIntakeOptions;
+  /**
+   * Backward-compatible image-only intake alias. Existing defaults and behavior
+   * are retained when attachmentIntake is omitted.
+   */
   readonly imageIntake?: ConversationComposerImageIntakeOptions;
   /** Narrow cancellation seam; no runtime cancellation contract is assumed here. */
   readonly onCancel?: () => void | Promise<void>;
@@ -88,7 +124,8 @@ export interface ConversationComposerAttachment {
   /** The composer-local browser file/blob selected by the user. */
   readonly source: BrowserAttachmentSource;
   readonly filename?: string;
-  readonly mediaType: ImageMimeType;
+  readonly kind: AttachmentUploadKind;
+  readonly mediaType: AttachmentMimeType;
   readonly byteSize: number;
   readonly previewUrl?: string;
   readonly status: ConversationComposerAttachmentStatus;
@@ -98,12 +135,17 @@ export interface ConversationComposerAttachment {
   };
   readonly reference?: AttachmentReference;
   readonly error?: AttachmentUploadFailure;
+  readonly retryable: boolean;
+  readonly cancellable: boolean;
 }
 
 export type ConversationComposerError =
   | {
       readonly source: "intake";
-      readonly code: BrowserImageIntakeRejection["reason"] | "intake_failed";
+      readonly code:
+        | BrowserImageIntakeRejection["reason"]
+        | BrowserPdfIntakeRejection["reason"]
+        | "intake_failed";
       readonly message: string;
       readonly retryable: false;
       readonly fingerprint?: string;
@@ -163,6 +205,7 @@ export interface ConversationComposerResult {
   readonly cancel: () => Promise<boolean>;
   readonly stop: () => Promise<boolean>;
   readonly retryAttachment: (attachmentId: string) => boolean;
+  readonly cancelAttachment: (attachmentId: string) => boolean;
   readonly removeAttachment: (attachmentId: string) => boolean;
   readonly getTextareaProps: () => ConversationComposerTextareaProps;
   readonly getFileInputProps: () => ConversationComposerFileInputProps;
@@ -174,18 +217,148 @@ interface OwnedAttachment {
   readonly fingerprint: string;
   readonly source: BrowserAttachmentSource;
   readonly filename?: string;
-  readonly mediaType: ImageMimeType;
+  readonly kind: AttachmentUploadKind;
+  readonly mediaType: AttachmentMimeType;
   readonly byteSize: number;
   readonly preview?: BrowserImagePreview;
 }
 
-const INTAKE_MESSAGES: Record<BrowserImageIntakeRejection["reason"], string> = {
-  unsupported_type: "The selected file is not a supported image type.",
-  too_large: "The selected image is too large.",
-  count_overflow: "The image selection limit has been reached.",
-  duplicate: "The selected image is already attached.",
-  empty_file: "The selected image is empty.",
+type IntakeRejectionReason =
+  | BrowserImageIntakeRejection["reason"]
+  | BrowserPdfIntakeRejection["reason"];
+
+interface ComposerIntakeRejection {
+  readonly reason: IntakeRejectionReason;
+  readonly fingerprint?: string;
+  readonly filename?: string;
+}
+
+interface ComposerIntakeResult {
+  readonly selections: readonly AttachmentSelection<BrowserAttachmentSource>[];
+  readonly rejections: readonly ComposerIntakeRejection[];
+  readonly previews: readonly BrowserImagePreview[];
+  readonly shouldPreventDefault: boolean;
+  dispose(): void;
+}
+
+const INTAKE_MESSAGES: Record<IntakeRejectionReason, string> = {
+  unsupported_type: "The selected file is not a supported attachment type.",
+  too_large: "The selected attachment is too large.",
+  count_overflow: "The attachment selection limit has been reached.",
+  duplicate: "The selected attachment is already attached.",
+  empty_file: "The selected attachment is empty.",
+  unsafe_filename: "The selected attachment has an unsafe filename.",
 };
+
+const IMAGE_MIME_TYPES = new Set<string>(AI_RUNTIME_IMAGE_MIME_TYPES);
+const DOCUMENT_MIME_TYPES = new Set<string>(AI_RUNTIME_DOCUMENT_MIME_TYPES);
+
+type ImageResult = BrowserImageIntakeResult | BrowserDropImageIntakeResult;
+type PdfResult = BrowserPdfIntakeResult | BrowserDropPdfIntakeResult;
+
+function filesFromList(files: FileList): BrowserAttachmentSource[] {
+  const sources: BrowserAttachmentSource[] = [];
+  for (let index = 0; index < files.length; index += 1) {
+    const source = files[index] ?? files.item(index);
+    if (source !== null && source !== undefined) sources.push(source);
+  }
+  return sources;
+}
+
+function filesFromItems(items: DataTransferItemList): BrowserAttachmentSource[] {
+  const sources: BrowserAttachmentSource[] = [];
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    if (item?.kind !== "file") continue;
+    const source = item.getAsFile();
+    if (source !== null) sources.push(source);
+  }
+  return sources;
+}
+
+function filesFromTransfer(dataTransfer: DataTransfer): BrowserAttachmentSource[] {
+  const items = filesFromItems(dataTransfer.items);
+  return items.length > 0 ? items : filesFromList(dataTransfer.files);
+}
+
+type IntakeRecord =
+  | { readonly selection: AttachmentSelection<BrowserAttachmentSource> }
+  | { readonly rejection: ComposerIntakeRejection };
+
+function recordsBySource(
+  result: ImageResult | PdfResult,
+): Map<BrowserAttachmentSource, IntakeRecord[]> {
+  const records = new Map<BrowserAttachmentSource, IntakeRecord[]>();
+  const add = (source: BrowserAttachmentSource, record: IntakeRecord): void => {
+    const current = records.get(source);
+    if (current === undefined) records.set(source, [record]);
+    else current.push(record);
+  };
+  for (const selection of result.selections) add(selection.source, { selection });
+  for (const rejection of result.rejections) {
+    add(rejection.source, {
+      rejection: {
+        reason: rejection.reason,
+        fingerprint: rejection.fingerprint,
+        ...(rejection.filename === undefined ? {} : { filename: rejection.filename }),
+      },
+    });
+  }
+  return records;
+}
+
+function combineIntake(
+  sources: readonly BrowserAttachmentSource[],
+  imageResult: ImageResult | undefined,
+  pdfResult: PdfResult | undefined,
+): ComposerIntakeResult {
+  const imageRecords = imageResult === undefined
+    ? new Map<BrowserAttachmentSource, IntakeRecord[]>()
+    : recordsBySource(imageResult);
+  const pdfRecords = pdfResult === undefined
+    ? new Map<BrowserAttachmentSource, IntakeRecord[]>()
+    : recordsBySource(pdfResult);
+  const selections: AttachmentSelection<BrowserAttachmentSource>[] = [];
+  const rejections: ComposerIntakeRejection[] = [];
+
+  for (const source of sources) {
+    const imageRecord = imageRecords.get(source)?.shift();
+    const pdfRecord = pdfRecords.get(source)?.shift();
+    const accepted = imageRecord && "selection" in imageRecord
+      ? imageRecord.selection
+      : pdfRecord && "selection" in pdfRecord
+        ? pdfRecord.selection
+        : undefined;
+    if (accepted !== undefined) {
+      selections.push(accepted);
+      continue;
+    }
+    const preferred = DOCUMENT_MIME_TYPES.has(source.type)
+      ? pdfRecord
+      : IMAGE_MIME_TYPES.has(source.type)
+        ? imageRecord
+        : imageRecord ?? pdfRecord;
+    rejections.push(
+      preferred && "rejection" in preferred
+        ? preferred.rejection
+        : { reason: "unsupported_type" },
+    );
+  }
+
+  let disposed = false;
+  return Object.freeze({
+    selections: Object.freeze(selections),
+    rejections: Object.freeze(rejections),
+    previews: Object.freeze([...(imageResult?.previews ?? [])]),
+    shouldPreventDefault: selections.length > 0,
+    dispose(): void {
+      if (disposed) return;
+      disposed = true;
+      imageResult?.dispose();
+      pdfResult?.dispose();
+    },
+  });
+}
 
 function compactHash(value: string): string {
   let hash = 0x811c9dc5;
@@ -215,7 +388,7 @@ function sendError(error: ConversationRuntimeError): ConversationComposerError {
 }
 
 /**
- * Coordinate draft, browser image intake, uploads, typing, and submission
+ * Coordinate draft, browser attachment intake, uploads, typing, and submission
  * without rendering markup or imposing presentation semantics.
  */
 export function useConversationComposer<TRequest = undefined>(
@@ -235,13 +408,36 @@ export function useConversationComposer<TRequest = undefined>(
     onCancel,
   } = options;
   const conversationId = options.conversationId ?? storeConversationId;
-  const acceptedMediaTypes = options.imageIntake?.acceptedMediaTypes ??
-    AI_RUNTIME_IMAGE_MIME_TYPES;
-  const maxFileBytes = options.imageIntake?.maxFileBytes ??
-    AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMaxBytes;
-  const maxSelectionCount = options.imageIntake?.maxSelectionCount ??
-    AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentsPerMessage;
-  const previews = options.imageIntake?.previews ?? true;
+  const generalizedIntake = options.attachmentIntake;
+  const acceptedMediaTypes: readonly AttachmentMimeType[] = generalizedIntake === undefined
+    ? options.imageIntake?.acceptedMediaTypes ?? AI_RUNTIME_IMAGE_MIME_TYPES
+    : generalizedIntake.acceptedMediaTypes ?? [
+      ...AI_RUNTIME_IMAGE_MIME_TYPES,
+      ...AI_RUNTIME_DOCUMENT_MIME_TYPES,
+    ];
+  const acceptedImageMediaTypes = acceptedMediaTypes.filter(
+    (mediaType): mediaType is ImageMimeType => IMAGE_MIME_TYPES.has(mediaType),
+  );
+  const acceptedDocumentMediaTypes = acceptedMediaTypes.filter(
+    (mediaType): mediaType is DocumentMimeType => DOCUMENT_MIME_TYPES.has(mediaType),
+  );
+  const maxImageFileBytes = generalizedIntake === undefined
+    ? options.imageIntake?.maxFileBytes ??
+      AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMaxBytes
+    : generalizedIntake.maxFileBytes?.image ??
+      AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMaxBytes;
+  const maxDocumentFileBytes = generalizedIntake?.maxFileBytes?.document ??
+    AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMaxBytes;
+  const maxImageSelectionCount = generalizedIntake === undefined
+    ? options.imageIntake?.maxSelectionCount ??
+      AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentsPerMessage
+    : generalizedIntake.maxSelectionCount?.image ??
+      AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentsPerMessage;
+  const maxDocumentSelectionCount = generalizedIntake?.maxSelectionCount?.document ??
+    AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentsPerMessage;
+  const previews = generalizedIntake === undefined
+    ? options.imageIntake?.previews ?? true
+    : generalizedIntake.previews ?? true;
 
   const [draft, setDraftState] = useState(options.initialDraft ?? "");
   const [owned, setOwned] = useState<readonly OwnedAttachment[]>([]);
@@ -343,11 +539,14 @@ export function useConversationComposer<TRequest = undefined>(
           fingerprint: entry.fingerprint,
           source: entry.source,
           ...(entry.filename === undefined ? {} : { filename: entry.filename }),
+          kind: entry.kind,
           mediaType: entry.mediaType,
           byteSize: entry.byteSize,
           ...(entry.preview === undefined ? {} : { previewUrl: entry.preview.url }),
           status: "missing",
           progress: { uploadedBytes: 0, totalBytes: entry.byteSize },
+          retryable: false,
+          cancellable: false,
         };
       }
       return {
@@ -355,6 +554,7 @@ export function useConversationComposer<TRequest = undefined>(
         fingerprint: entry.fingerprint,
         source: entry.source,
         ...(entry.filename === undefined ? {} : { filename: entry.filename }),
+        kind: entry.kind,
         mediaType: entry.mediaType,
         byteSize: entry.byteSize,
         ...(entry.preview === undefined ? {} : { previewUrl: entry.preview.url }),
@@ -362,6 +562,8 @@ export function useConversationComposer<TRequest = undefined>(
         progress: item.progress,
         ...(item.status === "ready" ? { reference: item.reference } : {}),
         ...(item.status === "failed" ? { error: item.error } : {}),
+        retryable: item.status === "failed" && item.error.retryable,
+        cancellable: item.status === "queued" || item.status === "uploading",
       };
     }),
     [itemById, owned],
@@ -407,16 +609,30 @@ export function useConversationComposer<TRequest = undefined>(
     else presence?.setTyping(true);
   }, [presence]);
 
-  const intakeOptions = useCallback((): BrowserImageIntakeOptions => ({
-    acceptedMediaTypes,
-    maxFileBytes,
-    maxSelectionCount,
+  const imageOptions = useCallback((): BrowserImageIntakeOptions => ({
+    acceptedMediaTypes: acceptedImageMediaTypes,
+    maxFileBytes: maxImageFileBytes,
+    maxSelectionCount: maxImageSelectionCount,
     existingFingerprints: ownedRef.current.map((entry) => entry.fingerprint),
-    existingSelectionCount: ownedRef.current.length,
+    existingSelectionCount: ownedRef.current.filter((entry) => entry.kind === "image").length,
     previews,
-  }), [acceptedMediaTypes, maxFileBytes, maxSelectionCount, previews]);
+  }), [acceptedImageMediaTypes, maxImageFileBytes, maxImageSelectionCount, previews]);
 
-  const acceptIntake = useCallback((result: ReturnType<typeof intakeFileInputImages>) => {
+  const pdfOptions = useCallback((): BrowserPdfIntakeOptions => ({
+    acceptedMediaTypes: acceptedDocumentMediaTypes,
+    maxFileBytes: maxDocumentFileBytes,
+    maxSelectionCount: maxDocumentSelectionCount,
+    existingSelections: ownedRef.current.map((entry) => ({
+      fingerprint: entry.fingerprint,
+      kind: entry.kind,
+    })),
+  }), [
+    acceptedDocumentMediaTypes,
+    maxDocumentFileBytes,
+    maxDocumentSelectionCount,
+  ]);
+
+  const acceptIntake = useCallback((result: ComposerIntakeResult) => {
     const added: OwnedAttachment[] = [];
     try {
       for (const selection of result.selections) {
@@ -433,6 +649,7 @@ export function useConversationComposer<TRequest = undefined>(
           fingerprint: selection.fingerprint,
           source: selection.source,
           ...(selection.filename === undefined ? {} : { filename: selection.filename }),
+          kind: selection.kind ?? "image",
           mediaType: selection.mediaType,
           byteSize: selection.byteSize,
           ...(preview === undefined ? {} : { preview }),
@@ -444,7 +661,7 @@ export function useConversationComposer<TRequest = undefined>(
       setOperationErrors([{
         source: "intake",
         code: "intake_failed",
-        message: "The selected images could not be prepared.",
+        message: "The selected attachments could not be prepared.",
         retryable: false,
       }]);
       return;
@@ -468,21 +685,64 @@ export function useConversationComposer<TRequest = undefined>(
   }, [releaseOwned, scope, uploader]);
 
   const handlePaste = useCallback((event: ClipboardEvent<HTMLTextAreaElement>): void => {
-    const result = intakeClipboardImages(event.clipboardData.items, intakeOptions());
-    if (result.selections.length > 0) event.preventDefault();
+    const sources = filesFromItems(event.clipboardData.items);
+    const imageResult = acceptedImageMediaTypes.length === 0
+      ? undefined
+      : intakeClipboardImages(event.clipboardData.items, imageOptions());
+    const pdfResult = generalizedIntake === undefined || acceptedDocumentMediaTypes.length === 0
+      ? undefined
+      : intakeFileInputPdfs(sources, pdfOptions());
+    const result = combineIntake(sources, imageResult, pdfResult);
+    if (result.shouldPreventDefault) event.preventDefault();
     acceptIntake(result);
-  }, [acceptIntake, intakeOptions]);
+  }, [
+    acceptIntake,
+    acceptedDocumentMediaTypes.length,
+    acceptedImageMediaTypes.length,
+    generalizedIntake,
+    imageOptions,
+    pdfOptions,
+  ]);
 
   const handleFileInputChange = useCallback((event: ChangeEvent<HTMLInputElement>): void => {
     if (event.currentTarget.files === null) return;
-    acceptIntake(intakeFileInputImages(event.currentTarget.files, intakeOptions()));
-  }, [acceptIntake, intakeOptions]);
+    const files = event.currentTarget.files;
+    const sources = filesFromList(files);
+    const imageResult = acceptedImageMediaTypes.length === 0
+      ? undefined
+      : intakeFileInputImages(files, imageOptions());
+    const pdfResult = generalizedIntake === undefined || acceptedDocumentMediaTypes.length === 0
+      ? undefined
+      : intakeFileInputPdfs(files, pdfOptions());
+    acceptIntake(combineIntake(sources, imageResult, pdfResult));
+  }, [
+    acceptIntake,
+    acceptedDocumentMediaTypes.length,
+    acceptedImageMediaTypes.length,
+    generalizedIntake,
+    imageOptions,
+    pdfOptions,
+  ]);
 
   const handleDrop = useCallback((event: DragEvent<HTMLElement>): void => {
-    const result = intakeDroppedImages(event.dataTransfer, intakeOptions());
+    const sources = filesFromTransfer(event.dataTransfer);
+    const imageResult = acceptedImageMediaTypes.length === 0
+      ? undefined
+      : intakeDroppedImages(event.dataTransfer, imageOptions());
+    const pdfResult = generalizedIntake === undefined || acceptedDocumentMediaTypes.length === 0
+      ? undefined
+      : intakeDroppedPdfs(event.dataTransfer, pdfOptions());
+    const result = combineIntake(sources, imageResult, pdfResult);
     if (result.shouldPreventDefault) event.preventDefault();
     acceptIntake(result);
-  }, [acceptIntake, intakeOptions]);
+  }, [
+    acceptIntake,
+    acceptedDocumentMediaTypes.length,
+    acceptedImageMediaTypes.length,
+    generalizedIntake,
+    imageOptions,
+    pdfOptions,
+  ]);
 
   const removeAttachment = useCallback((attachmentId: string): boolean => {
     const entry = ownedRef.current.find((candidate) => candidate.id === attachmentId);
@@ -504,6 +764,23 @@ export function useConversationComposer<TRequest = undefined>(
       return false;
     }
   }, [uploader]);
+
+  const cancelAttachment = useCallback((attachmentId: string): boolean => {
+    const entry = ownedRef.current.find((candidate) => candidate.id === attachmentId);
+    if (entry === undefined) return false;
+    try {
+      if (!uploader.cancel(attachmentId)) return false;
+    } catch {
+      return false;
+    }
+    releaseOwned([entry]);
+    setOwned((current) => {
+      const next = current.filter((candidate) => candidate.id !== attachmentId);
+      ownedRef.current = next;
+      return next;
+    });
+    return true;
+  }, [releaseOwned, uploader]);
 
   const submit = useCallback(async (
     event?: FormEvent<Element>,
@@ -646,6 +923,7 @@ export function useConversationComposer<TRequest = undefined>(
     cancel,
     stop: cancel,
     retryAttachment,
+    cancelAttachment,
     removeAttachment,
     getTextareaProps: () => textareaProps,
     getFileInputProps: () => fileInputProps,
@@ -653,6 +931,7 @@ export function useConversationComposer<TRequest = undefined>(
   }), [
     attachments,
     canSend,
+    cancelAttachment,
     cancel,
     draft,
     dropProps,

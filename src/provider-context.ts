@@ -175,6 +175,12 @@ export interface UnsupportedProviderContextCapability {
   readonly reason: ProviderContextUnsupportedReason;
 }
 
+/** Canonical declaration for providers that do not implement provider-context operations. */
+export const PROVIDER_CONTEXT_NOT_SUPPORTED = Object.freeze({
+  supported: false,
+  reason: "provider_not_supported",
+} as const) satisfies UnsupportedProviderContextCapability;
+
 export type ProviderContextCapabilityDescriptor =
   | Pick<SupportedProviderContextCapability<never>, "supported" | "version">
   | UnsupportedProviderContextCapability;
@@ -438,6 +444,25 @@ export function parseProviderContextCapabilityDescriptor(
     return Object.freeze({ supported: false, reason: source.reason as ProviderContextUnsupportedReason });
   }
   fail(`${path}.supported`, "must be a boolean discriminant");
+}
+
+/** Projects and validates the serializable descriptor for an operational capability. */
+export function describeProviderContextCapability(
+  capability: ProviderContextCapability,
+): ProviderContextCapabilityDescriptor {
+  if (capability.supported) {
+    if (
+      typeof capability.measure !== "function" ||
+      typeof capability.compact !== "function"
+    ) {
+      fail("$capability", "supported operations must provide measure and compact functions");
+    }
+    return parseProviderContextCapabilityDescriptor({
+      supported: true,
+      version: capability.version,
+    });
+  }
+  return parseProviderContextCapabilityDescriptor(capability);
 }
 
 function parseMeasurement(value: unknown, path: string): ProviderContextMeasurementResult {

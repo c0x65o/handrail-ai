@@ -27,7 +27,11 @@ import type {
   ConversationUsageReceiptId,
   ToolLoopBudget,
 } from "./events.js";
-import type { Citation, CitationSource } from "../citations.js";
+import type {
+  Citation,
+  CitationRecordSet,
+  CitationSource,
+} from "../citations.js";
 
 export type ConversationStateJsonPrimitive = string | number | boolean | null;
 export type ConversationStateJsonValue =
@@ -122,6 +126,8 @@ export interface ConversationTurnRecord {
 export interface ConversationToolResultRecord {
   readonly content: readonly ConversationStateToolResultContentPart[];
   readonly is_error: boolean;
+  /** Normalized recovery state retained even after citation linkage succeeds. */
+  readonly citation_records?: CitationRecordSet;
   readonly recorded_at: ConversationTimestamp;
   readonly attribution: ConversationEventAttribution;
 }

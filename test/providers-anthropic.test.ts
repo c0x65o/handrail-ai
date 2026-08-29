@@ -588,9 +588,17 @@ describe("AnthropicProviderAdapter", () => {
         parallel_tool_calls: false,
         reasoning: true,
         document_input: { supported: false },
+        provider_context: {
+          supported: false,
+          reason: "provider_not_supported",
+        },
         context_window_tokens: 200_000,
         max_output_tokens: 8192,
       },
+    });
+    expect(adapter.provider_context).toEqual({
+      supported: false,
+      reason: "provider_not_supported",
     });
     expect(hostConfiguredRequest).toHaveBeenCalledOnce();
     expect(output.result.status).toBe("completed");

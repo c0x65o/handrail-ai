@@ -14,6 +14,10 @@ import {
   type StreamEvent,
   type ToolDefinition,
 } from "../protocol.js";
+import type {
+  ProviderContextCapability,
+  ProviderContextCapabilityDescriptor,
+} from "../provider-context.js";
 
 export interface DocumentInputCapabilityDescriptor {
   readonly supported_mime_types: readonly DocumentMimeType[];
@@ -179,6 +183,8 @@ export interface ProviderModelCapabilities {
   readonly parallel_tool_calls: boolean;
   readonly reasoning: boolean;
   readonly document_input: ProviderDocumentInputCapability;
+  /** Serializable model-specific provider-context support declaration. */
+  readonly provider_context: ProviderContextCapabilityDescriptor;
   readonly context_window_tokens: number | null;
   readonly max_output_tokens: number | null;
 }
@@ -298,5 +304,7 @@ export type ProviderAdapterStream = AsyncGenerator<
 
 export interface ProviderAdapter {
   readonly metadata: ProviderAdapterMetadata;
+  /** Operational provider-context capability; unsupported adapters expose no callbacks. */
+  readonly provider_context: ProviderContextCapability;
   invoke(invocation: ProviderAdapterInvocation): ProviderAdapterStream;
 }

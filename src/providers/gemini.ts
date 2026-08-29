@@ -10,6 +10,10 @@ import {
   type ProtocolMetadata,
   type StreamEvent,
 } from "../protocol.js";
+import {
+  PROVIDER_CONTEXT_NOT_SUPPORTED,
+  type ProviderContextCapability,
+} from "../provider-context.js";
 import type {
   ClientRequestError,
   ProviderAdapter,
@@ -532,6 +536,7 @@ function promptWasBlocked(value: unknown): boolean {
 
 export class GeminiProviderAdapter implements ProviderAdapter {
   readonly metadata: ProviderAdapterMetadata;
+  readonly provider_context: ProviderContextCapability = PROVIDER_CONTEXT_NOT_SUPPORTED;
   private readonly request: GeminiGenerateContentRequestFunction;
   private readonly resolveImageReference: GeminiImageReferenceResolver | undefined;
 
@@ -554,6 +559,7 @@ export class GeminiProviderAdapter implements ProviderAdapter {
         parallel_tool_calls: false,
         reasoning: options.supports_reasoning ?? true,
         document_input: { supported: false },
+        provider_context: this.provider_context,
         context_window_tokens: options.context_window_tokens ?? null,
         max_output_tokens: options.max_output_tokens ?? null,
       },

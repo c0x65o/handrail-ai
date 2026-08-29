@@ -11,6 +11,7 @@ import {
   type ProviderAdapter,
   type ProviderAdapterInvocation,
   type ProviderAdapterStream,
+  type ProviderContextCapability,
   type ProviderUsage,
   type StreamEvent,
 } from "../src/index.js";
@@ -124,6 +125,10 @@ function envelope(
 }
 
 class FakeAdapter implements ProviderAdapter {
+  readonly provider_context = {
+    supported: false,
+    reason: "provider_not_supported",
+  } as const;
   readonly metadata = {
     provider_id: "fake-direct",
     model_id: "fake-model-v1",
@@ -134,6 +139,7 @@ class FakeAdapter implements ProviderAdapter {
       parallel_tool_calls: false,
       reasoning: true,
       document_input: { supported: false },
+      provider_context: this.provider_context,
       context_window_tokens: 8_192,
       max_output_tokens: 1_024,
     },
@@ -180,6 +186,99 @@ async function collect(events: AsyncIterable<StreamEvent>): Promise<StreamEvent[
 }
 
 describe("createDirectProviderTransport", () => {
+  it("negotiates unsupported provider context and preserves long canonical input", async () => {
+    const callbackAccess = vi.fn();
+    const unsupportedProviderContext = new Proxy(
+      {
+        supported: false,
+        reason: "provider_not_supported",
+      } as const,
+      {
+        get(target, property, receiver) {
+          if (property === "measure" || property === "compact") {
+            callbackAccess(property);
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      },
+    ) as ProviderContextCapability;
+    const canonicalMessages: ChatRequest["messages"] = Array.from(
+      { length: 48 },
+      (_, index) => ({
+        role: index % 2 === 0 ? "user" as const : "assistant" as const,
+        content: [{
+          type: "text" as const,
+          text: `canonical-${index}-${"x".repeat(2_048)}`,
+        }],
+      }),
+    );
+    const canonicalToolResults: ChatRequest["tool_results"] = [{
+      tool_call_id: "call_canonical",
+      name: "lookup_weather",
+      content: [{ type: "json", value: { city: "Bowling Green", temperature: 72 } }],
+      is_error: false,
+    }];
+    const longRequest: ChatRequest = {
+      ...request,
+      continuation_of: "request_previous_canonical",
+      messages: canonicalMessages,
+      tool_results: canonicalToolResults,
+    };
+    const delegate = new FakeAdapter(async function* (invocation) {
+      yield {
+        ...envelope(invocation, "response.started", 0),
+        type: "response.started",
+        attribution: invocation.context.attribution,
+      };
+      yield {
+        ...envelope(invocation, "response.completed", 1),
+        type: "response.completed",
+        outcome: "stop",
+      };
+      return { status: "completed", outcome: "stop", usage };
+    });
+    const adapter: ProviderAdapter = {
+      provider_context: unsupportedProviderContext,
+      metadata: {
+        ...delegate.metadata,
+        capabilities: {
+          ...delegate.metadata.capabilities,
+          provider_context: {
+            supported: false,
+            reason: "provider_not_supported",
+          },
+        },
+      },
+      invoke: (invocation) => delegate.invoke(invocation),
+    };
+    const transport = createDirectProviderTransport({
+      adapter,
+      createContext: () => context(),
+    });
+
+    expect(transport.capabilities.providerContext).toEqual({
+      supported: false,
+      reason: "provider_not_supported",
+    });
+    const started = await transport.startTurn({
+      conversationId: "conversation_direct",
+      conversationTurnId,
+      mutationId: "mutation_long_canonical",
+      idempotencyKey: "idempotency_long_canonical",
+      request: longRequest,
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    await collect(started.value.observation.events);
+    await expect(started.value.observation.result).resolves.toMatchObject({
+      status: "completed",
+    });
+    expect(delegate.invocation?.messages).toEqual(canonicalMessages);
+    expect(delegate.invocation?.tool_results).toEqual(canonicalToolResults);
+    expect(delegate.invocation?.messages).toHaveLength(48);
+    expect(callbackAccess).not.toHaveBeenCalled();
+  });
+
   it("rejects unsupported documents before host resolution or provider invocation", async () => {
     const adapter = new FakeAdapter(() => {
       throw new Error("unsupported documents must not invoke the provider");
@@ -230,6 +329,7 @@ describe("createDirectProviderTransport", () => {
       return { status: "completed", outcome: "stop", usage };
     });
     const adapter: ProviderAdapter = {
+      provider_context: delegate.provider_context,
       metadata: {
         ...delegate.metadata,
         capabilities: {
@@ -289,6 +389,7 @@ describe("createDirectProviderTransport", () => {
       throw new Error("missing resolver must prevent provider invocation");
     });
     const adapter: ProviderAdapter = {
+      provider_context: delegate.provider_context,
       metadata: {
         ...delegate.metadata,
         capabilities: {

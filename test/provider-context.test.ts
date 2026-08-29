@@ -6,11 +6,13 @@ import {
   PROVIDER_CONTEXT_ERROR_CODES,
   PROVIDER_CONTEXT_INVALIDATION_REASONS,
   PROVIDER_CONTEXT_LIMITS,
+  PROVIDER_CONTEXT_NOT_SUPPORTED,
   PROVIDER_CONTEXT_UNSUPPORTED_REASONS,
   ProviderContextOperationError,
   ProviderContextValidationError,
   assessProviderContextCheckpoint,
   createProviderContextFingerprint,
+  describeProviderContextCapability,
   normalizeProviderContextError,
   parseProviderContextCheckpoint,
   parseProviderContextCapabilityDescriptor,
@@ -258,6 +260,10 @@ describe("measurement and compaction contracts", () => {
     });
     if (supportedDescriptor.supported) expect(supportedDescriptor.version).toBe(PROVIDER_CONTEXT_CONTRACT_VERSION);
     if (!unsupportedDescriptor.supported) expect(unsupportedDescriptor.reason).toBe("provider_not_supported");
+    expect(describeProviderContextCapability(PROVIDER_CONTEXT_NOT_SUPPORTED)).toEqual({
+      supported: false,
+      reason: "provider_not_supported",
+    });
     expect(() => parseProviderContextCapabilityDescriptor({
       supported: false,
       reason: "provider_not_supported",
@@ -281,6 +287,10 @@ describe("measurement and compaction contracts", () => {
         });
       },
     };
+    expect(describeProviderContextCapability(supported)).toEqual({
+      supported: true,
+      version: PROVIDER_CONTEXT_CONTRACT_VERSION,
+    });
     if (unsupported.supported) throw new Error("unreachable");
     expect(unsupported.reason).toBe("model_not_supported");
     if (!supported.supported) throw new Error("unreachable");

@@ -3,6 +3,7 @@ import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
   AI_RUNTIME_PROTOCOL_VERSION,
   BoundedToolExecutor,
+  CITATION_LIMITS,
   InMemoryToolExecutionLedger,
   ToolRegistry,
   parseChatRequest,
@@ -118,6 +119,144 @@ describe("BoundedToolExecutor", () => {
     expect(applicationExecutor).toHaveBeenCalledOnce();
     expect(applicationExecutor.mock.calls[0]?.[1].signal).toBeInstanceOf(AbortSignal);
     assertProtocolResult(output, tool);
+  });
+
+  it("normalizes and stably deduplicates an explicit trusted citation projection", async () => {
+    const source = {
+      source_id: "source_weather",
+      type: "web" as const,
+      label: "Weather source",
+      locator: "https://example.com/weather",
+    };
+    const citation = {
+      citation_id: "citation_weather",
+      source_id: "source_weather",
+      order: 0,
+      target: { type: "tool_result" as const, tool_call_id: "call_cited" },
+    };
+    const applicationExecutor = vi.fn<ApplicationToolExecutor<TestContext>>(async () => ({
+      type: "handrail.application_tool_output",
+      content: { forecast: "sunny" },
+      citation_records: {
+        sources: [source, { ...source }],
+        citations: [citation, { ...citation, target: { ...citation.target } }],
+      },
+    }));
+    const { execute, tool } = setup(applicationExecutor);
+
+    const output = await execute("call_cited");
+    const retry = await execute("call_cited");
+
+    expect(output).toEqual({
+      tool_call_id: "call_cited",
+      name: "lookup",
+      content: [{ type: "json", value: { forecast: "sunny" } }],
+      is_error: false,
+      citation_records: {
+        sources: [source],
+        citations: [citation],
+      },
+    });
+    expect(retry).toBe(output);
+    expect(applicationExecutor).toHaveBeenCalledOnce();
+    expect(Object.isFrozen(output.citation_records)).toBe(true);
+    assertProtocolResult(output, tool);
+  });
+
+  it("does not treat citations embedded in ordinary JSON output as authoritative", async () => {
+    const { execute } = setup(async () => ({
+      citations: [{ provider_native: true }],
+      value: "ordinary content",
+    }));
+
+    const output = await execute("call_ordinary_json");
+
+    expect(output).not.toHaveProperty("citation_records");
+    expect(output.content).toEqual([{
+      type: "json",
+      value: { citations: [{ provider_native: true }], value: "ordinary content" },
+    }]);
+  });
+
+  it("converts malformed, unsafe, mismatched, provider-native, and oversized citations to one safe error", async () => {
+    const validCitation = {
+      citation_id: "citation_1",
+      source_id: "source_1",
+      order: 0,
+      target: { type: "tool_result", tool_call_id: "call_invalid_citations" },
+    };
+    const cases: readonly unknown[] = [
+      { sources: [], citations: "not-an-array" },
+      {
+        sources: [{
+          source_id: "source_1",
+          type: "web",
+          label: "Private",
+          locator: "http://127.0.0.1/private",
+        }],
+        citations: [validCitation],
+      },
+      {
+        sources: [{
+          source_id: "source_1",
+          type: "web",
+          label: "Native",
+          provider_payload: { annotation: "private provider data" },
+        }],
+        citations: [validCitation],
+      },
+      {
+        sources: [{ source_id: "source_1", type: "tool", label: "Mismatch" }],
+        citations: [{
+          ...validCitation,
+          target: { type: "tool_result", tool_call_id: "call_other" },
+        }],
+      },
+      {
+        sources: Array.from(
+          { length: CITATION_LIMITS.sourcesPerRecordSet + 1 },
+          (_, index) => ({
+            source_id: `source_${index}`,
+            type: "tool",
+            label: `Source ${index}`,
+          }),
+        ),
+        citations: [validCitation],
+      },
+      {
+        sources: Array.from({ length: CITATION_LIMITS.sourcesPerRecordSet }, (_, index) => ({
+          source_id: `source_${index}`,
+          type: "web",
+          label: "x".repeat(CITATION_LIMITS.labelLength),
+          locator: `https://example.com/${"a".repeat(1_980)}${index}`,
+        })),
+        citations: Array.from(
+          { length: CITATION_LIMITS.citationsPerRecordSet },
+          (_, index) => ({
+            citation_id: `citation_${index}`,
+            source_id: `source_${index % CITATION_LIMITS.sourcesPerRecordSet}`,
+            order: index,
+            target: { type: "tool_result", tool_call_id: "call_invalid_citations" },
+          }),
+        ),
+      },
+    ];
+
+    for (const [index, citationRecords] of cases.entries()) {
+      const { execute } = setup(async () => ({
+        type: "handrail.application_tool_output",
+        content: "private content must not leak",
+        citation_records: citationRecords,
+      } as never));
+      const output = await execute("call_invalid_citations");
+      expect(output, `case ${index}`).toEqual({
+        tool_call_id: "call_invalid_citations",
+        name: "lookup",
+        content: [{ type: "text", text: "Tool returned an invalid or unsafe result." }],
+        is_error: true,
+      });
+      expect(JSON.stringify(output)).not.toContain("private");
+    }
   });
 
   it("rejects unknown and undiscovered tools before policy or execution", async () => {

@@ -577,6 +577,9 @@ export function reduceConversationEvent(
       const result: ConversationToolResultRecord = freeze({
         content: cloneToolResultContent(payload.content),
         is_error: payload.is_error,
+        ...(payload.citation_records === undefined
+          ? {}
+          : { citation_records: normalizeCitationRecords(payload.citation_records) }),
         recorded_at: event.occurred_at,
         attribution,
       });

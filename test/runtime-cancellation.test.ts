@@ -15,6 +15,7 @@ import {
   type ConversationTransport,
   type ProviderAdapter,
   type ProviderAdapterInvocation,
+  type ProviderContextCapability,
   type StreamEvent,
   type TransportResult,
   type TurnHandle,
@@ -258,6 +259,10 @@ describe("ConversationRuntime cancellation", () => {
   it("authoritatively cancels a direct-provider turn", async () => {
     let invocation: ProviderAdapterInvocation | null = null;
     const adapter: ProviderAdapter = {
+      provider_context: {
+        supported: false,
+        reason: "provider_not_supported",
+      },
       metadata: {
         provider_id: "fake",
         model_id: "fake-v1",
@@ -268,6 +273,10 @@ describe("ConversationRuntime cancellation", () => {
           parallel_tool_calls: false,
           reasoning: false,
           document_input: { supported: false },
+          provider_context: {
+            supported: false,
+            reason: "provider_not_supported",
+          },
           context_window_tokens: 8_192,
           max_output_tokens: 1_024,
         },
@@ -325,6 +334,132 @@ describe("ConversationRuntime cancellation", () => {
       cancellation_requested_reason: "user",
       remote_may_still_be_running: false,
     });
+  });
+
+  it("keeps full canonical provider input when direct provider context is unsupported", async () => {
+    const callbackAccess = vi.fn();
+    const providerContext = new Proxy(
+      {
+        supported: false,
+        reason: "provider_not_supported",
+      } as const,
+      {
+        get(target, property, receiver) {
+          if (property === "measure" || property === "compact") {
+            callbackAccess(property);
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      },
+    ) as ProviderContextCapability;
+    const canonicalMessages: ChatRequest["messages"] = Array.from(
+      { length: 48 },
+      (_, index) => ({
+        role: index % 2 === 0 ? "user" as const : "assistant" as const,
+        content: [{
+          type: "text" as const,
+          text: `runtime-canonical-${index}-${"y".repeat(2_048)}`,
+        }],
+      }),
+    );
+    const canonicalToolResults: ChatRequest["tool_results"] = [{
+      tool_call_id: "call_runtime_canonical",
+      name: "canonical_tool",
+      content: [{ type: "text", text: "canonical tool result" }],
+      is_error: false,
+    }];
+    const longRequest: ChatRequest = {
+      ...request,
+      continuation_of: "request_previous_runtime_canonical",
+      messages: canonicalMessages,
+      tools: [{
+        name: "canonical_tool",
+        description: "Returns a canonical fixture result",
+        input_schema: { type: "object", properties: {} },
+      }],
+      tool_results: canonicalToolResults,
+    };
+    let invocation: ProviderAdapterInvocation | null = null;
+    const adapter: ProviderAdapter = {
+      provider_context: providerContext,
+      metadata: {
+        provider_id: "fake-unsupported-context",
+        model_id: "fake-long-context-v1",
+        capabilities: {
+          streaming: true,
+          text: true,
+          tool_calls: true,
+          parallel_tool_calls: false,
+          reasoning: false,
+          document_input: { supported: false },
+          provider_context: {
+            supported: false,
+            reason: "provider_not_supported",
+          },
+          context_window_tokens: 8_192,
+          max_output_tokens: 1_024,
+        },
+      },
+      async *invoke(current) {
+        invocation = current;
+        yield {
+          ...started(),
+          request_id: current.context.request_id,
+          trace_id: current.context.trace_id,
+        } as StreamEvent;
+        yield {
+          ...completed(),
+          request_id: current.context.request_id,
+          trace_id: current.context.trace_id,
+        } as StreamEvent;
+        return {
+          status: "completed",
+          outcome: "stop",
+          usage: {
+            input_tokens: 24_000,
+            cached_input_tokens: 0,
+            output_tokens: 1,
+            reasoning_tokens: 0,
+            total_tokens: 24_001,
+            provider_cost: { known: false },
+          },
+        };
+      },
+    };
+    const transport = createDirectProviderTransport({
+      adapter,
+      createContext: () => ({
+        request_id: "remote-turn",
+        trace_id: "trace-cancel",
+        turn_id: "remote-turn",
+        attribution,
+        correlation_hints: {},
+        usage: {
+          usage_receipt_id: "usage-long-canonical",
+          logical_request_id: "logical-long-canonical",
+          attempt: { id: "attempt-long-canonical", index: 0 },
+          continuation: { id: "continuation-long-canonical", index: 0 },
+          source: "provider",
+          quality: "reported",
+        },
+      }),
+    });
+    const { runtime } = await runtimeFor(transport);
+
+    expect(transport.capabilities.providerContext).toEqual({
+      supported: false,
+      reason: "provider_not_supported",
+    });
+    await expect(runtime.sendMessage({
+      content: "Preserve canonical history",
+      request: longRequest,
+    })).resolves.toMatchObject({ status: "completed" });
+    expect(invocation).not.toBeNull();
+    const providerInvocation = invocation as unknown as ProviderAdapterInvocation;
+    expect(providerInvocation.messages).toEqual(canonicalMessages);
+    expect(providerInvocation.tool_results).toEqual(canonicalToolResults);
+    expect(providerInvocation.messages).toHaveLength(48);
+    expect(callbackAccess).not.toHaveBeenCalled();
   });
 
   it("reports unsupported managed cancellation and stops only local observation", async () => {

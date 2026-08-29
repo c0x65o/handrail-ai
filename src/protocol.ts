@@ -1,3 +1,8 @@
+import {
+  normalizeCitationRecords,
+  type CitationRecordSet,
+} from "./citations.js";
+
 export const AI_RUNTIME_PROTOCOL_VERSION = "handrail.ai-runtime.v1" as const;
 
 export const AI_RUNTIME_STREAM_EVENT_TYPES = [
@@ -170,6 +175,8 @@ export interface ApplicationToolResult {
   name: string;
   content: ToolResultContentPart[];
   is_error: boolean;
+  /** Trusted, normalized host-tool provenance. Provider adapters ignore this field. */
+  citation_records?: CitationRecordSet;
 }
 
 export interface GenerationSettings {
@@ -882,7 +889,11 @@ function validateToolResultPart(
 function validateToolResult(value: unknown, path: string): asserts value is ApplicationToolResult {
   const object = record(value, path);
   requiredKeys(object, ["tool_call_id", "name", "content", "is_error"], path);
-  allowedKeys(object, ["tool_call_id", "name", "content", "is_error"], path);
+  allowedKeys(
+    object,
+    ["tool_call_id", "name", "content", "is_error", "citation_records"],
+    path,
+  );
   stringValue(object.tool_call_id, `${path}.tool_call_id`);
   stringValue(object.name, `${path}.name`);
   if (!Array.isArray(object.content) || object.content.length === 0) {
@@ -890,6 +901,37 @@ function validateToolResult(value: unknown, path: string): asserts value is Appl
   }
   object.content.forEach((part, index) => validateToolResultPart(part, `${path}.content[${index}]`));
   if (typeof object.is_error !== "boolean") fail(`${path}.is_error`, "must be a boolean");
+  if (Object.hasOwn(object, "citation_records")) {
+    let records: CitationRecordSet;
+    try {
+      records = normalizeCitationRecords(object.citation_records);
+    } catch (error) {
+      fail(
+        `${path}.citation_records`,
+        error instanceof Error ? error.message : "contains invalid citation records",
+      );
+    }
+    if (records.citations.length === 0) {
+      fail(`${path}.citation_records.citations`, "must contain at least one citation link");
+    }
+    if (JSON.stringify(records) !== JSON.stringify(object.citation_records)) {
+      fail(
+        `${path}.citation_records`,
+        "must already be normalized and identity-deduplicated",
+      );
+    }
+    for (const citation of records.citations) {
+      if (
+        citation.target.type !== "tool_result" ||
+        citation.target.tool_call_id !== object.tool_call_id
+      ) {
+        fail(
+          `${path}.citation_records.citations`,
+          "must contain only links to this tool result",
+        );
+      }
+    }
+  }
 }
 
 function validateGeneration(value: unknown, path: string): asserts value is GenerationSettings {
