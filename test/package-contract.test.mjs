@@ -98,6 +98,18 @@ test("exports the approval proposal store contract from the built core entry", a
   assert.equal(typeof imported.APPROVAL_PROPOSAL_STORE_LIMITS, "object");
 });
 
+test("exports the conversation catalog contract from the built core entry", async () => {
+  const moduleUrl = pathToFileURL(
+    path.join(packageRoot, packageJson.exports["."].import),
+  ).href;
+  const imported = await import(moduleUrl);
+  assert.equal(typeof imported.CONVERSATION_CATALOG_LIMITS, "object");
+  assert.equal(typeof imported.parseConversationCatalogDescriptor, "function");
+  assert.equal(typeof imported.paginateConversationCatalogDescriptors, "function");
+  assert.equal(typeof imported.authorizeConversationCatalogRequest, "function");
+  assert.equal(typeof imported.ConversationCatalogError, "function");
+});
+
 test("imports core and browser entries when React resolution is unavailable", () => {
   const loaderUrl = new URL("./fixtures/reject-react-loader.mjs", import.meta.url);
   const entryUrls = [".", "./browser"].map((exportName) =>
