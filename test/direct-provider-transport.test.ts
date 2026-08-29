@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import * as browserEntry from "../src/browser/index.js";
 import {
@@ -64,6 +64,28 @@ const request: ChatRequest = {
   metadata: { surface: "support_chat" },
 };
 
+const documentRequest: ChatRequest = {
+  ...request,
+  messages: [
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "Summarize this PDF" },
+        {
+          type: "document",
+          attachment: {
+            attachment_id: "att_direct_pdf",
+            content_ref: "ref_direct_pdf",
+            media_type: "application/pdf",
+            byte_size: 1_024,
+            filename: "fixture.pdf",
+          },
+        },
+      ],
+    },
+  ],
+};
+
 const conversationTurnId = "conversation_turn_direct" as ConversationTurnId;
 const remoteTransportTurnId = "remote_transport_turn_direct";
 
@@ -111,6 +133,7 @@ class FakeAdapter implements ProviderAdapter {
       tool_calls: true,
       parallel_tool_calls: false,
       reasoning: true,
+      document_input: { supported: false },
       context_window_tokens: 8_192,
       max_output_tokens: 1_024,
     },
@@ -157,6 +180,152 @@ async function collect(events: AsyncIterable<StreamEvent>): Promise<StreamEvent[
 }
 
 describe("createDirectProviderTransport", () => {
+  it("rejects unsupported documents before host resolution or provider invocation", async () => {
+    const adapter = new FakeAdapter(() => {
+      throw new Error("unsupported documents must not invoke the provider");
+    });
+    const resolveDocumentReference = vi.fn(() => ({
+      media_type: "application/pdf" as const,
+      bytes: new Uint8Array([1]),
+    }));
+    const transport = createDirectProviderTransport({
+      adapter,
+      createContext: () => context(),
+      resolveDocumentReference,
+    });
+
+    expect(transport.capabilities.documentInput).toEqual({ supported: false });
+    await expect(
+      transport.startTurn({
+        conversationId: "conversation_direct",
+        conversationTurnId,
+        mutationId: "mutation_document_unsupported",
+        idempotencyKey: "idempotency_document_unsupported",
+        request: documentRequest,
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      error: {
+        code: "invalid_request",
+        message: "Document input is not supported by this transport.",
+        retryable: false,
+      },
+    });
+    expect(resolveDocumentReference).not.toHaveBeenCalled();
+    expect(adapter.invocation).toBeNull();
+  });
+
+  it("advertises valid configured document support and passes only the neutral resolver seam", async () => {
+    const delegate = new FakeAdapter(async function* (invocation) {
+      yield {
+        ...envelope(invocation, "response.started", 0),
+        type: "response.started",
+        attribution: invocation.context.attribution,
+      };
+      yield {
+        ...envelope(invocation, "response.completed", 1),
+        type: "response.completed",
+        outcome: "stop",
+      };
+      return { status: "completed", outcome: "stop", usage };
+    });
+    const adapter: ProviderAdapter = {
+      metadata: {
+        ...delegate.metadata,
+        capabilities: {
+          ...delegate.metadata.capabilities,
+          document_input: {
+            supported: true,
+            capability: {
+              supported_mime_types: ["application/pdf"],
+              max_document_count: 1,
+              max_document_bytes: 2_048,
+              requires_host_resolution: true,
+            },
+          },
+        },
+      },
+      invoke: (invocation) => delegate.invoke(invocation),
+    };
+    const resolveDocumentReference = vi.fn(() => ({
+      media_type: "application/pdf" as const,
+      bytes: new Uint8Array([1]),
+    }));
+    const transport = createDirectProviderTransport({
+      adapter,
+      createContext: () => context(),
+      resolveDocumentReference,
+    });
+
+    const documentInput = transport.capabilities.documentInput;
+    expect(documentInput.supported).toBe(true);
+    if (!documentInput.supported) throw new Error("document input should narrow");
+    expect(documentInput.capability).toEqual({
+      supported_mime_types: ["application/pdf"],
+      max_document_count: 1,
+      max_document_bytes: 2_048,
+      requires_host_resolution: true,
+    });
+
+    const started = await transport.startTurn({
+      conversationId: "conversation_direct",
+      conversationTurnId,
+      mutationId: "mutation_document_supported",
+      idempotencyKey: "idempotency_document_supported",
+      request: documentRequest,
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    await collect(started.value.observation.events);
+    expect((await started.value.observation.result).status).toBe("completed");
+    expect(delegate.invocation?.resolve_document_reference).toBe(
+      resolveDocumentReference,
+    );
+    expect(resolveDocumentReference).not.toHaveBeenCalled();
+  });
+
+  it("does not advertise resolver-required support without a configured resolver", async () => {
+    const delegate = new FakeAdapter(() => {
+      throw new Error("missing resolver must prevent provider invocation");
+    });
+    const adapter: ProviderAdapter = {
+      metadata: {
+        ...delegate.metadata,
+        capabilities: {
+          ...delegate.metadata.capabilities,
+          document_input: {
+            supported: true,
+            capability: {
+              supported_mime_types: ["application/pdf"],
+              max_document_count: 1,
+              max_document_bytes: 2_048,
+              requires_host_resolution: true,
+            },
+          },
+        },
+      },
+      invoke: (invocation) => delegate.invoke(invocation),
+    };
+    const transport = createDirectProviderTransport({
+      adapter,
+      createContext: () => context(),
+    });
+
+    expect(transport.capabilities.documentInput).toEqual({ supported: false });
+    const started = await transport.startTurn({
+      conversationId: "conversation_direct",
+      conversationTurnId,
+      mutationId: "mutation_document_missing_resolver",
+      idempotencyKey: "idempotency_document_missing_resolver",
+      request: documentRequest,
+    });
+    expect(started).toMatchObject({
+      ok: false,
+      error: { code: "invalid_request", retryable: false },
+    });
+    expect(delegate.invocation).toBeNull();
+  });
+
   it("maps and streams normalized text while projecting a validated usage receipt", async () => {
     const adapter = new FakeAdapter(async function* (invocation) {
       yield {
@@ -456,6 +625,7 @@ describe("createDirectProviderTransport", () => {
       },
     });
     expect(transport.capabilities.attachmentUpload.supported).toBe(false);
+    expect(transport.capabilities.documentInput.supported).toBe(false);
     expect(transport.capabilities.presence.supported).toBe(false);
     expect(transport.capabilities.synchronization.supported).toBe(false);
   });

@@ -930,6 +930,7 @@ async function pumpStream(
 export class ManagedRuntimeTransport implements ManagedRuntimeTransportContract {
   readonly capabilities = {
     authoritativeCancellation: { supported: false },
+    documentInput: { supported: false },
     attachmentUpload: { supported: false },
     presence: { supported: false },
     synchronization: { supported: false },
@@ -964,6 +965,13 @@ export class ManagedRuntimeTransport implements ManagedRuntimeTransportContract 
     if (!IDEMPOTENCY_KEY.test(input.idempotencyKey)) return failure(INVALID_REQUEST);
     try {
       request = parseChatRequest(input.request);
+      if (
+        request.messages.some((message) =>
+          message.content.some((part) => part.type === "document"),
+        )
+      ) {
+        return failure(INVALID_REQUEST);
+      }
       serializedBody = JSON.stringify(request);
     } catch {
       return failure(INVALID_REQUEST);

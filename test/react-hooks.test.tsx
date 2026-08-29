@@ -265,6 +265,7 @@ function offlinePairedTransport(observation?: TurnObservation<unknown>) {
   const transport: ConversationTransport<unknown, PairedRequest> = {
     capabilities: {
       authoritativeCancellation: { supported: false },
+      documentInput: { supported: false },
       attachmentUpload: { supported: false },
       presence: { supported: false },
       synchronization: { supported: false },

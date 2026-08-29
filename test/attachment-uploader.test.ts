@@ -9,7 +9,10 @@ import {
   type AttachmentUploadAdapter,
   type AttachmentUploadRequest,
 } from "../src/attachments/index.js";
-import type { AttachmentReference } from "../src/protocol.js";
+import {
+  AI_RUNTIME_PROTOCOL_LIMITS,
+  type AttachmentReference,
+} from "../src/protocol.js";
 
 interface OpaqueBinary {
   readonly bytes: Uint8Array;
@@ -46,7 +49,7 @@ const selection = (
   byteSize: 128,
   filename: "image.png",
   ...overrides,
-});
+} as AttachmentSelection<OpaqueBinary>);
 
 const reference = (
   suffix: string,
@@ -57,6 +60,32 @@ const reference = (
   media_type: "image/png",
   byte_size: 128,
   filename: "image.png",
+  ...overrides,
+});
+
+const documentSelection = (
+  fingerprint: string,
+  overrides: Partial<AttachmentSelection<OpaqueBinary>> = {},
+): AttachmentSelection<OpaqueBinary> => ({
+  source: source(2),
+  fingerprint,
+  idempotencyKey: `idem:${fingerprint}`,
+  kind: "document",
+  mediaType: "application/pdf",
+  byteSize: 256,
+  filename: "document.pdf",
+  ...overrides,
+} as AttachmentSelection<OpaqueBinary>);
+
+const documentReference = (
+  suffix: string,
+  overrides: Partial<AttachmentReference> = {},
+): AttachmentReference => ({
+  attachment_id: `att_${suffix}`,
+  content_ref: `ref_${suffix}`,
+  media_type: "application/pdf",
+  byte_size: 256,
+  filename: "document.pdf",
   ...overrides,
 });
 
@@ -107,6 +136,7 @@ describe("AttachmentUploader", () => {
       source: source(1),
       idempotencyKey: "idem:success",
       metadata: {
+        kind: "image",
         mediaType: "image/png",
         byteSize: 128,
         filename: "image.png",
@@ -120,6 +150,73 @@ describe("AttachmentUploader", () => {
       attempt: 1,
       progress: { uploadedBytes: 128, totalBytes: 128 },
     });
+  });
+
+  it("uploads a PDF with normalized document metadata", async () => {
+    const requests: AttachmentUploadRequest<OpaqueBinary>[] = [];
+    const uploader = createAttachmentUploader<OpaqueBinary>({
+      async upload(request) {
+        requests.push(request);
+        return documentReference("pdf");
+      },
+    });
+
+    const id = uploader.enqueue(documentSelection("pdf"));
+    await waitFor(
+      () => uploader.getSnapshot().items[0]?.status === "ready",
+      "PDF upload",
+    );
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      idempotencyKey: "idem:pdf",
+      metadata: {
+        kind: "document",
+        mediaType: "application/pdf",
+        byteSize: 256,
+        filename: "document.pdf",
+      },
+    });
+    expect(uploader.getSnapshot().items[0]).toMatchObject({
+      id,
+      kind: "document",
+      mediaType: "application/pdf",
+      status: "ready",
+      reference: documentReference("pdf"),
+    });
+  });
+
+  it("preserves ordering across a mixed image and PDF queue", async () => {
+    const pending: Array<Deferred<AttachmentReference>> = [];
+    const started: string[] = [];
+    const uploader = createAttachmentUploader<OpaqueBinary>(
+      {
+        upload(request) {
+          const operation = deferred<AttachmentReference>();
+          pending.push(operation);
+          started.push(`${request.metadata.kind}:${request.idempotencyKey}`);
+          return operation.promise;
+        },
+      },
+      { concurrency: 1 },
+    );
+
+    uploader.enqueue(selection("mixed-image"));
+    uploader.enqueue(documentSelection("mixed-pdf"));
+    expect(started).toEqual(["image:idem:mixed-image"]);
+
+    pending[0]?.resolve(reference("mixed_image"));
+    await waitFor(() => started.length === 2, "PDF queue start");
+    expect(started).toEqual([
+      "image:idem:mixed-image",
+      "document:idem:mixed-pdf",
+    ]);
+    pending[1]?.resolve(documentReference("mixed_pdf"));
+    await waitFor(() => uploader.getSnapshot().activeCount === 0);
+    expect(uploader.getSnapshot().items.map((item) => item.kind)).toEqual([
+      "image",
+      "document",
+    ]);
   });
 
   it("bounds active uploads and preserves queue order", async () => {
@@ -329,6 +426,137 @@ describe("AttachmentUploader", () => {
       },
     });
     expect(uploader.retry(id)).toBe(false);
+  });
+
+  it.each([
+    ["kind/MIME", { media_type: "image/png" }],
+    ["size", { byte_size: 255 }],
+    ["filename", { filename: "other.pdf" }],
+  ])("permanently rejects a PDF adapter result with mismatched %s", async (
+    _label,
+    overrides,
+  ) => {
+    const uploader = createAttachmentUploader<OpaqueBinary>({
+      async upload() {
+        return documentReference("mismatch", overrides as Partial<AttachmentReference>);
+      },
+    });
+    const id = uploader.enqueue(documentSelection(
+      `pdf-${_label.replaceAll(/[^A-Za-z0-9]/g, "-")}`,
+    ));
+    await waitFor(
+      () => uploader.getSnapshot().items[0]?.status === "failed",
+      "invalid PDF result",
+    );
+    expect(uploader.getSnapshot().items[0]).toMatchObject({
+      id,
+      status: "failed",
+      error: { code: "invalid_result", retryable: false },
+    });
+    expect(uploader.retry(id)).toBe(false);
+  });
+
+  it("rejects unsupported and kind-mismatched MIME types before adapter invocation", () => {
+    let calls = 0;
+    const uploader = createAttachmentUploader<OpaqueBinary>({
+      async upload() {
+        calls += 1;
+        return reference("unused");
+      },
+    });
+
+    expect(() => uploader.enqueue(selection("unsupported", {
+      mediaType: "image/bmp" as "image/png",
+    }))).toThrow(AttachmentUploadValidationError);
+    expect(() => uploader.enqueue({
+      ...documentSelection("document-as-image"),
+      kind: "image",
+    } as AttachmentSelection<OpaqueBinary>)).toThrow(AttachmentUploadValidationError);
+    expect(() => uploader.enqueue({
+      ...selection("image-as-document"),
+      kind: "document",
+    } as AttachmentSelection<OpaqueBinary>)).toThrow(AttachmentUploadValidationError);
+    expect(calls).toBe(0);
+    expect(uploader.getSnapshot().items).toEqual([]);
+  });
+
+  it("enforces protocol byte limits and configured per-kind queue counts before upload", async () => {
+    let calls = 0;
+    const uploader = createAttachmentUploader<OpaqueBinary>(
+      {
+        async upload(request) {
+          calls += 1;
+          return request.metadata.kind === "image"
+            ? reference("bounded")
+            : documentReference("bounded");
+        },
+      },
+      { maxImageCount: 1, maxDocumentCount: 1 },
+    );
+
+    expect(() => uploader.enqueue(selection("image-too-large", {
+      byteSize: AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMaxBytes + 1,
+    }))).toThrow(AttachmentUploadValidationError);
+    expect(() => uploader.enqueue(documentSelection("document-too-large", {
+      byteSize: AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMaxBytes + 1,
+    }))).toThrow(AttachmentUploadValidationError);
+    expect(calls).toBe(0);
+
+    uploader.enqueue(selection("bounded-image"));
+    uploader.enqueue(documentSelection("bounded-document"));
+    expect(() => uploader.enqueue(selection("second-image"))).toThrow(
+      AttachmentUploadValidationError,
+    );
+    expect(() => uploader.enqueue(documentSelection("second-document"))).toThrow(
+      AttachmentUploadValidationError,
+    );
+    await waitFor(() => uploader.getSnapshot().activeCount === 0);
+    expect(calls).toBe(2);
+
+    expect(() => createAttachmentUploader({ async upload() {
+      return reference("unused");
+    } }, {
+      maxImageCount: AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentsPerRequest + 1,
+    })).toThrow(AttachmentUploadValidationError);
+  });
+
+  it("keeps opaque binary data out of snapshots and forwards it only to the adapter", async () => {
+    const opaqueSource = Object.freeze({ bytes: new Uint8Array([7, 8, 9]) });
+    let received: OpaqueBinary | undefined;
+    const uploader = createAttachmentUploader<OpaqueBinary>({
+      async upload(request) {
+        received = request.source;
+        return reference("opaque");
+      },
+    });
+
+    uploader.enqueue(selection("opaque", { source: opaqueSource }));
+    await waitFor(() => uploader.getSnapshot().items[0]?.status === "ready");
+    const snapshot = uploader.getSnapshot();
+    expect(received).toBe(opaqueSource);
+    expect(snapshot.items[0]).not.toHaveProperty("source");
+    expect(JSON.stringify(snapshot)).not.toContain("bytes");
+  });
+
+  it("returns deeply frozen snapshots and references", async () => {
+    const uploader = createAttachmentUploader<OpaqueBinary>({
+      async upload() {
+        return reference("frozen");
+      },
+    });
+    uploader.enqueue(selection("frozen"));
+    await waitFor(() => uploader.getSnapshot().items[0]?.status === "ready");
+
+    const snapshot = uploader.getSnapshot();
+    const item = snapshot.items[0];
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(snapshot.items)).toBe(true);
+    expect(Object.isFrozen(item)).toBe(true);
+    expect(Object.isFrozen(item?.progress)).toBe(true);
+    expect(item?.status).toBe("ready");
+    if (item?.status === "ready") {
+      expect(Object.isFrozen(item.reference)).toBe(true);
+    }
   });
 
   it("validates selection metadata and bounded concurrency before queueing", () => {

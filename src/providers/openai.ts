@@ -18,6 +18,15 @@ import type {
   ProviderAdapterStream,
   ProviderUsage,
 } from "./index.js";
+import {
+  createOpenAIProviderContextCapability,
+  type OpenAIProviderContextCompactRequestFunction,
+  type OpenAIProviderContextInput,
+  type OpenAIProviderContextMeasureRequestFunction,
+} from "./openai-context.js";
+import type { ProviderContextCapability } from "../provider-context.js";
+
+export * from "./openai-context.js";
 
 export interface OpenAIImageSource {
   readonly url: string;
@@ -106,6 +115,8 @@ export type OpenAIImageReferenceResolver = (
 export interface OpenAIProviderAdapterOptions {
   readonly model: string;
   readonly request: OpenAIChatCompletionRequestFunction;
+  readonly measure_context?: OpenAIProviderContextMeasureRequestFunction;
+  readonly compact_context?: OpenAIProviderContextCompactRequestFunction;
   readonly resolve_image_reference?: OpenAIImageReferenceResolver;
   readonly context_window_tokens?: number | null;
   readonly max_output_tokens?: number | null;
@@ -411,6 +422,7 @@ function envelope(
 
 export class OpenAIProviderAdapter implements ProviderAdapter {
   readonly metadata: ProviderAdapterMetadata;
+  readonly provider_context: ProviderContextCapability<OpenAIProviderContextInput>;
   private readonly request: OpenAIChatCompletionRequestFunction;
   private readonly resolveImageReference: OpenAIImageReferenceResolver | undefined;
 
@@ -423,6 +435,15 @@ export class OpenAIProviderAdapter implements ProviderAdapter {
     }
     this.request = options.request;
     this.resolveImageReference = options.resolve_image_reference;
+    this.provider_context = createOpenAIProviderContextCapability({
+      model: options.model,
+      ...(options.measure_context === undefined
+        ? {}
+        : { measure_context: options.measure_context }),
+      ...(options.compact_context === undefined
+        ? {}
+        : { compact_context: options.compact_context }),
+    });
     this.metadata = {
       provider_id: "openai",
       model_id: options.model,
@@ -432,6 +453,7 @@ export class OpenAIProviderAdapter implements ProviderAdapter {
         tool_calls: options.supports_tool_calls ?? true,
         parallel_tool_calls: false,
         reasoning: true,
+        document_input: { supported: false },
         context_window_tokens: options.context_window_tokens ?? null,
         max_output_tokens: options.max_output_tokens ?? null,
       },
@@ -456,6 +478,13 @@ export class OpenAIProviderAdapter implements ProviderAdapter {
       this.metadata.capabilities.max_output_tokens !== null &&
       invocation.generation.max_output_tokens >
         this.metadata.capabilities.max_output_tokens
+    ) {
+      throw new OpenAIPreflightError();
+    }
+    if (
+      invocation.messages.some((message) =>
+        message.content.some((part) => part.type === "document"),
+      )
     ) {
       throw new OpenAIPreflightError();
     }

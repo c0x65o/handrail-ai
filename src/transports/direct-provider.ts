@@ -14,7 +14,12 @@ import type {
   ProviderAdapterError,
   ProviderAdapterMetadata,
   ProviderAdapterResult,
+  ProviderDocumentReferenceResolver,
   ProviderRequestContext,
+} from "../providers/index.js";
+import {
+  parseProviderDocumentInputCapability,
+  UNSUPPORTED_PROVIDER_DOCUMENT_INPUT,
 } from "../providers/index.js";
 import {
   projectProviderUsageToReceipt,
@@ -69,6 +74,8 @@ export type DirectProviderContextFactory = (
 export interface DirectProviderTransportOptions {
   readonly adapter: ProviderAdapter;
   readonly createContext: DirectProviderContextFactory;
+  /** Trusted host resolver passed only to adapters with negotiated document support. */
+  readonly resolveDocumentReference?: ProviderDocumentReferenceResolver;
 }
 
 export interface DirectProviderTurnObservationCompleted
@@ -398,6 +405,7 @@ async function pumpProvider(
   controller: AbortController,
   observation: DirectObservation,
   active: ActiveTurn,
+  resolveDocumentReference: ProviderDocumentReferenceResolver | undefined,
 ): Promise<void> {
   const events: StreamEvent[] = [];
   let heldTerminal: TerminalStreamEvent | null = null;
@@ -416,6 +424,9 @@ async function pumpProvider(
         correlation_hints: context.correlation_hints,
         ...(context.metadata === undefined ? {} : { metadata: context.metadata }),
       },
+      ...(resolveDocumentReference === undefined
+        ? {}
+        : { resolve_document_reference: resolveDocumentReference }),
     });
 
     let item = await stream.next();
@@ -449,6 +460,15 @@ async function pumpProvider(
 export function createDirectProviderTransport(
   options: DirectProviderTransportOptions,
 ): DirectProviderTransport {
+  const providerDocumentInput = parseProviderDocumentInputCapability(
+    options.adapter.metadata.capabilities.document_input,
+  );
+  const documentInput =
+    providerDocumentInput.supported &&
+    (!providerDocumentInput.capability.requires_host_resolution ||
+      options.resolveDocumentReference !== undefined)
+      ? providerDocumentInput
+      : UNSUPPORTED_PROVIDER_DOCUMENT_INPUT;
   const turns = new Map<string, ActiveTurn>();
   const turnKey = (conversationId: string, turnId: string): string =>
     `${conversationId.length}:${conversationId}${turnId}`;
@@ -477,6 +497,7 @@ export function createDirectProviderTransport(
         supported: true,
         capability: { cancelTurn },
       },
+      documentInput,
       attachmentUpload: { supported: false },
       presence: { supported: false },
       synchronization: { supported: false },
@@ -494,6 +515,35 @@ export function createDirectProviderTransport(
           message: "The provider-neutral request is invalid.",
           retryable: false,
         });
+      }
+
+      const documents = request.messages.flatMap((message) =>
+        message.content.filter((part) => part.type === "document"),
+      );
+      if (documents.length > 0) {
+        if (!documentInput.supported) {
+          return transportFailure({
+            code: "invalid_request",
+            message: "Document input is not supported by this transport.",
+            retryable: false,
+          });
+        }
+        const descriptor = documentInput.capability;
+        if (
+          documents.length > descriptor.max_document_count ||
+          documents.some(
+            (part) =>
+              !descriptor.supported_mime_types.includes(
+                part.attachment.media_type,
+              ) || part.attachment.byte_size > descriptor.max_document_bytes,
+          )
+        ) {
+          return transportFailure({
+            code: "invalid_request",
+            message: "Document input exceeds the negotiated transport capability.",
+            retryable: false,
+          });
+        }
       }
 
       const normalizedInput = { ...input, request };
@@ -529,6 +579,7 @@ export function createDirectProviderTransport(
         controller,
         observation,
         active,
+        options.resolveDocumentReference,
       );
 
       return {

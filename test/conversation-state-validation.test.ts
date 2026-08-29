@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { AI_RUNTIME_PROTOCOL_LIMITS } from "../src/protocol.js";
 import {
   CONVERSATION_EVENT_VERSION,
   parseConversationEvent,
@@ -162,6 +163,46 @@ function projectedApprovalState(): {
   };
 }
 
+function projectedAttachmentState(): {
+  readonly events: readonly ConversationEvent[];
+  readonly state: ConversationState;
+} {
+  const events = [
+    event(1, {
+      type: "message.created",
+      message_id: "message-attachments",
+      role: "user",
+      content: [{ type: "text", text: "Review these" }],
+    }),
+    event(2, {
+      type: "message.attachment_referenced",
+      message_id: "message-attachments",
+      attachment: {
+        attachment_id: "att_legacy_image",
+        media_type: "image/png",
+      },
+    }),
+    event(3, {
+      type: "message.attachment_referenced",
+      message_id: "message-attachments",
+      attachment: {
+        attachment_id: "att_pdf_checkpoint",
+        kind: "document",
+        media_type: "application/pdf",
+        filename: "checkpoint.pdf",
+        size_bytes: 2_048,
+      },
+    }),
+  ] as const;
+  return {
+    events,
+    state: events.reduce(
+      reduceConversationEvent,
+      createInitialConversationState(conversationId),
+    ),
+  };
+}
+
 function withTurnFields(overrides: Record<string, unknown>): unknown {
   const { state } = projectedState();
   return {
@@ -218,6 +259,87 @@ describe("isConversationState", () => {
     expect(state.messages.find((message) => message.role === "assistant")?.turn_id)
       .toBe("turn-current");
     expect(isConversationState(state, conversationId, state.revision)).toBe(true);
+  });
+
+  it("strictly accepts linked legacy-image and PDF attachment metadata", () => {
+    const { state } = projectedAttachmentState();
+    const serialized = JSON.stringify(state);
+
+    expect(state.messages[0]?.attachments).toEqual([
+      { attachment_id: "att_legacy_image", media_type: "image/png" },
+      {
+        attachment_id: "att_pdf_checkpoint",
+        kind: "document",
+        media_type: "application/pdf",
+        filename: "checkpoint.pdf",
+        size_bytes: 2_048,
+      },
+    ]);
+    expect(isConversationState(state, conversationId, state.revision)).toBe(true);
+    expect(serialized).not.toMatch(
+      /"(?:content_ref|provider_file_id|remote_url|binary|bytes|blob)":/,
+    );
+  });
+
+  it("rejects attachment checkpoint fields that durable events reject", () => {
+    const { state } = projectedAttachmentState();
+    const pdf = state.messages[0]!.attachments[1]!;
+    const malformedReferences: unknown[] = [
+      { ...pdf, attachment_id: "file_provider_123" },
+      { ...pdf, filename: "../unsafe.pdf" },
+      { ...pdf, size_bytes: 0 },
+      {
+        ...pdf,
+        size_bytes: AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMaxBytes + 1,
+      },
+      { ...pdf, kind: "image" },
+      { ...pdf, media_type: "application/octet-stream" },
+      { ...pdf, content_ref: "ref_binary" },
+      { ...pdf, provider_file_id: "file_123" },
+      { ...pdf, bytes: new Uint8Array([37, 80, 68, 70]) },
+      { ...pdf, binary: new Blob(["%PDF"]) },
+    ];
+
+    for (const malformedReference of malformedReferences) {
+      expect(isConversationState({
+        ...state,
+        messages: [{
+          ...state.messages[0],
+          attachments: [state.messages[0]!.attachments[0], malformedReference],
+        }],
+        attachments: [
+          state.attachments[0],
+          {
+            ...state.attachments[1],
+            attachment_id: (malformedReference as Record<string, unknown>).attachment_id,
+            reference: malformedReference,
+          },
+        ],
+      }, conversationId, state.revision)).toBe(false);
+    }
+
+    expect(isConversationState({
+      ...state,
+      messages: [{ ...state.messages[0], content_ref: "ref_binary" }],
+    }, conversationId, state.revision)).toBe(false);
+    expect(isConversationState({
+      ...state,
+      messages: [{
+        ...state.messages[0],
+        content: [{ type: "text", text: "Review these", content_ref: "ref_binary" }],
+      }],
+    }, conversationId, state.revision)).toBe(false);
+    expect(isConversationState({
+      ...state,
+      attachments: [{ ...state.attachments[0], provider_file_id: "file_123" }],
+    }, conversationId, state.revision)).toBe(false);
+    expect(isConversationState({
+      ...state,
+      attachments: [{
+        ...state.attachments[0],
+        reference: { ...state.attachments[0]!.reference, filename: "different.png" },
+      }, state.attachments[1]],
+    }, conversationId, state.revision)).toBe(false);
   });
 
   it("accepts absent, null, and nonempty message turn identifiers", () => {
@@ -438,7 +560,7 @@ describe("isConversationState", () => {
     }, conversationId, state.revision)).toBe(false);
   });
 
-  it("loads an approval projection through the version-2 checkpoint path", async () => {
+  it("loads an approval projection through the current checkpoint path", async () => {
     const { events, state } = projectedApprovalState();
     const eventStore = new InMemoryConversationEventStore();
     await eventStore.append({
@@ -459,7 +581,7 @@ describe("isConversationState", () => {
       checkpointPolicy: false,
     });
 
-    expect(CONVERSATION_CHECKPOINT_SCHEMA_VERSION).toBe(2);
+    expect(CONVERSATION_CHECKPOINT_SCHEMA_VERSION).toBe(3);
     expect(replayed.checkpointStatus).toBe("used");
     expect(replayed.replayedEventCount).toBe(0);
     expect(replayed.state).toEqual(state);
@@ -489,5 +611,32 @@ describe("isConversationState", () => {
     expect(replayed.checkpointStatus).toBe("used");
     expect(replayed.replayedEventCount).toBe(0);
     expect(replayed.state).toEqual(state);
+  });
+
+  it("loads bounded attachment metadata through the checkpoint replay path", async () => {
+    const { events, state } = projectedAttachmentState();
+    const eventStore = new InMemoryConversationEventStore();
+    await eventStore.append({
+      conversationId,
+      expectedRevision: null,
+      events,
+    });
+    await eventStore.checkpoints.write({
+      conversationId,
+      schemaVersion: CONVERSATION_CHECKPOINT_SCHEMA_VERSION,
+      revision: state.revision!,
+      state: JSON.parse(JSON.stringify(state)) as ConversationJsonValue,
+    });
+
+    const replayed = await replayConversation({
+      conversationId,
+      eventStore,
+      checkpointPolicy: false,
+    });
+
+    expect(replayed.checkpointStatus).toBe("used");
+    expect(replayed.replayedEventCount).toBe(0);
+    expect(replayed.state).toEqual(state);
+    expect(Object.isFrozen(replayed.state.attachments[1]?.reference)).toBe(true);
   });
 });

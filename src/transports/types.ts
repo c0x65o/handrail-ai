@@ -3,6 +3,7 @@ import type {
   ConversationTurnCancellationReason,
   ConversationTurnId,
 } from "../conversation/events.js";
+import type { DocumentInputCapabilityDescriptor } from "../providers/index.js";
 import type { NormalizedUsageReceipt } from "../usage.js";
 
 /**
@@ -166,6 +167,8 @@ export interface ConversationTransportCapabilities<
   TSynchronization = unknown,
 > {
   readonly authoritativeCancellation: NegotiatedTransportCapability<AuthoritativeTurnCancellation>;
+  /** Provider-neutral document limits negotiated before a turn is started. */
+  readonly documentInput: NegotiatedTransportCapability<DocumentInputCapabilityDescriptor>;
   readonly attachmentUpload: NegotiatedTransportCapability<TAttachmentUpload>;
   readonly presence: NegotiatedTransportCapability<TPresence>;
   readonly synchronization: NegotiatedTransportCapability<TSynchronization>;

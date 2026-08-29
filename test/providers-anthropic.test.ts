@@ -587,6 +587,7 @@ describe("AnthropicProviderAdapter", () => {
         tool_calls: true,
         parallel_tool_calls: false,
         reasoning: true,
+        document_input: { supported: false },
         context_window_tokens: 200_000,
         max_output_tokens: 8192,
       },
@@ -594,5 +595,37 @@ describe("AnthropicProviderAdapter", () => {
     expect(hostConfiguredRequest).toHaveBeenCalledOnce();
     expect(output.result.status).toBe("completed");
     expectValid(output.events);
+  });
+
+  it("rejects documents before resolving references or calling upstream", async () => {
+    const request = vi.fn(() => textStream());
+    const resolveDocumentReference = vi.fn(() => ({
+      media_type: "application/pdf" as const,
+      bytes: new Uint8Array([1]),
+    }));
+    const adapter = createAnthropicProviderAdapter({ model: "claude-fixture", request });
+    const output = await collect(adapter.invoke(invocation({
+      messages: [{
+        role: "user",
+        content: [{
+          type: "document",
+          attachment: {
+            attachment_id: "att_anthropic_pdf",
+            content_ref: "ref_anthropic_pdf",
+            media_type: "application/pdf",
+            byte_size: 10,
+          },
+        }],
+      }],
+      resolve_document_reference: resolveDocumentReference,
+    })));
+
+    expect(adapter.metadata.capabilities.document_input).toEqual({ supported: false });
+    expect(resolveDocumentReference).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+    expect(output.result).toMatchObject({
+      status: "failed",
+      error: { kind: "client", code: "invalid_request" },
+    });
   });
 });

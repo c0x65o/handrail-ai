@@ -136,6 +136,7 @@ function observation(
 class ScriptedTransport implements ConversationTransport<unknown, ChatRequest> {
   readonly capabilities = {
     authoritativeCancellation: { supported: false },
+    documentInput: { supported: false },
     attachmentUpload: { supported: false },
     presence: { supported: false },
     synchronization: { supported: false },

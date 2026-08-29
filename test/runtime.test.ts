@@ -319,6 +319,7 @@ function pendingObservation(onDisconnect: () => void): TurnObservation<unknown> 
 class FakeTransport implements ConversationTransport<unknown, FakeRequest> {
   readonly capabilities = {
     authoritativeCancellation: { supported: false },
+    documentInput: { supported: false },
     attachmentUpload: { supported: false },
     presence: { supported: false },
     synchronization: { supported: false },
@@ -1059,7 +1060,7 @@ describe("createConversationRuntime", () => {
     const sending = runtime.sendMessage({
       content: "Describe this image",
       attachments: [{
-        attachment_id: "attachment_runtime" as never,
+        attachment_id: "att_runtime" as never,
         media_type: "image/png",
         filename: "runtime.png",
         size_bytes: 128,
@@ -1085,7 +1086,7 @@ describe("createConversationRuntime", () => {
       {
         role: "user",
         content: [{ type: "text", text: "Describe this image" }],
-        attachments: [{ attachment_id: "attachment_runtime" }],
+        attachments: [{ attachment_id: "att_runtime" }],
       },
       {
         role: "assistant",

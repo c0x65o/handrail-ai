@@ -208,7 +208,7 @@ describe("reduceConversationEvent", () => {
           type: "message.attachment_referenced",
           message_id: "message_stream",
           attachment: {
-            attachment_id: "attachment_stream",
+            attachment_id: "att_stream",
             media_type: "image/png",
           },
         },
@@ -241,7 +241,7 @@ describe("reduceConversationEvent", () => {
       turn_id: "turn_stream",
       role: "assistant",
       content: [{ type: "text", text: "Image received" }],
-      attachments: [{ attachment_id: "attachment_stream" }],
+      attachments: [{ attachment_id: "att_stream" }],
       created_at: "2026-08-27T12:00:03.000Z",
       attribution: {
         actor: { type: "assistant" },
@@ -332,13 +332,13 @@ describe("reduceConversationEvent", () => {
       },
     },
     {
-      name: "attachment-bearing message",
+      name: "PDF attachment-bearing message",
       events: [
         event({
           revision: 1,
           payload: {
             type: "message.created",
-            message_id: "message_image",
+            message_id: "message_document",
             role: "user",
             content: [{ type: "text", text: "What is this?" }],
           },
@@ -347,11 +347,12 @@ describe("reduceConversationEvent", () => {
           revision: 2,
           payload: {
             type: "message.attachment_referenced",
-            message_id: "message_image",
+            message_id: "message_document",
             attachment: {
-              attachment_id: "attachment_01",
-              media_type: "image/png",
-              filename: "photo.png",
+              attachment_id: "att_document_01",
+              kind: "document",
+              media_type: "application/pdf",
+              filename: "receipt.pdf",
               size_bytes: 42,
             },
           },
@@ -360,9 +361,14 @@ describe("reduceConversationEvent", () => {
       assert: (state: ConversationState) => {
         expect(state.messages[0]?.attachments).toHaveLength(1);
         expect(state.attachments[0]).toMatchObject({
-          message_id: "message_image",
-          attachment_id: "attachment_01",
-          reference: { filename: "photo.png", size_bytes: 42 },
+          message_id: "message_document",
+          attachment_id: "att_document_01",
+          reference: {
+            kind: "document",
+            media_type: "application/pdf",
+            filename: "receipt.pdf",
+            size_bytes: 42,
+          },
         });
       },
     },
@@ -452,6 +458,67 @@ describe("reduceConversationEvent", () => {
     });
   }
 
+  it("clones, deeply freezes, and deterministically deduplicates PDF metadata", () => {
+    const sourceAttachment = {
+      attachment_id: "att_immutable_pdf",
+      kind: "document",
+      media_type: "application/pdf",
+      filename: "original.pdf",
+      size_bytes: 512,
+    };
+    const events = [
+      event({
+        revision: 1,
+        payload: {
+          type: "message.created",
+          message_id: "message_pdf",
+          role: "user",
+          content: [{ type: "text", text: "Review this" }],
+        },
+      }),
+      event({
+        revision: 2,
+        payload: {
+          type: "message.attachment_referenced",
+          message_id: "message_pdf",
+          attachment: sourceAttachment,
+        },
+      }),
+      event({
+        revision: 3,
+        payload: {
+          type: "message.attachment_referenced",
+          message_id: "message_pdf",
+          attachment: {
+            ...sourceAttachment,
+            filename: "conflicting-repeat.pdf",
+          },
+        },
+      }),
+    ];
+
+    const state = replay(events);
+    const independentlyReplayed = replay(events);
+    sourceAttachment.filename = "mutated-after-reduction.pdf";
+
+    expect(state.messages[0]?.attachments).toEqual([{
+      attachment_id: "att_immutable_pdf",
+      kind: "document",
+      media_type: "application/pdf",
+      filename: "original.pdf",
+      size_bytes: 512,
+    }]);
+    expect(state.attachments).toHaveLength(1);
+    expect(Object.isFrozen(state)).toBe(true);
+    expect(Object.isFrozen(state.messages[0]?.attachments)).toBe(true);
+    expect(Object.isFrozen(state.messages[0]?.attachments[0])).toBe(true);
+    expect(Object.isFrozen(state.attachments[0]?.reference)).toBe(true);
+    expect(JSON.stringify(independentlyReplayed)).toBe(JSON.stringify(state));
+    expect(JSON.stringify(state)).not.toMatch(
+      /"(?:content_ref|provider_file_id|remote_url|binary|bytes|blob)":/,
+    );
+  });
+
   it("makes duplicate identities and whole-log replay byte-equivalent no-ops", () => {
     const once = replay(textTurn);
     const duplicateEvent = reduceConversationEvent(once, textTurn[0]);
@@ -499,7 +566,7 @@ describe("reduceConversationEvent", () => {
           type: "message.attachment_referenced",
           message_id: "message_first",
           attachment: {
-            attachment_id: "attachment_first",
+            attachment_id: "att_first",
             media_type: "image/png",
           },
         },
@@ -531,7 +598,7 @@ describe("reduceConversationEvent", () => {
     expect(state.messages[0]).toMatchObject({
       role: "user",
       content: [{ type: "text", text: "First" }],
-      attachments: [{ attachment_id: "attachment_first" }],
+      attachments: [{ attachment_id: "att_first" }],
     });
   });
 

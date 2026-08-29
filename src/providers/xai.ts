@@ -384,6 +384,7 @@ export class XAIProviderAdapter implements ProviderAdapter {
         tool_calls: options.supports_tool_calls ?? false,
         parallel_tool_calls: false,
         reasoning: options.supports_reasoning ?? false,
+        document_input: { supported: false },
         context_window_tokens: options.context_window_tokens ?? null,
         max_output_tokens: options.max_output_tokens ?? null,
       },
@@ -414,6 +415,13 @@ export class XAIProviderAdapter implements ProviderAdapter {
     if (
       this.metadata.capabilities.max_output_tokens !== null &&
       invocation.generation.max_output_tokens > this.metadata.capabilities.max_output_tokens
+    ) {
+      throw new XAIPreflightError();
+    }
+    if (
+      invocation.messages.some((message) =>
+        message.content.some((part) => part.type === "document"),
+      )
     ) {
       throw new XAIPreflightError();
     }

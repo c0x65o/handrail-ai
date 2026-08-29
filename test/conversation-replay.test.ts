@@ -103,6 +103,45 @@ const history = [
   }),
 ] as const;
 
+const attachmentHistory = [
+  event({
+    revision: 1,
+    payload: {
+      type: "message.created",
+      message_id: "message-attachments",
+      role: "user",
+      content: [{ type: "text", text: "Review attachments" }],
+    },
+  }),
+  event({
+    revision: 2,
+    payload: {
+      type: "message.attachment_referenced",
+      message_id: "message-attachments",
+      attachment: {
+        attachment_id: "att_legacy_replay",
+        media_type: "image/png",
+        filename: "legacy.png",
+        size_bytes: 128,
+      },
+    },
+  }),
+  event({
+    revision: 3,
+    payload: {
+      type: "message.attachment_referenced",
+      message_id: "message-attachments",
+      attachment: {
+        attachment_id: "att_pdf_replay",
+        kind: "document",
+        media_type: "application/pdf",
+        filename: "durable.pdf",
+        size_bytes: 4_096,
+      },
+    },
+  }),
+] as const;
+
 const approvalHistory = [
   event({
     revision: 1,
@@ -234,6 +273,44 @@ describe("replayConversation", () => {
     expect(result.lastRevision).toBe(5);
   });
 
+  it("replays legacy image metadata unchanged alongside immutable PDF metadata", async () => {
+    const eventStore = new InMemoryConversationEventStore();
+    await append(eventStore, attachmentHistory);
+
+    const first = await replayConversation({
+      conversationId,
+      eventStore,
+      checkpointPolicy: false,
+    });
+    const restarted = await replayConversation({
+      conversationId,
+      eventStore,
+      checkpointPolicy: false,
+    });
+
+    expect(first.state).toEqual(reduce(attachmentHistory));
+    expect(restarted.state).toEqual(first.state);
+    expect(restarted.state.messages[0]?.attachments).toEqual([
+      {
+        attachment_id: "att_legacy_replay",
+        media_type: "image/png",
+        filename: "legacy.png",
+        size_bytes: 128,
+      },
+      {
+        attachment_id: "att_pdf_replay",
+        kind: "document",
+        media_type: "application/pdf",
+        filename: "durable.pdf",
+        size_bytes: 4_096,
+      },
+    ]);
+    expect(Object.isFrozen(restarted.state.messages[0]?.attachments[1])).toBe(true);
+    expect(JSON.stringify(restarted.state)).not.toMatch(
+      /"(?:content_ref|provider_file_id|remote_url|binary|bytes|blob)":/,
+    );
+  });
+
   it("restarts from the durable log with an immutable approval projection", async () => {
     const eventStore = new InMemoryConversationEventStore();
     await append(eventStore, approvalHistory);
@@ -311,7 +388,7 @@ describe("replayConversation", () => {
       checkpointPolicy: false,
     });
 
-    expect(CONVERSATION_CHECKPOINT_SCHEMA_VERSION).toBe(2);
+    expect(CONVERSATION_CHECKPOINT_SCHEMA_VERSION).toBe(3);
     expect(result.checkpointStatus).toBe("invalid");
     expect(result.replayedEventCount).toBe(approvalHistory.length);
     expect(result.state).toEqual(reduce(approvalHistory));

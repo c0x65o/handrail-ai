@@ -88,6 +88,16 @@ test("exports citation records and normalization from the built core entry", asy
   assert.equal(typeof imported.deduplicateCitationRecords, "function");
 });
 
+test("exports the approval proposal store contract from the built core entry", async () => {
+  const moduleUrl = pathToFileURL(
+    path.join(packageRoot, packageJson.exports["."].import),
+  ).href;
+  const imported = await import(moduleUrl);
+  assert.equal(typeof imported.InMemoryApprovalProposalStore, "function");
+  assert.equal(typeof imported.ApprovalProposalStoreError, "function");
+  assert.equal(typeof imported.APPROVAL_PROPOSAL_STORE_LIMITS, "object");
+});
+
 test("imports core and browser entries when React resolution is unavailable", () => {
   const loaderUrl = new URL("./fixtures/reject-react-loader.mjs", import.meta.url);
   const entryUrls = [".", "./browser"].map((exportName) =>

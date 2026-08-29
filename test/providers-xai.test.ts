@@ -123,6 +123,7 @@ describe("XAIProviderAdapter", () => {
         tool_calls: false,
         parallel_tool_calls: false,
         reasoning: true,
+        document_input: { supported: false },
         context_window_tokens: null,
         max_output_tokens: null,
       },
@@ -425,5 +426,37 @@ describe("XAIProviderAdapter", () => {
     expect(serialized).not.toContain("Bearer should-not-leak");
     expect(serialized).not.toContain("reasoning_content");
     expectValid(output.events);
+  });
+
+  it("rejects documents before resolving references or calling upstream", async () => {
+    const request = vi.fn(() => textStream());
+    const resolveDocumentReference = vi.fn(() => ({
+      media_type: "application/pdf" as const,
+      bytes: new Uint8Array([1]),
+    }));
+    const adapter = createXAIProviderAdapter({ model: "grok-fixture", request });
+    const output = await collect(adapter.invoke(invocation({
+      messages: [{
+        role: "user",
+        content: [{
+          type: "document",
+          attachment: {
+            attachment_id: "att_xai_pdf",
+            content_ref: "ref_xai_pdf",
+            media_type: "application/pdf",
+            byte_size: 10,
+          },
+        }],
+      }],
+      resolve_document_reference: resolveDocumentReference,
+    })));
+
+    expect(adapter.metadata.capabilities.document_input).toEqual({ supported: false });
+    expect(resolveDocumentReference).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+    expect(output.result).toMatchObject({
+      status: "failed",
+      error: { kind: "client", code: "invalid_request" },
+    });
   });
 });

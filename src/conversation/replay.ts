@@ -21,9 +21,9 @@ import {
   type ConversationStore,
 } from "./store.js";
 
-// Version 2 adds the strict durable approval proposal projection. Version 1
+// Version 3 adds normalized citation source/link projections. Older
 // checkpoints intentionally fall back to full durable-log replay.
-export const CONVERSATION_CHECKPOINT_SCHEMA_VERSION = 2 as const;
+export const CONVERSATION_CHECKPOINT_SCHEMA_VERSION = 3 as const;
 
 export interface ConversationCheckpointPolicy {
   /** Write after at least this many events have been folded since the checkpoint. */

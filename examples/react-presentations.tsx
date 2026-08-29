@@ -196,6 +196,7 @@ export class ReactPresentationTransport
         },
       },
     },
+    documentInput: { supported: false },
     attachmentUpload: { supported: false },
     presence: { supported: false },
     synchronization: { supported: false },

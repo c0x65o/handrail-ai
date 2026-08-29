@@ -249,6 +249,48 @@ describe("ManagedRuntimeTransport", () => {
     expect("ManagedRuntimeTransport" in browserEntry).toBe(false);
   });
 
+  it("rejects document input before the managed runtime fetch boundary", async () => {
+    let fetchCalls = 0;
+    const transport = transportFor(async () => {
+      fetchCalls += 1;
+      return streamResponse(sseFrame(started) + sseFrame(completed));
+    });
+    const documentRequest: ChatRequest = {
+      ...request,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              attachment: {
+                attachment_id: "att_managed_pdf",
+                content_ref: "ref_managed_pdf",
+                media_type: "application/pdf",
+                byte_size: 1_024,
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    expect(transport.capabilities.documentInput).toEqual({ supported: false });
+    await expect(
+      transport.startTurn({
+        conversationId: "conversation_managed",
+        conversationTurnId,
+        mutationId: "mutation_managed_document",
+        idempotencyKey: "managed.document-1",
+        request: documentRequest,
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      error: { code: "invalid_request", retryable: false },
+    });
+    expect(fetchCalls).toBe(0);
+  });
+
   it("parses split UTF-8, CRLF, comments, multiline data, and multiple frames per chunk", async () => {
     const events: StreamEvent[] = [
       started,
@@ -615,6 +657,7 @@ describe("ManagedRuntimeTransport", () => {
     expect(signal?.aborted).toBe(true);
     expect(transport.capabilities).toEqual({
       authoritativeCancellation: { supported: false },
+      documentInput: { supported: false },
       attachmentUpload: { supported: false },
       presence: { supported: false },
       synchronization: { supported: false },

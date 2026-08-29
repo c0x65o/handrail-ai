@@ -27,6 +27,7 @@ import type {
   ConversationUsageReceiptId,
   ToolLoopBudget,
 } from "./events.js";
+import type { Citation, CitationSource } from "../citations.js";
 
 export type ConversationStateJsonPrimitive = string | number | boolean | null;
 export type ConversationStateJsonValue =
@@ -46,7 +47,7 @@ export interface ConversationMessageRecord {
   readonly message_id: ConversationMessageId;
   /** The originating turn for incrementally appended assistant text. */
   readonly turn_id?: ConversationTurnId | null;
-  /** Null only when an attachment referenced the message before it was created. */
+  /** Null only when an attachment or citation referenced it before creation. */
   readonly role: ConversationMessageRole | null;
   readonly content: readonly Readonly<ConversationMessageContentPart>[];
   readonly attachments: readonly Readonly<ConversationAttachmentReference>[];
@@ -239,6 +240,10 @@ export interface ConversationState {
   readonly processed_mutation_ids: readonly ConversationClientMutationId[];
   readonly messages: readonly ConversationMessageRecord[];
   readonly attachments: readonly ConversationAttachmentRecord[];
+  /** First-seen normalized source identities, including sources for pending links. */
+  readonly citation_sources: readonly CitationSource[];
+  /** Normalized links; targets may be placeholders until their facts arrive. */
+  readonly citations: readonly Citation[];
   readonly turns: readonly ConversationTurnRecord[];
   readonly active_turn_id: ConversationTurnId | null;
   readonly tool_calls: readonly ConversationToolCallRecord[];
@@ -262,6 +267,8 @@ export function createInitialConversationState(
     processed_mutation_ids: Object.freeze([]),
     messages: Object.freeze([]),
     attachments: Object.freeze([]),
+    citation_sources: Object.freeze([]),
+    citations: Object.freeze([]),
     turns: Object.freeze([]),
     active_turn_id: null,
     tool_calls: Object.freeze([]),

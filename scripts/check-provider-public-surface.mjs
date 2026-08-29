@@ -30,9 +30,16 @@ const runtimeNeutralFiles = files.filter(
 const runtimeNeutralDeclarations = runtimeNeutralFiles
   .map((path) => readFileSync(path, "utf8"))
   .join("\n");
+const runtimeNeutralDeclarationCode = runtimeNeutralDeclarations
+  .replace(/\/\*[\s\S]*?\*\//gu, "")
+  .replace(/\/\/[^\n]*/gu, "");
 const packageEntry = readFileSync(join(distDirectory, "index.d.ts"), "utf8");
 const openAIEntry = readFileSync(
   join(distDirectory, "providers", "openai.d.ts"),
+  "utf8",
+);
+const openAIContextEntry = readFileSync(
+  join(distDirectory, "providers", "openai-context.d.ts"),
   "utf8",
 );
 const anthropicEntry = readFileSync(
@@ -63,9 +70,24 @@ assert.match(
   "the package entry point must export the conversation transport contract",
 );
 assert.match(
+  packageEntry,
+  /export \* from ["']\.\/provider-context\.js["'];/,
+  "the package entry point must export only the provider-neutral context contract",
+);
+assert.match(
   openAIEntry,
   /export declare (?:class OpenAIProviderAdapter|function createOpenAIProviderAdapter)/,
   "the opt-in OpenAI entry must export its provider adapter",
+);
+assert.match(
+  openAIEntry,
+  /export \* from ["']\.\/openai-context\.js["'];/,
+  "the opt-in OpenAI entry must export its SDK-independent context boundary",
+);
+assert.match(
+  openAIContextEntry,
+  /export declare function createOpenAIProviderContextCapability/,
+  "the opt-in OpenAI context boundary must expose capability construction",
 );
 assert.match(
   anthropicEntry,
@@ -94,7 +116,7 @@ assert.doesNotMatch(
 );
 
 const declarationsCheckedForSdkImports =
-  `${runtimeNeutralDeclarations}\n${openAIEntry}\n${anthropicEntry}\n${geminiEntry}\n${xaiEntry}\n${managedEntry}`;
+  `${runtimeNeutralDeclarations}\n${openAIEntry}\n${openAIContextEntry}\n${anthropicEntry}\n${geminiEntry}\n${xaiEntry}\n${managedEntry}`;
 const externalImports = [
   ...declarationsCheckedForSdkImports.matchAll(/from ["']([^"']+)["']/g),
 ]
@@ -127,7 +149,7 @@ const forbiddenMarkers = [
 
 for (const marker of forbiddenMarkers) {
   assert.doesNotMatch(
-    runtimeNeutralDeclarations,
+    runtimeNeutralDeclarationCode,
     marker,
     `public declarations contain provider-native marker ${marker.source}`,
   );

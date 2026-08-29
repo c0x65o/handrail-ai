@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  AI_RUNTIME_PROTOCOL_LIMITS,
   AI_RUNTIME_PROTOCOL_VERSION,
   isStreamEvent,
+  parseProviderDocumentInputCapability,
   parseStreamEvents,
   type AuthoritativeAttribution,
   type ProviderAdapter,
@@ -11,6 +13,7 @@ import {
   type ProviderAdapterResult,
   type ProviderAdapterStream,
   type ProviderCost,
+  type ProviderDocumentInputCapability,
   type ProviderUsage,
   type StreamEvent,
 } from "../src/index.js";
@@ -96,6 +99,7 @@ class FakeProviderAdapter implements ProviderAdapter {
       tool_calls: true,
       parallel_tool_calls: false,
       reasoning: true,
+      document_input: { supported: false },
       context_window_tokens: 8_192,
       max_output_tokens: 1_024,
     },
@@ -240,6 +244,127 @@ function expectValidV1Sequence(events: StreamEvent[]) {
 }
 
 describe("provider adapter contract", () => {
+  it("narrows supported and unsupported document capabilities", () => {
+    const capabilities: ProviderDocumentInputCapability[] = [
+      parseProviderDocumentInputCapability({ supported: false }),
+      parseProviderDocumentInputCapability({
+        supported: true,
+        capability: {
+          supported_mime_types: ["application/pdf"],
+          max_document_count: 2,
+          max_document_bytes: 1_024,
+          requires_host_resolution: true,
+        },
+      }),
+    ];
+
+    expect(capabilities[0]?.supported).toBe(false);
+    const supported = capabilities[1];
+    if (supported === undefined || !supported.supported) {
+      throw new Error("document capability should be supported");
+    }
+    expect(supported.capability).toEqual({
+      supported_mime_types: ["application/pdf"],
+      max_document_count: 2,
+      max_document_bytes: 1_024,
+      requires_host_resolution: true,
+    });
+  });
+
+  it.each([
+    ["malformed", null],
+    [
+      "empty MIME list",
+      {
+        supported: true,
+        capability: {
+          supported_mime_types: [],
+          max_document_count: 1,
+          max_document_bytes: 1,
+          requires_host_resolution: true,
+        },
+      },
+    ],
+    [
+      "duplicate MIME list",
+      {
+        supported: true,
+        capability: {
+          supported_mime_types: ["application/pdf", "application/pdf"],
+          max_document_count: 1,
+          max_document_bytes: 1,
+          requires_host_resolution: true,
+        },
+      },
+    ],
+    [
+      "unbounded count",
+      {
+        supported: true,
+        capability: {
+          supported_mime_types: ["application/pdf"],
+          max_document_count: Number.POSITIVE_INFINITY,
+          max_document_bytes: 1,
+          requires_host_resolution: true,
+        },
+      },
+    ],
+    [
+      "over-protocol count",
+      {
+        supported: true,
+        capability: {
+          supported_mime_types: ["application/pdf"],
+          max_document_count:
+            AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentsPerRequest + 1,
+          max_document_bytes: 1,
+          requires_host_resolution: true,
+        },
+      },
+    ],
+    [
+      "over-protocol bytes",
+      {
+        supported: true,
+        capability: {
+          supported_mime_types: ["application/pdf"],
+          max_document_count: 1,
+          max_document_bytes:
+            AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMaxBytes + 1,
+          requires_host_resolution: true,
+        },
+      },
+    ],
+    [
+      "unbounded bytes",
+      {
+        supported: true,
+        capability: {
+          supported_mime_types: ["application/pdf"],
+          max_document_count: 1,
+          max_document_bytes: Number.POSITIVE_INFINITY,
+          requires_host_resolution: true,
+        },
+      },
+    ],
+    [
+      "unsupported MIME",
+      {
+        supported: true,
+        capability: {
+          supported_mime_types: ["text/plain"],
+          max_document_count: 1,
+          max_document_bytes: 1,
+          requires_host_resolution: true,
+        },
+      },
+    ],
+  ])("rejects %s document capability descriptors", (_label, capability) => {
+    expect(() => parseProviderDocumentInputCapability(capability)).toThrow(
+      TypeError,
+    );
+  });
+
   it("streams normalized text events and returns exact normalized usage", async () => {
     const adapter: ProviderAdapter = new FakeProviderAdapter("text");
     const output = await collect(adapter.invoke(invocation()));

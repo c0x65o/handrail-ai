@@ -1,9 +1,21 @@
-import type { AttachmentReference, ImageMimeType } from "../protocol.js";
+import type {
+  AttachmentMimeType,
+  AttachmentReference,
+} from "../protocol.js";
+
+export type AttachmentUploadKind = "image" | "document";
 
 export interface AttachmentUploadMetadata {
-  readonly mediaType: ImageMimeType;
+  /** Required for documents; omitted legacy image metadata is normalized to image. */
+  readonly kind?: AttachmentUploadKind;
+  readonly mediaType: AttachmentMimeType;
   readonly byteSize: number;
   readonly filename?: string;
+}
+
+export interface NormalizedAttachmentUploadMetadata
+  extends Omit<AttachmentUploadMetadata, "kind"> {
+  readonly kind: AttachmentUploadKind;
 }
 
 export interface AttachmentUploadProgress {
@@ -50,7 +62,7 @@ export interface AttachmentUploadFailure {
   readonly retryable: boolean;
 }
 
-interface AttachmentUploadItemBase extends AttachmentUploadMetadata {
+interface AttachmentUploadItemBase extends NormalizedAttachmentUploadMetadata {
   readonly id: string;
   readonly fingerprint: string;
   readonly idempotencyKey: string;
@@ -101,6 +113,10 @@ export interface AttachmentUploaderSnapshot {
 export interface AttachmentUploaderOptions {
   /** Integer from 1 through ATTACHMENT_UPLOAD_MAX_CONCURRENCY. */
   readonly concurrency?: number;
+  /** Selected images retained by this queue; defaults to the protocol request limit. */
+  readonly maxImageCount?: number;
+  /** Selected documents retained by this queue; defaults to the protocol request limit. */
+  readonly maxDocumentCount?: number;
 }
 
 export type AttachmentUploaderListener = (

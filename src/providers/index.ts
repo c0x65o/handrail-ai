@@ -1,15 +1,176 @@
-import type {
-  ApplicationToolResult,
-  AuthoritativeAttribution,
-  CancellationReason,
-  ChatMessage,
-  CompletionOutcome,
-  CorrelationHints,
-  GenerationSettings,
-  ProtocolMetadata,
-  StreamEvent,
-  ToolDefinition,
+import {
+  AI_RUNTIME_DOCUMENT_MIME_TYPES,
+  AI_RUNTIME_PROTOCOL_LIMITS,
+  type AttachmentReference,
+  type ApplicationToolResult,
+  type AuthoritativeAttribution,
+  type CancellationReason,
+  type ChatMessage,
+  type CompletionOutcome,
+  type CorrelationHints,
+  type DocumentMimeType,
+  type GenerationSettings,
+  type ProtocolMetadata,
+  type StreamEvent,
+  type ToolDefinition,
 } from "../protocol.js";
+
+export interface DocumentInputCapabilityDescriptor {
+  readonly supported_mime_types: readonly DocumentMimeType[];
+  readonly max_document_count: number;
+  readonly max_document_bytes: number;
+  readonly requires_host_resolution: boolean;
+}
+
+export interface UnsupportedProviderDocumentInputCapability {
+  readonly supported: false;
+}
+
+export interface SupportedProviderDocumentInputCapability {
+  readonly supported: true;
+  readonly capability: DocumentInputCapabilityDescriptor;
+}
+
+export type ProviderDocumentInputCapability =
+  | UnsupportedProviderDocumentInputCapability
+  | SupportedProviderDocumentInputCapability;
+
+export const UNSUPPORTED_PROVIDER_DOCUMENT_INPUT = Object.freeze({
+  supported: false,
+}) satisfies UnsupportedProviderDocumentInputCapability;
+
+function documentCapabilityRecord(value: unknown, label: string): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`${label} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function exactDocumentCapabilityKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+  label: string,
+): void {
+  const actual = Object.keys(value).sort();
+  const required = [...expected].sort();
+  if (
+    actual.length !== required.length ||
+    actual.some((key, index) => key !== required[index])
+  ) {
+    throw new TypeError(`${label} contains invalid fields`);
+  }
+}
+
+/** Validates and copies an untrusted provider document capability descriptor. */
+export function parseProviderDocumentInputCapability(
+  value: unknown,
+): ProviderDocumentInputCapability {
+  const capability = documentCapabilityRecord(value, "document_input");
+  if (capability.supported === false) {
+    exactDocumentCapabilityKeys(capability, ["supported"], "document_input");
+    return UNSUPPORTED_PROVIDER_DOCUMENT_INPUT;
+  }
+  if (capability.supported !== true) {
+    throw new TypeError("document_input.supported must be a boolean literal");
+  }
+  exactDocumentCapabilityKeys(
+    capability,
+    ["supported", "capability"],
+    "document_input",
+  );
+
+  const descriptor = documentCapabilityRecord(
+    capability.capability,
+    "document_input.capability",
+  );
+  exactDocumentCapabilityKeys(
+    descriptor,
+    [
+      "supported_mime_types",
+      "max_document_count",
+      "max_document_bytes",
+      "requires_host_resolution",
+    ],
+    "document_input.capability",
+  );
+
+  const supportedMimeTypes = descriptor.supported_mime_types;
+  if (!Array.isArray(supportedMimeTypes) || supportedMimeTypes.length === 0) {
+    throw new TypeError(
+      "document_input.capability.supported_mime_types must be a non-empty array",
+    );
+  }
+  const protocolMimeTypes = new Set<string>(AI_RUNTIME_DOCUMENT_MIME_TYPES);
+  const uniqueMimeTypes = new Set<string>();
+  for (const mediaType of supportedMimeTypes) {
+    if (typeof mediaType !== "string" || !protocolMimeTypes.has(mediaType)) {
+      throw new TypeError(
+        "document_input.capability.supported_mime_types contains an unsupported MIME type",
+      );
+    }
+    if (uniqueMimeTypes.has(mediaType)) {
+      throw new TypeError(
+        "document_input.capability.supported_mime_types must not contain duplicates",
+      );
+    }
+    uniqueMimeTypes.add(mediaType);
+  }
+
+  const maxDocumentCount = descriptor.max_document_count;
+  if (
+    !Number.isSafeInteger(maxDocumentCount) ||
+    (maxDocumentCount as number) < 1 ||
+    (maxDocumentCount as number) >
+      AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentsPerRequest
+  ) {
+    throw new TypeError(
+      `document_input.capability.max_document_count must be between 1 and ${AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentsPerRequest}`,
+    );
+  }
+
+  const maxDocumentBytes = descriptor.max_document_bytes;
+  if (
+    !Number.isSafeInteger(maxDocumentBytes) ||
+    (maxDocumentBytes as number) < AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMinBytes ||
+    (maxDocumentBytes as number) > AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMaxBytes
+  ) {
+    throw new TypeError(
+      `document_input.capability.max_document_bytes must be between ${AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMinBytes} and ${AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMaxBytes}`,
+    );
+  }
+  if (typeof descriptor.requires_host_resolution !== "boolean") {
+    throw new TypeError(
+      "document_input.capability.requires_host_resolution must be a boolean",
+    );
+  }
+
+  return Object.freeze({
+    supported: true,
+    capability: Object.freeze({
+      supported_mime_types: Object.freeze(
+        [...supportedMimeTypes] as DocumentMimeType[],
+      ),
+      max_document_count: maxDocumentCount as number,
+      max_document_bytes: maxDocumentBytes as number,
+      requires_host_resolution: descriptor.requires_host_resolution,
+    }),
+  });
+}
+
+/** Provider-neutral bytes produced by a trusted host from an opaque content_ref. */
+export interface ResolvedProviderDocument {
+  readonly media_type: DocumentMimeType;
+  readonly bytes: Uint8Array;
+}
+
+export interface ProviderDocumentResolutionContext {
+  readonly signal: AbortSignal;
+}
+
+export type ProviderDocumentReferenceResolver = (
+  reference: Readonly<AttachmentReference<DocumentMimeType>>,
+  context: ProviderDocumentResolutionContext,
+) => ResolvedProviderDocument | Promise<ResolvedProviderDocument>;
 
 export interface ProviderModelCapabilities {
   readonly streaming: true;
@@ -17,6 +178,7 @@ export interface ProviderModelCapabilities {
   readonly tool_calls: boolean;
   readonly parallel_tool_calls: boolean;
   readonly reasoning: boolean;
+  readonly document_input: ProviderDocumentInputCapability;
   readonly context_window_tokens: number | null;
   readonly max_output_tokens: number | null;
 }
@@ -36,13 +198,14 @@ export interface ProviderRequestContext {
 }
 
 export interface ProviderAdapterInvocation {
-  /** A trusted host or transport resolves opaque image content_ref values before native input. */
   readonly messages: readonly ChatMessage[];
   readonly tools: readonly ToolDefinition[];
   readonly tool_results: readonly ApplicationToolResult[];
   readonly generation: GenerationSettings;
   readonly signal: AbortSignal;
   readonly context: ProviderRequestContext;
+  /** A trusted host resolves opaque document content_ref values before native input is built. */
+  readonly resolve_document_reference?: ProviderDocumentReferenceResolver;
 }
 
 export interface KnownProviderCost {

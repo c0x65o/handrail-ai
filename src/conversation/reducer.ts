@@ -10,6 +10,12 @@ import {
   type ConversationMessageContentPart,
   type ConversationToolResultContentPart,
 } from "./events.js";
+import {
+  normalizeCitationRecords,
+  type Citation,
+  type CitationRecordSet,
+  type CitationSource,
+} from "../citations.js";
 import type {
   ConversationApprovalProposalRecord,
   ConversationAttachmentRecord,
@@ -80,13 +86,16 @@ export function reduceConversationEvent(
       if (index >= 0) {
         const current = accepted.messages[index]!;
         if (current.role !== null) return accepted;
-        return updateMessages(accepted, index, freeze({
+        const updated = updateMessages(accepted, index, freeze({
           ...current,
           role: payload.role,
           content: cloneMessageContent(payload.content),
           created_at: event.occurred_at,
           attribution,
         }));
+        return payload.role === "assistant"
+          ? updated
+          : removeCitationsForAssistantMessage(updated, payload.message_id);
       }
 
       const message: ConversationMessageRecord = freeze({
@@ -195,6 +204,61 @@ export function reduceConversationEvent(
         ...accepted,
         attachments,
         messages: freeze([...accepted.messages, placeholder]),
+      });
+    }
+
+    case "citation.records_linked": {
+      const records = normalizeCitationRecords({
+        sources: payload.sources,
+        citations: payload.citations,
+      });
+      const merged = mergeCitationRecords(accepted, records);
+      if (merged === null) return accepted;
+
+      if (payload.target.type === "assistant_message") {
+        const message = accepted.messages.find(
+          (candidate) => candidate.message_id === payload.target.message_id,
+        );
+        if (message !== undefined && message.role !== null && message.role !== "assistant") {
+          return accepted;
+        }
+        if (message !== undefined) return merged;
+        const placeholder: ConversationMessageRecord = freeze({
+          message_id: payload.target.message_id,
+          role: null,
+          content: freeze([]),
+          attachments: freeze([]),
+          created_at: null,
+          attribution: null,
+        });
+        return freeze({
+          ...merged,
+          messages: freeze([...merged.messages, placeholder]),
+        });
+      }
+
+      const toolCall = accepted.tool_calls.find(
+        (candidate) => candidate.tool_call_id === payload.target.tool_call_id,
+      );
+      if (toolCall !== undefined && toolCall.turn_id !== payload.target.turn_id) {
+        return accepted;
+      }
+      if (toolCall !== undefined) return merged;
+      const placeholder: ConversationToolCallRecord = freeze({
+        tool_call_id: payload.target.tool_call_id,
+        turn_id: payload.target.turn_id,
+        name: null,
+        arguments: null,
+        requested_at: null,
+        discovered_at: null,
+        started_at: null,
+        approval_required_at: null,
+        attribution: null,
+        result: null,
+      });
+      return freeze({
+        ...merged,
+        tool_calls: freeze([...merged.tool_calls, placeholder]),
       });
     }
 
@@ -656,6 +720,17 @@ function cloneAttribution(
 function cloneAttachment(
   attachment: ConversationAttachmentReference,
 ): Readonly<ConversationAttachmentReference> {
+  if (attachment.kind !== undefined) {
+    return freeze({
+      attachment_id: attachment.attachment_id,
+      kind: attachment.kind,
+      media_type: attachment.media_type,
+      ...(attachment.filename === undefined
+        ? {}
+        : { filename: attachment.filename }),
+      size_bytes: attachment.size_bytes,
+    } as ConversationAttachmentReference);
+  }
   return freeze({
     attachment_id: attachment.attachment_id,
     media_type: attachment.media_type,
@@ -666,6 +741,78 @@ function cloneAttachment(
       ? {}
       : { size_bytes: attachment.size_bytes }),
   });
+}
+
+function mergeCitationRecords(
+  state: ConversationState,
+  records: CitationRecordSet,
+): ConversationState | null {
+  const sources = [...state.citation_sources];
+  const citations = [...state.citations];
+
+  for (const source of records.sources) {
+    const existing = sources.find((candidate) => candidate.source_id === source.source_id);
+    if (existing !== undefined) {
+      if (JSON.stringify(existing) !== JSON.stringify(source)) return null;
+      continue;
+    }
+    sources.push(cloneCitationSource(source));
+  }
+  for (const citation of records.citations) {
+    const existing = citations.find(
+      (candidate) => candidate.citation_id === citation.citation_id,
+    );
+    if (existing !== undefined) {
+      if (JSON.stringify(existing) !== JSON.stringify(citation)) return null;
+      continue;
+    }
+    citations.push(cloneCitation(citation));
+  }
+
+  return freeze({
+    ...state,
+    citation_sources: freeze(sources),
+    citations: freeze(citations),
+  });
+}
+
+function cloneCitationSource(source: CitationSource): CitationSource {
+  return freeze({
+    source_id: source.source_id,
+    type: source.type,
+    label: source.label,
+    ...(source.locator === undefined ? {} : { locator: source.locator }),
+  });
+}
+
+function cloneCitation(citation: Citation): Citation {
+  return freeze({
+    citation_id: citation.citation_id,
+    source_id: citation.source_id,
+    order: citation.order,
+    target: citation.target.type === "assistant_message"
+      ? freeze({
+          type: citation.target.type,
+          message_id: citation.target.message_id,
+        })
+      : freeze({
+          type: citation.target.type,
+          tool_call_id: citation.target.tool_call_id,
+        }),
+  });
+}
+
+function removeCitationsForAssistantMessage(
+  state: ConversationState,
+  messageId: string,
+): ConversationState {
+  const citations = state.citations.filter(
+    (citation) => citation.target.type !== "assistant_message" ||
+      citation.target.message_id !== messageId,
+  );
+  return citations.length === state.citations.length
+    ? state
+    : freeze({ ...state, citations: freeze(citations) });
 }
 
 function cloneMessageContent(

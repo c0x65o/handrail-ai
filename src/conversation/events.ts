@@ -1,9 +1,25 @@
+import {
+  AI_RUNTIME_ATTACHMENT_ID_GRAMMAR,
+  AI_RUNTIME_DOCUMENT_MIME_TYPES,
+  AI_RUNTIME_IMAGE_MIME_TYPES,
+  AI_RUNTIME_PROTOCOL_LIMITS,
+  type DocumentMimeType,
+  type ImageMimeType,
+} from "../protocol.js";
+import {
+  normalizeCitationRecords,
+  type Citation,
+  type CitationSource,
+} from "../citations.js";
+
 export const CONVERSATION_EVENT_VERSION = 1 as const;
+export const CONVERSATION_CITATION_RECORDS_VERSION = 1 as const;
 
 export const CONVERSATION_EVENT_TYPES = [
   "message.created",
   "message.text_appended",
   "message.attachment_referenced",
+  "citation.records_linked",
   "turn.started",
   "turn.status_changed",
   "turn.attempt_started",
@@ -46,7 +62,7 @@ export const CONVERSATION_EVENT_LIMITS = {
   textLength: 1_000_000,
   textChunkBytes: 1_000_000,
   titleLength: 4_096,
-  filenameLength: 1_024,
+  filenameLength: AI_RUNTIME_PROTOCOL_LIMITS.attachmentFilenameLength,
   jsonDepth: 20,
   jsonNodes: 10_000,
   jsonArrayLength: 2_000,
@@ -163,12 +179,40 @@ export interface MessageTextAppendedPayload {
   text: string;
 }
 
-export interface ConversationAttachmentReference {
+export type ConversationAttachmentKind = "image" | "document";
+
+interface ConversationAttachmentReferenceBase {
   attachment_id: ConversationAttachmentId;
-  media_type: string;
   filename?: string;
+}
+
+/** Historical image metadata remains replayable without the newer kind field. */
+export interface ConversationLegacyImageAttachmentReference
+  extends ConversationAttachmentReferenceBase {
+  kind?: never;
+  /** Kept source-compatible with v1; durable parsing accepts image MIME values only. */
+  media_type: string;
   size_bytes?: number;
 }
+
+export interface ConversationImageAttachmentReference
+  extends ConversationAttachmentReferenceBase {
+  kind: "image";
+  media_type: ImageMimeType;
+  size_bytes: number;
+}
+
+export interface ConversationDocumentAttachmentReference
+  extends ConversationAttachmentReferenceBase {
+  kind: "document";
+  media_type: DocumentMimeType;
+  size_bytes: number;
+}
+
+export type ConversationAttachmentReference =
+  | ConversationLegacyImageAttachmentReference
+  | ConversationImageAttachmentReference
+  | ConversationDocumentAttachmentReference;
 
 export interface MessageAttachmentReferencedPayload {
   type: "message.attachment_referenced";
@@ -424,6 +468,34 @@ export interface ToolCallResultRecordedPayload {
   is_error: boolean;
 }
 
+export interface ConversationAssistantMessageCitationTarget {
+  type: "assistant_message";
+  message_id: ConversationMessageId;
+}
+
+export interface ConversationToolResultCitationTarget {
+  type: "tool_result";
+  turn_id: ConversationTurnId;
+  tool_call_id: ConversationToolCallId;
+}
+
+export type ConversationCitationTarget =
+  | ConversationAssistantMessageCitationTarget
+  | ConversationToolResultCitationTarget;
+
+/**
+ * A bounded provider-neutral citation record set linked to one durable target.
+ * The outer target supplies the turn identity needed for safe tool-call
+ * placeholders; every nested citation target must identify the same fact.
+ */
+export interface CitationRecordsLinkedPayload {
+  type: "citation.records_linked";
+  citation_records_version: typeof CONVERSATION_CITATION_RECORDS_VERSION;
+  target: ConversationCitationTarget;
+  sources: CitationSource[];
+  citations: Citation[];
+}
+
 export type ToolLoopBudget = "iterations" | "total_tool_calls" | "wall_clock";
 
 export interface ToolLoopBudgetExhaustedPayload {
@@ -453,6 +525,7 @@ export type ConversationEventPayload =
   | MessageCreatedPayload
   | MessageTextAppendedPayload
   | MessageAttachmentReferencedPayload
+  | CitationRecordsLinkedPayload
   | TurnStartedPayload
   | TurnStatusChangedPayload
   | TurnAttemptStartedPayload
@@ -616,6 +689,8 @@ const RETRY_EXHAUSTION_REASONS = [
   "maximum_attempts",
   "maximum_elapsed_time",
 ] as const;
+
+const ATTACHMENT_ID_PATTERN = new RegExp(AI_RUNTIME_ATTACHMENT_ID_GRAMMAR);
 
 const normalizeFieldName = (value: string): string =>
   value.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -1101,30 +1176,80 @@ function validateAttachmentReference(value: unknown, path: string): void {
   requiredKeys(object, ["attachment_id", "media_type"], path);
   allowedKeys(
     object,
-    ["attachment_id", "media_type", "filename", "size_bytes"],
+    ["attachment_id", "kind", "media_type", "filename", "size_bytes"],
     path,
   );
-  identifier(object.attachment_id, `${path}.attachment_id`);
-  const mediaType = stringValue(object.media_type, `${path}.media_type`);
-  if (
-    !/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/i.test(
-      mediaType,
-    )
-  ) {
-    fail(`${path}.media_type`, "must be a valid media type without parameters");
+  const attachmentId = stringValue(object.attachment_id, `${path}.attachment_id`, {
+    maxLength: AI_RUNTIME_PROTOCOL_LIMITS.attachmentIdLength,
+  });
+  if (!ATTACHMENT_ID_PATTERN.test(attachmentId)) {
+    fail(
+      `${path}.attachment_id`,
+      `must be an opaque identifier matching ${AI_RUNTIME_ATTACHMENT_ID_GRAMMAR}`,
+    );
   }
+
+  const kind = Object.hasOwn(object, "kind")
+    ? enumValue(object.kind, ["image", "document"], `${path}.kind`)
+    : undefined;
+  const mediaTypes = kind === "document"
+    ? AI_RUNTIME_DOCUMENT_MIME_TYPES
+    : AI_RUNTIME_IMAGE_MIME_TYPES;
+  enumValue(object.media_type, mediaTypes, `${path}.media_type`);
+
   if (Object.hasOwn(object, "filename")) {
-    stringValue(object.filename, `${path}.filename`, {
-      maxLength: CONVERSATION_EVENT_LIMITS.filenameLength,
+    const filename = stringValue(object.filename, `${path}.filename`, {
+      maxLength: AI_RUNTIME_PROTOCOL_LIMITS.attachmentFilenameLength,
     });
-  }
-  if (Object.hasOwn(object, "size_bytes")) {
+    const hasUnsafeCharacter = [...filename].some((character) => {
+      const codePoint = character.codePointAt(0)!;
+      return codePoint <= 31 || codePoint === 127 || '<>:"/\\|?*'.includes(character);
+    });
     if (
-      !Number.isSafeInteger(object.size_bytes) ||
-      (object.size_bytes as number) < 0
+      filename === "." ||
+      filename === ".." ||
+      hasUnsafeCharacter ||
+      CREDENTIAL_VALUE_PATTERNS.some((pattern) => pattern.test(filename))
     ) {
-      fail(`${path}.size_bytes`, "must be a non-negative safe integer");
+      fail(
+        `${path}.filename`,
+        "must be a safe filename without path separators or control characters",
+      );
     }
+  }
+
+  if (kind !== undefined && !Object.hasOwn(object, "size_bytes")) {
+    fail(`${path}.size_bytes`, "is required when kind is present");
+  }
+  if (!Object.hasOwn(object, "size_bytes")) return;
+
+  const minBytes = kind === "document"
+    ? AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMinBytes
+    : AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMinBytes;
+  const maxBytes = kind === "document"
+    ? AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMaxBytes
+    : AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMaxBytes;
+  if (
+    !Number.isSafeInteger(object.size_bytes) ||
+    (object.size_bytes as number) < minBytes ||
+    (object.size_bytes as number) > maxBytes
+  ) {
+    fail(
+      `${path}.size_bytes`,
+      `must be a safe integer from ${minBytes} through ${maxBytes}`,
+    );
+  }
+}
+
+/** Validate durable, provider-neutral attachment metadata without cloning it. */
+export function isConversationAttachmentReference(
+  value: unknown,
+): value is ConversationAttachmentReference {
+  try {
+    validateAttachmentReference(value, "$attachment");
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -1204,6 +1329,80 @@ function validatePayload(
       identifier(object.message_id, `${path}.message_id`);
       validateAttachmentReference(object.attachment, `${path}.attachment`);
       return;
+    case "citation.records_linked": {
+      requiredKeys(
+        object,
+        ["citation_records_version", "target", "sources", "citations"],
+        path,
+      );
+      allowedKeys(
+        object,
+        ["type", "citation_records_version", "target", "sources", "citations"],
+        path,
+      );
+      if (
+        object.citation_records_version !==
+        CONVERSATION_CITATION_RECORDS_VERSION
+      ) {
+        fail(
+          `${path}.citation_records_version`,
+          `must equal ${CONVERSATION_CITATION_RECORDS_VERSION}`,
+        );
+      }
+      const target = record(object.target, `${path}.target`);
+      requiredKeys(target, ["type"], `${path}.target`);
+      if (target.type === "assistant_message") {
+        requiredKeys(target, ["message_id"], `${path}.target`);
+        allowedKeys(target, ["type", "message_id"], `${path}.target`);
+        identifier(target.message_id, `${path}.target.message_id`);
+      } else if (target.type === "tool_result") {
+        requiredKeys(target, ["turn_id", "tool_call_id"], `${path}.target`);
+        allowedKeys(
+          target,
+          ["type", "turn_id", "tool_call_id"],
+          `${path}.target`,
+        );
+        identifier(target.turn_id, `${path}.target.turn_id`);
+        identifier(target.tool_call_id, `${path}.target.tool_call_id`);
+      } else {
+        fail(
+          `${path}.target.type`,
+          'must equal "assistant_message" or "tool_result"',
+        );
+      }
+
+      let records;
+      try {
+        records = normalizeCitationRecords({
+          sources: object.sources,
+          citations: object.citations,
+        });
+      } catch (error) {
+        fail(
+          path,
+          error instanceof Error ? error.message : "contains invalid citation records",
+        );
+      }
+      if (records.citations.length === 0) {
+        fail(`${path}.citations`, "must contain at least one citation link");
+      }
+      for (const citation of records.citations) {
+        if (
+          citation.target.type !== target.type ||
+          (target.type === "assistant_message"
+            ? citation.target.type !== "assistant_message" ||
+              citation.target.message_id !== target.message_id
+            : citation.target.type !== "tool_result" ||
+              citation.target.tool_call_id !== target.tool_call_id)
+        ) {
+          fail(
+            `${path}.citations`,
+            "must contain only links to the payload target",
+          );
+        }
+      }
+      return;
+    }
     case "turn.started":
       requiredKeys(object, ["turn_id", "input_message_ids"], path);
       allowedKeys(

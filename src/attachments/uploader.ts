@@ -1,6 +1,9 @@
 import {
-  AI_RUNTIME_PROTOCOL_VERSION,
-  parseChatRequest,
+  AI_RUNTIME_ATTACHMENT_ID_GRAMMAR,
+  AI_RUNTIME_CONTENT_REFERENCE_GRAMMAR,
+  AI_RUNTIME_DOCUMENT_MIME_TYPES,
+  AI_RUNTIME_IMAGE_MIME_TYPES,
+  AI_RUNTIME_PROTOCOL_LIMITS,
   type AttachmentReference,
 } from "../protocol.js";
 import {
@@ -10,17 +13,19 @@ import {
   type AttachmentUploadAdapter,
   type AttachmentUploadFailure,
   type AttachmentUploadItem,
-  type AttachmentUploadMetadata,
+  type AttachmentUploadKind,
   type AttachmentUploadProgress,
   type AttachmentUploaderListener,
   type AttachmentUploaderOptions,
   type AttachmentUploaderSnapshot,
+  type NormalizedAttachmentUploadMetadata,
 } from "./types.js";
 
 export const ATTACHMENT_UPLOAD_MAX_CONCURRENCY = 16 as const;
 
 interface InternalItem<TSource> {
-  source: TSource;
+  source: TSource | undefined;
+  sourceRetained: boolean;
   item: AttachmentUploadItem;
   controller: AbortController | null;
   runToken: number;
@@ -32,53 +37,61 @@ const CREDENTIAL_VALUE_PATTERNS = [
   /-----begin (?:rsa |ec |openssh )?private key-----/i,
 ] as const;
 
-function metadataFrom(selection: AttachmentUploadMetadata): AttachmentUploadMetadata {
-  return selection.filename === undefined
-    ? { mediaType: selection.mediaType, byteSize: selection.byteSize }
+const ATTACHMENT_ID_PATTERN = new RegExp(AI_RUNTIME_ATTACHMENT_ID_GRAMMAR);
+const CONTENT_REFERENCE_PATTERN = new RegExp(
+  AI_RUNTIME_CONTENT_REFERENCE_GRAMMAR,
+);
+const IMAGE_MIME_TYPES = new Set<string>(AI_RUNTIME_IMAGE_MIME_TYPES);
+const DOCUMENT_MIME_TYPES = new Set<string>(AI_RUNTIME_DOCUMENT_MIME_TYPES);
+
+function metadataFrom(
+  selection: {
+    readonly kind?: AttachmentUploadKind;
+    readonly mediaType: NormalizedAttachmentUploadMetadata["mediaType"];
+    readonly byteSize: number;
+    readonly filename?: string;
+  },
+): NormalizedAttachmentUploadMetadata {
+  const kind = selection.kind ?? "image";
+  return (selection.filename === undefined
+    ? { kind, mediaType: selection.mediaType, byteSize: selection.byteSize }
     : {
+        kind,
         mediaType: selection.mediaType,
         byteSize: selection.byteSize,
         filename: selection.filename,
-      };
+      }) as NormalizedAttachmentUploadMetadata;
 }
 
-function referenceFixture(metadata: AttachmentUploadMetadata): AttachmentReference {
-  return metadata.filename === undefined
-    ? {
-        attachment_id: "att_validation",
-        content_ref: "ref_validation",
-        media_type: metadata.mediaType,
-        byte_size: metadata.byteSize,
-      }
-    : {
-        attachment_id: "att_validation",
-        content_ref: "ref_validation",
-        media_type: metadata.mediaType,
-        byte_size: metadata.byteSize,
-        filename: metadata.filename,
-      };
-}
-
-function validateProtocolReference(value: unknown): AttachmentReference {
-  const parsed = parseChatRequest({
-    protocol_version: AI_RUNTIME_PROTOCOL_VERSION,
-    continuation_of: null,
-    messages: [
-      {
-        role: "user",
-        content: [{ type: "image", attachment: value }],
-      },
-    ],
-    tools: [],
-    tool_results: [],
-    generation: { max_output_tokens: 1, temperature: 0 },
-    correlation_hints: {},
-  });
-  const part = parsed.messages[0]?.content[0];
-  if (part?.type !== "image") {
-    throw new AttachmentUploadValidationError("Attachment reference is invalid");
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
   }
-  return part.attachment;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function hasCredentialMaterial(value: string): boolean {
+  return CREDENTIAL_VALUE_PATTERNS.some((pattern) => pattern.test(value));
+}
+
+function validateSafeFilename(value: unknown): asserts value is string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > AI_RUNTIME_PROTOCOL_LIMITS.attachmentFilenameLength ||
+    value === "." ||
+    value === ".." ||
+    hasCredentialMaterial(value) ||
+    [...value].some((character) => {
+      const codePoint = character.codePointAt(0)!;
+      return codePoint <= 31 ||
+        codePoint === 127 ||
+        '<>:"/\\|?*'.includes(character);
+    })
+  ) {
+    throw new AttachmentUploadValidationError("Attachment filename is invalid");
+  }
 }
 
 function validateOpaqueKey(value: unknown, field: string): asserts value is string {
@@ -86,7 +99,7 @@ function validateOpaqueKey(value: unknown, field: string): asserts value is stri
     typeof value !== "string" ||
     !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value) ||
     /^(?:data|blob|https?):/i.test(value) ||
-    CREDENTIAL_VALUE_PATTERNS.some((pattern) => pattern.test(value))
+    hasCredentialMaterial(value)
   ) {
     throw new AttachmentUploadValidationError(
       `${field} must be a safe opaque identifier of at most 256 characters`,
@@ -94,41 +107,93 @@ function validateOpaqueKey(value: unknown, field: string): asserts value is stri
   }
 }
 
-function validateSelection<TSource>(selection: AttachmentSelection<TSource>): void {
+function validateMetadata(
+  metadata: NormalizedAttachmentUploadMetadata,
+): void {
+  const isImage = metadata.kind === "image";
+  const supportedMime = isImage
+    ? IMAGE_MIME_TYPES.has(metadata.mediaType)
+    : DOCUMENT_MIME_TYPES.has(metadata.mediaType);
+  const minBytes = isImage
+    ? AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMinBytes
+    : AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMinBytes;
+  const maxBytes = isImage
+    ? AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMaxBytes
+    : AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMaxBytes;
+  if (
+    !supportedMime ||
+    !Number.isSafeInteger(metadata.byteSize) ||
+    metadata.byteSize < minBytes ||
+    metadata.byteSize > maxBytes
+  ) {
+    throw new AttachmentUploadValidationError(
+      "Attachment kind, media type, or byte size is invalid",
+    );
+  }
+  if (metadata.filename !== undefined) validateSafeFilename(metadata.filename);
+}
+
+function validateSelection<TSource>(
+  selection: AttachmentSelection<TSource>,
+): NormalizedAttachmentUploadMetadata {
   if (selection === null || typeof selection !== "object") {
     throw new AttachmentUploadValidationError("Attachment selection must be an object");
   }
   validateOpaqueKey(selection.fingerprint, "fingerprint");
   validateOpaqueKey(selection.idempotencyKey, "idempotencyKey");
-  try {
-    validateProtocolReference(referenceFixture(metadataFrom(selection)));
-  } catch {
+  if (
+    selection.kind !== undefined &&
+    selection.kind !== "image" &&
+    selection.kind !== "document"
+  ) {
     throw new AttachmentUploadValidationError(
-      "Attachment media type, byte size, or filename is invalid",
+      "Attachment kind, media type, or byte size is invalid",
     );
   }
+  const metadata = metadataFrom(selection);
+  validateMetadata(metadata);
+  return metadata;
 }
 
-function validateAdapterResult(
+function validatedAdapterResult(
   value: unknown,
-  requested: AttachmentUploadMetadata,
+  requested: NormalizedAttachmentUploadMetadata,
 ): AttachmentReference {
-  let reference: AttachmentReference;
-  try {
-    reference = validateProtocolReference(value);
-  } catch {
+  if (!isPlainRecord(value)) {
     throw new AttachmentUploadValidationError("Attachment adapter result is unsafe");
   }
+  const requiredKeys = ["attachment_id", "content_ref", "media_type", "byte_size"];
+  const allowedKeys = new Set([...requiredKeys, "filename"]);
+  if (
+    requiredKeys.some((key) => !Object.hasOwn(value, key)) ||
+    Object.keys(value).some((key) => !allowedKeys.has(key)) ||
+    typeof value.attachment_id !== "string" ||
+    value.attachment_id.length > AI_RUNTIME_PROTOCOL_LIMITS.attachmentIdLength ||
+    !ATTACHMENT_ID_PATTERN.test(value.attachment_id) ||
+    hasCredentialMaterial(value.attachment_id) ||
+    typeof value.content_ref !== "string" ||
+    value.content_ref.length >
+      AI_RUNTIME_PROTOCOL_LIMITS.attachmentContentReferenceLength ||
+    !CONTENT_REFERENCE_PATTERN.test(value.content_ref) ||
+    hasCredentialMaterial(value.content_ref)
+  ) {
+    throw new AttachmentUploadValidationError("Attachment adapter result is unsafe");
+  }
+  if (Object.hasOwn(value, "filename")) validateSafeFilename(value.filename);
 
   if (
-    reference.media_type !== requested.mediaType ||
-    reference.byte_size !== requested.byteSize ||
-    reference.filename !== requested.filename
+    value.media_type !== requested.mediaType ||
+    value.byte_size !== requested.byteSize ||
+    value.filename !== requested.filename ||
+    (requested.kind === "image"
+      ? !IMAGE_MIME_TYPES.has(String(value.media_type))
+      : !DOCUMENT_MIME_TYPES.has(String(value.media_type)))
   ) {
     throw new AttachmentUploadValidationError(
       "Attachment adapter result does not match the requested identity",
     );
   }
+  const reference = value as unknown as AttachmentReference;
   return Object.freeze(
     reference.filename === undefined
       ? {
@@ -145,6 +210,18 @@ function validateAdapterResult(
           filename: reference.filename,
         },
   );
+}
+
+function validateAdapterResult(
+  value: unknown,
+  requested: NormalizedAttachmentUploadMetadata,
+): AttachmentReference {
+  try {
+    return validatedAdapterResult(value, requested);
+  } catch (error) {
+    if (error instanceof AttachmentUploadValidationError) throw error;
+    throw new AttachmentUploadValidationError("Attachment adapter result is unsafe");
+  }
 }
 
 function initialProgress(totalBytes: number): AttachmentUploadProgress {
@@ -170,6 +247,7 @@ function normalizedFailure(error: unknown): AttachmentUploadFailure {
 export class AttachmentUploader<TSource = unknown> {
   readonly #adapter: AttachmentUploadAdapter<TSource>;
   readonly #concurrency: number;
+  readonly #maxCounts: Readonly<Record<AttachmentUploadKind, number>>;
   readonly #items = new Map<string, InternalItem<TSource>>();
   readonly #listeners = new Set<AttachmentUploaderListener>();
   #activeCount = 0;
@@ -192,6 +270,24 @@ export class AttachmentUploader<TSource = unknown> {
     }
     this.#adapter = adapter;
     this.#concurrency = concurrency;
+    const maxImageCount = options.maxImageCount ??
+      AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentsPerRequest;
+    const maxDocumentCount = options.maxDocumentCount ??
+      AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentsPerRequest;
+    this.#validateCountLimit(
+      maxImageCount,
+      AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentsPerRequest,
+      "maxImageCount",
+    );
+    this.#validateCountLimit(
+      maxDocumentCount,
+      AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentsPerRequest,
+      "maxDocumentCount",
+    );
+    this.#maxCounts = Object.freeze({
+      image: maxImageCount,
+      document: maxDocumentCount,
+    });
   }
 
   get disposed(): boolean {
@@ -225,15 +321,23 @@ export class AttachmentUploader<TSource = unknown> {
 
   enqueue(selection: AttachmentSelection<TSource>): string {
     this.#assertUsable();
-    validateSelection(selection);
+    const metadata = validateSelection(selection);
 
     for (const entry of this.#items.values()) {
       if (entry.item.fingerprint === selection.fingerprint) return entry.item.id;
     }
 
+    const kindCount = [...this.#items.values()].filter(
+      (entry) => entry.item.kind === metadata.kind,
+    ).length;
+    if (kindCount >= this.#maxCounts[metadata.kind]) {
+      throw new AttachmentUploadValidationError(
+        `Attachment ${metadata.kind} count exceeds the configured queue limit`,
+      );
+    }
+
     const id = `attachment-upload-${this.#nextId}`;
     this.#nextId += 1;
-    const metadata = metadataFrom(selection);
     const item: AttachmentUploadItem = {
       id,
       fingerprint: selection.fingerprint,
@@ -245,6 +349,7 @@ export class AttachmentUploader<TSource = unknown> {
     };
     this.#items.set(id, {
       source: selection.source,
+      sourceRetained: true,
       item,
       controller: null,
       runToken: 0,
@@ -266,6 +371,8 @@ export class AttachmentUploader<TSource = unknown> {
     };
     entry.runToken += 1;
     entry.controller?.abort();
+    entry.source = undefined;
+    entry.sourceRetained = false;
     this.#emit();
     this.#pump();
     return true;
@@ -336,6 +443,18 @@ export class AttachmentUploader<TSource = unknown> {
     }
   }
 
+  #validateCountLimit(value: number, protocolMaximum: number, field: string): void {
+    if (
+      !Number.isSafeInteger(value) ||
+      value < 0 ||
+      value > protocolMaximum
+    ) {
+      throw new AttachmentUploadValidationError(
+        `${field} must be an integer from 0 through ${protocolMaximum}`,
+      );
+    }
+  }
+
   #emit(): void {
     const snapshot = this.getSnapshot();
     for (const listener of this.#listeners) {
@@ -359,6 +478,8 @@ export class AttachmentUploader<TSource = unknown> {
   }
 
   async #upload(entry: InternalItem<TSource>): Promise<void> {
+    if (!entry.sourceRetained) return;
+    const source = entry.source as TSource;
     const controller = new AbortController();
     const token = entry.runToken + 1;
     entry.runToken = token;
@@ -397,7 +518,7 @@ export class AttachmentUploader<TSource = unknown> {
 
     try {
       const result = await this.#adapter.upload({
-        source: entry.source,
+        source,
         metadata,
         idempotencyKey: entry.item.idempotencyKey,
         signal: controller.signal,
@@ -420,6 +541,8 @@ export class AttachmentUploader<TSource = unknown> {
         },
         reference,
       };
+      entry.source = undefined;
+      entry.sourceRetained = false;
       this.#emit();
     } catch (error) {
       if (
@@ -429,11 +552,16 @@ export class AttachmentUploader<TSource = unknown> {
       ) {
         return;
       }
+      const failure = normalizedFailure(error);
       entry.item = {
         ...entry.item,
         status: "failed",
-        error: normalizedFailure(error),
+        error: failure,
       };
+      if (!failure.retryable) {
+        entry.source = undefined;
+        entry.sourceRetained = false;
+      }
       this.#emit();
     } finally {
       if (entry.controller === controller) entry.controller = null;

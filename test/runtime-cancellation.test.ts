@@ -151,6 +151,7 @@ class TestTransport implements ConversationTransport<unknown, ChatRequest> {
     this.capabilities = cancel === undefined
       ? {
           authoritativeCancellation: { supported: false },
+          documentInput: { supported: false },
           attachmentUpload: { supported: false },
           presence: { supported: false },
           synchronization: { supported: false },
@@ -165,6 +166,7 @@ class TestTransport implements ConversationTransport<unknown, ChatRequest> {
               },
             },
           },
+          documentInput: { supported: false },
           attachmentUpload: { supported: false },
           presence: { supported: false },
           synchronization: { supported: false },
@@ -265,6 +267,7 @@ describe("ConversationRuntime cancellation", () => {
           tool_calls: false,
           parallel_tool_calls: false,
           reasoning: false,
+          document_input: { supported: false },
           context_window_tokens: 8_192,
           max_output_tokens: 1_024,
         },

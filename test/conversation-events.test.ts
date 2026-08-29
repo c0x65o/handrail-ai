@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  AI_RUNTIME_PROTOCOL_LIMITS,
+  CONVERSATION_CITATION_RECORDS_VERSION,
   CONVERSATION_EVENT_LIMITS,
   CONVERSATION_EVENT_TYPES,
   CONVERSATION_EVENT_VERSION,
@@ -33,6 +35,27 @@ const payloads: Fixture[] = [
       filename: "order.png",
       size_bytes: 2_048,
     },
+  },
+  {
+    type: "citation.records_linked",
+    citation_records_version: CONVERSATION_CITATION_RECORDS_VERSION,
+    target: { type: "assistant_message", message_id: "msg_02" },
+    sources: [
+      {
+        source_id: "source_01",
+        type: "web",
+        label: "Order status",
+        locator: "https://example.com/orders/A-104",
+      },
+    ],
+    citations: [
+      {
+        citation_id: "citation_01",
+        source_id: "source_01",
+        order: 0,
+        target: { type: "assistant_message", message_id: "msg_02" },
+      },
+    ],
   },
   {
     type: "turn.started",
@@ -213,6 +236,90 @@ describe("durable conversation event contract", () => {
       expect(parseConversationEvent(fixture)).toBe(fixture);
       expect(isConversationEvent(fixture)).toBe(true);
     }
+  });
+
+  it("round-trips legacy and typed image metadata plus typed PDF metadata", () => {
+    const attachments = [
+      {
+        attachment_id: "att_legacy_image",
+        media_type: "image/jpeg",
+      },
+      {
+        attachment_id: "att_typed_image",
+        kind: "image",
+        media_type: "image/webp",
+        filename: "photo.webp",
+        size_bytes: AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMaxBytes,
+      },
+      {
+        attachment_id: "att_pdf_document",
+        kind: "document",
+        media_type: "application/pdf",
+        filename: "owner statement.pdf",
+        size_bytes: AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMaxBytes,
+      },
+    ] as const;
+
+    for (const attachment of attachments) {
+      const fixture = event({
+        type: "message.attachment_referenced",
+        message_id: "msg_attachments",
+        attachment,
+      });
+      expect(parseConversationEvent(fixture)).toBe(fixture);
+      expect(parseConversationEvent(fixture).payload).toMatchObject({ attachment });
+    }
+  });
+
+  it("rejects unsafe, unbounded, binary-like, or provider-native attachment data", () => {
+    const pdf = {
+      attachment_id: "att_pdf_safe",
+      kind: "document",
+      media_type: "application/pdf",
+      filename: "safe.pdf",
+      size_bytes: 1,
+    };
+    const malformedAttachments: unknown[] = [
+      { ...pdf, attachment_id: "file_provider_123" },
+      { ...pdf, attachment_id: "https://files.invalid/document" },
+      { ...pdf, filename: "../unsafe.pdf" },
+      { ...pdf, filename: "Bearer abcdefghijklmnop.pdf" },
+      { ...pdf, filename: "x".repeat(AI_RUNTIME_PROTOCOL_LIMITS.attachmentFilenameLength + 1) },
+      { ...pdf, size_bytes: 0 },
+      { ...pdf, size_bytes: AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMaxBytes + 1 },
+      { ...pdf, kind: "image" },
+      { ...pdf, media_type: "application/octet-stream" },
+      { ...pdf, content_ref: "ref_private_binary" },
+      { ...pdf, provider_file_id: "file_123" },
+      { ...pdf, remote_url: "https://files.invalid/document" },
+      { ...pdf, bytes: new Uint8Array([37, 80, 68, 70]) },
+      { ...pdf, source: { type: "base64", data: "JVBERi0=" } },
+      new Uint8Array([37, 80, 68, 70]),
+      new Blob(["%PDF"]),
+    ];
+
+    for (const attachment of malformedAttachments) {
+      const fixture = event({
+        type: "message.attachment_referenced",
+        message_id: "msg_attachments",
+        attachment,
+      });
+      expect(() => parseConversationEvent(fixture)).toThrow(
+        ConversationEventValidationError,
+      );
+      expect(isConversationEvent(fixture)).toBe(false);
+    }
+
+    expect(() => parseConversationEvent(event({
+      type: "message.attachment_referenced",
+      message_id: "msg_attachments",
+      attachment: {
+        attachment_id: "att_image_oversized",
+        kind: "image",
+        media_type: "image/png",
+        size_bytes: AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMaxBytes + 1,
+      },
+    }))).toThrow(/size_bytes/);
   });
 
   it("rejects unknown envelope and discriminator-specific payload fields", () => {

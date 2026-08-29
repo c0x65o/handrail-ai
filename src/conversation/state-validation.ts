@@ -1,9 +1,11 @@
 import {
   isConversationApprovalReason,
   isConversationApprovalReviewedArguments,
+  isConversationAttachmentReference,
   type ConversationId,
   type ConversationRevision,
 } from "./events.js";
+import { normalizeCitationRecords } from "../citations.js";
 import type { ConversationState } from "./state.js";
 
 export function isConversationState(
@@ -14,7 +16,8 @@ export function isConversationState(
   if (!isPlainRecord(value)) return false;
   const requiredKeys = [
     "conversation_id", "revision", "last_event_id", "processed_event_ids",
-    "processed_mutation_ids", "messages", "attachments", "turns",
+    "processed_mutation_ids", "messages", "attachments", "citation_sources",
+    "citations", "turns",
     "active_turn_id", "tool_calls", "approval_proposals",
     "tool_loop_budget_exhaustions",
     "usage_receipt_links", "metadata",
@@ -42,8 +45,18 @@ export function isConversationState(
 
   if (!recordArray(value.messages, isMessage)) return false;
   if (!recordArray(value.attachments, isAttachmentRecord)) return false;
+  if (!hasConsistentAttachmentProjection(
+    value.messages as Record<string, unknown>[],
+    value.attachments as Record<string, unknown>[],
+  )) return false;
   if (!recordArray(value.turns, isTurn)) return false;
   if (!recordArray(value.tool_calls, isToolCall)) return false;
+  if (!hasValidCitationProjection(
+    value.citation_sources,
+    value.citations,
+    value.messages as Record<string, unknown>[],
+    value.tool_calls as Record<string, unknown>[],
+  )) return false;
   if (!recordArray(value.approval_proposals, isApprovalProposal)) return false;
   const proposalIds = (value.approval_proposals as Record<string, unknown>[])
     .map((proposal) => proposal.proposal_id);
@@ -70,19 +83,108 @@ export function isConversationState(
 }
 
 function isMessage(value: Record<string, unknown>): boolean {
-  return isIdentifier(value.message_id) &&
+  const expectedKeys = Object.hasOwn(value, "turn_id")
+    ? ["message_id", "turn_id", "role", "content", "attachments", "created_at", "attribution"]
+    : ["message_id", "role", "content", "attachments", "created_at", "attribution"];
+  return hasExactKeys(value, expectedKeys) && isIdentifier(value.message_id) &&
     (!Object.hasOwn(value, "turn_id") || value.turn_id === null || isIdentifier(value.turn_id)) &&
     (value.role === null || ["user", "assistant", "system"].includes(String(value.role))) &&
     Array.isArray(value.content) && value.content.every(isTextPart) &&
-    Array.isArray(value.attachments) && value.attachments.every(isAttachmentReference) &&
+    Array.isArray(value.attachments) &&
+    value.attachments.every(isConversationAttachmentReference) &&
+    new Set(value.attachments.map((attachment) => attachment.attachment_id)).size ===
+      value.attachments.length &&
     (value.created_at === null || typeof value.created_at === "string") &&
     isNullableAttribution(value.attribution);
 }
 
 function isAttachmentRecord(value: Record<string, unknown>): boolean {
-  return isIdentifier(value.message_id) && isIdentifier(value.attachment_id) &&
-    isAttachmentReference(value.reference) && typeof value.referenced_at === "string" &&
+  return hasExactKeys(value, [
+    "message_id", "attachment_id", "reference", "referenced_at", "attribution",
+  ]) && isIdentifier(value.message_id) &&
+    isConversationAttachmentReference(value.reference) &&
+    value.attachment_id === value.reference.attachment_id &&
+    isConversationTimestamp(value.referenced_at) &&
     isAttribution(value.attribution);
+}
+
+function hasConsistentAttachmentProjection(
+  messages: readonly Record<string, unknown>[],
+  attachments: readonly Record<string, unknown>[],
+): boolean {
+  const messageIds = messages.map((message) => message.message_id);
+  if (new Set(messageIds).size !== messageIds.length) return false;
+
+  const recordKeys = attachments.map(
+    (attachment) => `${String(attachment.message_id)}\0${String(attachment.attachment_id)}`,
+  );
+  if (new Set(recordKeys).size !== recordKeys.length) return false;
+
+  for (const message of messages) {
+    for (const reference of message.attachments as Record<string, unknown>[]) {
+      const matching = attachments.find(
+        (attachment) => attachment.message_id === message.message_id &&
+          attachment.attachment_id === reference.attachment_id,
+      );
+      if (matching === undefined || !sameAttachmentReference(matching.reference, reference)) {
+        return false;
+      }
+    }
+  }
+  for (const attachment of attachments) {
+    const message = messages.find(
+      (candidate) => candidate.message_id === attachment.message_id,
+    );
+    if (message === undefined || !(message.attachments as Record<string, unknown>[]).some(
+      (reference) => sameAttachmentReference(attachment.reference, reference),
+    )) return false;
+  }
+  return true;
+}
+
+function sameAttachmentReference(left: unknown, right: unknown): boolean {
+  if (!isConversationAttachmentReference(left) ||
+    !isConversationAttachmentReference(right)) return false;
+  return left.attachment_id === right.attachment_id &&
+    left.kind === right.kind &&
+    left.media_type === right.media_type &&
+    left.filename === right.filename &&
+    left.size_bytes === right.size_bytes;
+}
+
+function hasValidCitationProjection(
+  sources: unknown,
+  citations: unknown,
+  messages: readonly Record<string, unknown>[],
+  toolCalls: readonly Record<string, unknown>[],
+): boolean {
+  let normalized;
+  try {
+    normalized = normalizeCitationRecords({ sources, citations });
+  } catch {
+    return false;
+  }
+  if (
+    JSON.stringify(normalized.sources) !== JSON.stringify(sources) ||
+    JSON.stringify(normalized.citations) !== JSON.stringify(citations)
+  ) return false;
+
+  for (const citation of normalized.citations) {
+    if (citation.target.type === "assistant_message") {
+      const message = messages.find(
+        (candidate) => candidate.message_id === citation.target.message_id,
+      );
+      if (
+        message === undefined ||
+        (message.role !== null && message.role !== "assistant")
+      ) return false;
+      continue;
+    }
+    if (!toolCalls.some(
+      (toolCall) => toolCall.tool_call_id === citation.target.tool_call_id,
+    )) return false;
+  }
+  return true;
 }
 
 function isTurn(value: Record<string, unknown>): boolean {
@@ -258,19 +360,12 @@ function isUsageLink(value: Record<string, unknown>): boolean {
 }
 
 function isTextPart(value: unknown): boolean {
-  return isPlainRecord(value) && value.type === "text" && typeof value.text === "string";
+  return isPlainRecord(value) && hasExactKeys(value, ["type", "text"]) &&
+    value.type === "text" && typeof value.text === "string";
 }
 
 function isJsonPart(value: unknown): boolean {
   return isPlainRecord(value) && value.type === "json" && isJsonValue(value.value);
-}
-
-function isAttachmentReference(value: unknown): boolean {
-  return isPlainRecord(value) && isIdentifier(value.attachment_id) &&
-    typeof value.media_type === "string" &&
-    (value.filename === undefined || typeof value.filename === "string") &&
-    (value.size_bytes === undefined ||
-      Number.isSafeInteger(value.size_bytes) && (value.size_bytes as number) >= 0);
 }
 
 function isTurnError(value: unknown): boolean {
