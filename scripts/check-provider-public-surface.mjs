@@ -75,6 +75,11 @@ assert.match(
   "the package entry point must export only the provider-neutral context contract",
 );
 assert.match(
+  packageEntry,
+  /export \* from ["']\.\/transcription\.js["'];/,
+  "the package entry point must export the provider-neutral transcription contract",
+);
+assert.match(
   openAIEntry,
   /export declare (?:class OpenAIProviderAdapter|function createOpenAIProviderAdapter)/,
   "the opt-in OpenAI entry must export its provider adapter",

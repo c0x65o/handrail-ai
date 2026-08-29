@@ -11,5 +11,6 @@ export * from "./realtime/index.js";
 export * from "./runtime.js";
 export * from "./sync/index.js";
 export * from "./tools/index.js";
+export * from "./transcription.js";
 export * from "./transports/index.js";
 export * from "./usage.js";

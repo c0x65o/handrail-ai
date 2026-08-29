@@ -88,6 +88,22 @@ test("exports citation records and normalization from the built core entry", asy
   assert.equal(typeof imported.deduplicateCitationRecords, "function");
 });
 
+test("exports the provider-neutral transcription contract from the built core entry", async () => {
+  const moduleUrl = pathToFileURL(
+    path.join(packageRoot, packageJson.exports["."].import),
+  ).href;
+  const imported = await import(moduleUrl);
+  assert.equal(
+    imported.TRANSCRIPTION_CONTRACT_VERSION,
+    "handrail.transcription.v1",
+  );
+  assert.equal(typeof imported.TRANSCRIPTION_LIMITS, "object");
+  assert.equal(typeof imported.parseTranscriptionRequest, "function");
+  assert.equal(typeof imported.executeTranscription, "function");
+  assert.equal(imported.OpenAI, undefined);
+  assert.equal(imported.React, undefined);
+});
+
 test("exports the approval proposal store contract from the built core entry", async () => {
   const moduleUrl = pathToFileURL(
     path.join(packageRoot, packageJson.exports["."].import),
@@ -96,6 +112,8 @@ test("exports the approval proposal store contract from the built core entry", a
   assert.equal(typeof imported.InMemoryApprovalProposalStore, "function");
   assert.equal(typeof imported.ApprovalProposalStoreError, "function");
   assert.equal(typeof imported.APPROVAL_PROPOSAL_STORE_LIMITS, "object");
+  assert.equal(typeof imported.createApprovalCoordinator, "function");
+  assert.equal(typeof imported.APPROVAL_COORDINATOR_LIMITS, "object");
 });
 
 test("exports the conversation catalog contract from the built core entry", async () => {

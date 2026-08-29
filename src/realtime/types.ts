@@ -278,6 +278,7 @@ export interface RealtimeVoiceSessionAuthorityAdapter {
 
 export interface RealtimeVoiceBootstrapService {
   bootstrap(
-    request: RealtimeVoiceBootstrapRequest & RealtimeVoiceOperationInput,
+    request: RealtimeVoiceBootstrapRequest,
+    operation: RealtimeVoiceOperationInput,
   ): Promise<RealtimeVoiceBootstrapResult>;
 }

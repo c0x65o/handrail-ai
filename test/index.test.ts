@@ -14,4 +14,30 @@ describe("package entry point", () => {
     expect(handrailAi.authorizeConversationCatalogRequest).toBeTypeOf("function");
     expect(handrailAi.ConversationCatalogError).toBeTypeOf("function");
   });
+
+  it("exports the headless approval coordinator", () => {
+    expect(handrailAi.createApprovalCoordinator).toBeTypeOf("function");
+    expect(handrailAi.APPROVAL_COORDINATOR_LIMITS).toBeTypeOf("object");
+  });
+
+  it("exports conversation title generation through the core entry point", () => {
+    expect(handrailAi.CONVERSATION_TITLE_GENERATION_LIMITS).toBeTypeOf("object");
+    expect(handrailAi.DEFAULT_CONVERSATION_TITLE).toBe("New conversation");
+    expect(handrailAi.createConversationTitleGenerationContext).toBeTypeOf(
+      "function",
+    );
+    expect(handrailAi.ConversationTitleGenerationService).toBeTypeOf("function");
+    expect(handrailAi.ConversationTitleGenerationError).toBeTypeOf("function");
+  });
+
+  it("exports the provider-neutral realtime voice contract", () => {
+    expect(handrailAi.REALTIME_VOICE_CONTRACT_VERSION).toBe(
+      "handrail.realtime-voice.v1",
+    );
+    expect(handrailAi.parseRealtimeVoiceBootstrapRequest).toBeTypeOf("function");
+    expect(handrailAi.createRealtimeVoiceClientSession).toBeTypeOf("function");
+    expect(handrailAi.createIdempotentRealtimeVoiceSessionAuthority).toBeTypeOf(
+      "function",
+    );
+  });
 });

@@ -1,3 +1,4 @@
+export * from "./approval-coordinator.js";
 export * from "./approval-proposal-store.js";
 export * from "./catalog.js";
 export * from "./in-memory-catalog.js";
@@ -8,3 +9,4 @@ export * from "./replay.js";
 export * from "./state.js";
 export * from "./state-validation.js";
 export * from "./store.js";
+export * from "./title-generation.js";
