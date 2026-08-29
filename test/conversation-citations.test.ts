@@ -144,6 +144,23 @@ describe("durable conversation citations", () => {
           { source_id: "source-handbook", type: "web", label: "Conflict" },
         ],
       }),
+      citationPayload(undefined, {
+        citations: [{
+          citation_id: "citation-handbook",
+          source_id: "source-missing",
+          order: 0,
+          target: { type: "assistant_message", message_id: "message-cited" },
+        }],
+      }),
+      citationPayload({ type: "tool_result", turn_id: "turn-cited" }),
+      citationPayload(undefined, {
+        sources: [{
+          source_id: "source-handbook",
+          type: "web",
+          label: "  Handbook  ",
+          locator: "https://example.com/handbook",
+        }],
+      }),
     ];
 
     for (const [index, payload] of invalidPayloads.entries()) {

@@ -73,12 +73,16 @@ export type OpenAIProviderContextCompactionResponse =
 export type OpenAIProviderContextMeasureRequestFunction = (
   request: OpenAIProviderContextMeasureRequest,
   options: OpenAIProviderContextRequestOptions,
-) => unknown | Promise<unknown>;
+) =>
+  | OpenAIProviderContextMeasurementResponse
+  | Promise<OpenAIProviderContextMeasurementResponse>;
 
 export type OpenAIProviderContextCompactRequestFunction = (
   request: OpenAIProviderContextCompactRequest,
   options: OpenAIProviderContextRequestOptions,
-) => unknown | Promise<unknown>;
+) =>
+  | OpenAIProviderContextCompactionResponse
+  | Promise<OpenAIProviderContextCompactionResponse>;
 
 export interface OpenAIProviderContextOptions {
   readonly model: string;

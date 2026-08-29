@@ -210,7 +210,7 @@ describe("OpenAI provider-context capability", () => {
       instructions: ["Be concise.\nUse tools."],
       tools: canonicalInput.tools,
       generation: canonicalInput.generation,
-      provider_settings: canonicalInput.provider_settings,
+      provider_settings: canonicalInput.provider_settings!,
     }));
     expect(requestOptions?.signal).toBe(controller.signal);
     expect(result).toEqual(measured(contextFingerprint, position));
@@ -260,7 +260,7 @@ describe("OpenAI provider-context capability", () => {
       instructions: input().instructions,
       tools: input().tools,
       generation: input().generation,
-      provider_settings: input().provider_settings,
+      provider_settings: input().provider_settings!,
     }))],
     ["mismatched history", measured(fingerprint(), history(5, "event-5"))],
     ["extra provider output", { ...measured(), raw_response: { secret: true } }],
@@ -451,5 +451,42 @@ describe("OpenAI provider-context capability", () => {
       message: "The provider-context operation was cancelled.",
       retryable: false,
     });
+  });
+
+  it("does not memoize a cancelled compaction and safely retries its idempotency key", async () => {
+    const firstController = new AbortController();
+    let firstSignal: AbortSignal | undefined;
+    const compactContext = vi.fn((
+      _request: OpenAIProviderContextCompactRequest,
+      options: OpenAIProviderContextRequestOptions,
+    ) => {
+      if (compactContext.mock.calls.length === 1) {
+        firstSignal = options.signal;
+        return new Promise(() => undefined);
+      }
+      return {
+        status: "unchanged",
+        checkpoint: null,
+        measurement: measured(),
+      };
+    });
+    const adapter = createOpenAIProviderAdapter(adapterOptions({
+      measure_context: async () => measured(),
+      compact_context: compactContext,
+    }));
+    if (!adapter.provider_context.supported) throw new Error("expected support");
+
+    const pending = adapter.provider_context.compact(compactionRequest(input(), {
+      signal: firstController.signal,
+    }));
+    await vi.waitFor(() => expect(compactContext).toHaveBeenCalledOnce());
+    firstController.abort();
+    expect(await safeFailure(pending)).toMatchObject({ code: "cancelled" });
+
+    await expect(adapter.provider_context.compact(compactionRequest())).resolves.toMatchObject({
+      status: "unchanged",
+    });
+    expect(firstSignal).toBe(firstController.signal);
+    expect(compactContext).toHaveBeenCalledTimes(2);
   });
 });

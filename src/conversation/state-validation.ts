@@ -171,8 +171,9 @@ function hasValidCitationProjection(
 
   for (const citation of normalized.citations) {
     if (citation.target.type === "assistant_message") {
+      const messageId = citation.target.message_id;
       const message = messages.find(
-        (candidate) => candidate.message_id === citation.target.message_id,
+        (candidate) => candidate.message_id === messageId,
       );
       if (
         message === undefined ||
@@ -180,8 +181,9 @@ function hasValidCitationProjection(
       ) return false;
       continue;
     }
+    const toolCallId = citation.target.tool_call_id;
     if (!toolCalls.some(
-      (toolCall) => toolCall.tool_call_id === citation.target.tool_call_id,
+      (toolCall) => toolCall.tool_call_id === toolCallId,
     )) return false;
   }
   return true;

@@ -1386,6 +1386,15 @@ function validatePayload(
       if (records.citations.length === 0) {
         fail(`${path}.citations`, "must contain at least one citation link");
       }
+      if (
+        JSON.stringify(records.sources) !== JSON.stringify(object.sources) ||
+        JSON.stringify(records.citations) !== JSON.stringify(object.citations)
+      ) {
+        fail(
+          path,
+          "citation records must already be normalized and identity-deduplicated",
+        );
+      }
       for (const citation of records.citations) {
         if (
           citation.target.type !== target.type ||

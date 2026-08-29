@@ -216,15 +216,16 @@ export function reduceConversationEvent(
       if (merged === null) return accepted;
 
       if (payload.target.type === "assistant_message") {
+        const messageId = payload.target.message_id;
         const message = accepted.messages.find(
-          (candidate) => candidate.message_id === payload.target.message_id,
+          (candidate) => candidate.message_id === messageId,
         );
         if (message !== undefined && message.role !== null && message.role !== "assistant") {
           return accepted;
         }
         if (message !== undefined) return merged;
         const placeholder: ConversationMessageRecord = freeze({
-          message_id: payload.target.message_id,
+          message_id: messageId,
           role: null,
           content: freeze([]),
           attachments: freeze([]),
@@ -237,16 +238,17 @@ export function reduceConversationEvent(
         });
       }
 
+      const toolTarget = payload.target;
       const toolCall = accepted.tool_calls.find(
-        (candidate) => candidate.tool_call_id === payload.target.tool_call_id,
+        (candidate) => candidate.tool_call_id === toolTarget.tool_call_id,
       );
-      if (toolCall !== undefined && toolCall.turn_id !== payload.target.turn_id) {
+      if (toolCall !== undefined && toolCall.turn_id !== toolTarget.turn_id) {
         return accepted;
       }
       if (toolCall !== undefined) return merged;
       const placeholder: ConversationToolCallRecord = freeze({
-        tool_call_id: payload.target.tool_call_id,
-        turn_id: payload.target.turn_id,
+        tool_call_id: toolTarget.tool_call_id,
+        turn_id: toolTarget.turn_id,
         name: null,
         arguments: null,
         requested_at: null,
