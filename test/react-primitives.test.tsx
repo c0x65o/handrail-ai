@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createRef, type KeyboardEvent } from "react";
 import { renderToString } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -18,7 +18,9 @@ import {
 import {
   AttachmentItem,
   AttachmentList,
+  AttachmentCancel,
   AttachmentRemove,
+  AttachmentRetry,
   ChatRoot,
   Composer,
   ErrorList,
@@ -110,6 +112,7 @@ function composer(
     cancel: stop,
     stop,
     retryAttachment: vi.fn(() => true),
+    cancelAttachment: vi.fn(() => true),
     removeAttachment: vi.fn(() => true),
     getTextareaProps: () => ({
       value: "hello",
@@ -389,6 +392,84 @@ describe("headless chat primitives", () => {
     fireEvent.click(screen.getByRole("button", { name: "Remove photo.png" }));
     expect(remove).toHaveBeenCalledWith("attachment_1");
     expect(screen.getByRole("list", { name: "Errors" }).textContent).toBe("Could not send");
+  });
+
+  it("exposes accessible mixed attachment metadata, progress, and action seams", () => {
+    const retryAttachment = vi.fn(() => true);
+    const cancelAttachment = vi.fn(() => true);
+    const removeAttachment = vi.fn(() => true);
+    const pdf = new File(["pdf"], "guide.pdf", { type: "application/pdf" });
+    const pending = {
+      id: "attachment-upload-1",
+      fingerprint: "browser-pdf:guide",
+      source: pdf,
+      filename: "guide.pdf",
+      kind: "document",
+      mediaType: "application/pdf",
+      byteSize: pdf.size,
+      status: "uploading",
+      progress: { uploadedBytes: 2, totalBytes: pdf.size },
+      retryable: false,
+      cancellable: true,
+    } as const;
+    const image = new File(["image"], "retry.png", { type: "image/png" });
+    const failed = {
+      id: "attachment-upload-2",
+      fingerprint: "browser-image:retry",
+      source: image,
+      filename: "retry.png",
+      kind: "image",
+      mediaType: "image/png",
+      byteSize: image.size,
+      previewUrl: "blob:retry",
+      status: "failed",
+      progress: { uploadedBytes: 1, totalBytes: image.size },
+      error: { code: "upload_failed", message: "Upload failed", retryable: true },
+      retryable: true,
+      cancellable: false,
+    } as const;
+    const bindings = composer({
+      attachments: [pending, failed],
+      retryAttachment,
+      cancelAttachment,
+      removeAttachment,
+    });
+
+    render(<AttachmentList composer={bindings} aria-label="Pending attachments" />);
+    const pdfItem = screen.getByRole("listitem", {
+      name: "guide.pdf, document attachment, uploading",
+    });
+    expect(pdfItem.textContent).toContain("Kind: document");
+    expect(pdfItem.textContent).toContain("Type: application/pdf");
+    expect(within(pdfItem).getByRole("status").textContent).toBe("Status: uploading");
+    expect(within(pdfItem).getByRole("progressbar", {
+      name: "guide.pdf upload progress",
+    }).getAttribute("value")).toBe("2");
+    fireEvent.click(within(pdfItem).getByRole("button", { name: "Cancel guide.pdf" }));
+    expect(cancelAttachment).toHaveBeenCalledWith("attachment-upload-1");
+
+    const imageItem = screen.getByRole("listitem", {
+      name: "retry.png, image attachment, failed",
+    });
+    fireEvent.click(within(imageItem).getByRole("button", { name: "Retry retry.png" }));
+    fireEvent.click(within(imageItem).getByRole("button", { name: "Remove retry.png" }));
+    expect(retryAttachment).toHaveBeenCalledWith("attachment-upload-2");
+    expect(removeAttachment).toHaveBeenCalledWith("attachment-upload-2");
+
+    const standalone = render(
+      <AttachmentItem attachment={pending}>
+        <AttachmentRetry attachment={failed}>Try again</AttachmentRetry>
+        <AttachmentCancel>Stop upload</AttachmentCancel>
+      </AttachmentItem>,
+    );
+    expect(within(standalone.container).getByRole("button", {
+      name: "Retry retry.png",
+    }).hasAttribute("disabled"))
+      .toBe(true);
+    expect(within(standalone.container).getByRole("button", {
+      name: "Cancel guide.pdf",
+    }).hasAttribute("disabled"))
+      .toBe(true);
   });
 
   it("exposes accurate unavailable and busy action states", () => {

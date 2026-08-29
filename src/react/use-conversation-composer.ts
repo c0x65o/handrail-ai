@@ -253,6 +253,63 @@ const INTAKE_MESSAGES: Record<IntakeRejectionReason, string> = {
 const IMAGE_MIME_TYPES = new Set<string>(AI_RUNTIME_IMAGE_MIME_TYPES);
 const DOCUMENT_MIME_TYPES = new Set<string>(AI_RUNTIME_DOCUMENT_MIME_TYPES);
 
+function validateAttachmentIntakeOptions(
+  options: ConversationComposerAttachmentIntakeOptions,
+): void {
+  const accepted = options.acceptedMediaTypes ?? [
+    ...AI_RUNTIME_IMAGE_MIME_TYPES,
+    ...AI_RUNTIME_DOCUMENT_MIME_TYPES,
+  ];
+  if (
+    accepted.length === 0 ||
+    accepted.some((mediaType) =>
+      !IMAGE_MIME_TYPES.has(mediaType) && !DOCUMENT_MIME_TYPES.has(mediaType)
+    )
+  ) {
+    throw new TypeError(
+      "attachmentIntake.acceptedMediaTypes must contain protocol attachment MIME types",
+    );
+  }
+  const validateBytes = (
+    kind: AttachmentUploadKind,
+    minimum: number,
+    maximum: number,
+  ): void => {
+    const value = options.maxFileBytes?.[kind];
+    if (
+      value !== undefined &&
+      (!Number.isSafeInteger(value) || value < minimum || value > maximum)
+    ) {
+      throw new TypeError(
+        `attachmentIntake.maxFileBytes.${kind} must be an integer from ${minimum} through ${maximum}`,
+      );
+    }
+  };
+  const validateCount = (kind: AttachmentUploadKind, maximum: number): void => {
+    const value = options.maxSelectionCount?.[kind];
+    if (
+      value !== undefined &&
+      (!Number.isSafeInteger(value) || value < 1 || value > maximum)
+    ) {
+      throw new TypeError(
+        `attachmentIntake.maxSelectionCount.${kind} must be an integer from 1 through ${maximum}`,
+      );
+    }
+  };
+  validateBytes(
+    "image",
+    AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMinBytes,
+    AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMaxBytes,
+  );
+  validateBytes(
+    "document",
+    AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMinBytes,
+    AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMaxBytes,
+  );
+  validateCount("image", AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentsPerMessage);
+  validateCount("document", AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentsPerMessage);
+}
+
 type ImageResult = BrowserImageIntakeResult | BrowserDropImageIntakeResult;
 type PdfResult = BrowserPdfIntakeResult | BrowserDropPdfIntakeResult;
 
@@ -409,6 +466,7 @@ export function useConversationComposer<TRequest = undefined>(
   } = options;
   const conversationId = options.conversationId ?? storeConversationId;
   const generalizedIntake = options.attachmentIntake;
+  if (generalizedIntake !== undefined) validateAttachmentIntakeOptions(generalizedIntake);
   const acceptedMediaTypes: readonly AttachmentMimeType[] = generalizedIntake === undefined
     ? options.imageIntake?.acceptedMediaTypes ?? AI_RUNTIME_IMAGE_MIME_TYPES
     : generalizedIntake.acceptedMediaTypes ?? [
@@ -679,7 +737,9 @@ export function useConversationComposer<TRequest = undefined>(
       code: rejection.reason,
       message: INTAKE_MESSAGES[rejection.reason],
       retryable: false as const,
-      fingerprint: rejection.fingerprint,
+      ...(rejection.fingerprint === undefined
+        ? {}
+        : { fingerprint: rejection.fingerprint }),
       ...(rejection.filename === undefined ? {} : { filename: rejection.filename }),
     })));
   }, [releaseOwned, scope, uploader]);

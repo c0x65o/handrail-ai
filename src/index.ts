@@ -7,6 +7,7 @@ export * from "./provider-context.js";
 export * from "./protocol.js";
 export * from "./providers/index.js";
 export * from "./retry.js";
+export * from "./realtime/index.js";
 export * from "./runtime.js";
 export * from "./sync/index.js";
 export * from "./tools/index.js";

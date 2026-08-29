@@ -473,8 +473,11 @@ describe("InMemoryConversationCatalog", () => {
       { maxTombstones: -1 },
       { maxIdempotencyEntries: 1.5 },
       { maxRecords: 1_000_001 },
+      { unknownLimit: 1 },
     ]) {
-      expect(() => catalog({ limits })).toThrow(TypeError);
+      expect(() => catalog({
+        limits: limits as Partial<InMemoryConversationCatalogLimits>,
+      })).toThrow(TypeError);
     }
   });
 });

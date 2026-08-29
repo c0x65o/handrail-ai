@@ -17,6 +17,7 @@ import {
 import {
   ConversationProvider,
   useConversationComposer,
+  type ConversationComposerAttachmentIntakeOptions,
   type ConversationComposerResult,
   type UseConversationComposerOptions,
 } from "../src/react/index.js";
@@ -107,12 +108,15 @@ function immediateUploader() {
 }
 
 function objectUrls() {
+  const created: Blob[] = [];
   const revoked: string[] = [];
   let next = 0;
   return {
+    created,
     revoked,
     api: {
-      createObjectURL() {
+      createObjectURL(source: Blob) {
+        created.push(source);
         next += 1;
         return `blob:composer-${next}`;
       },
@@ -260,6 +264,255 @@ describe("useConversationComposer", () => {
     ]);
   });
 
+  it("accepts mixed picker and drop attachments and submits in selection order", async () => {
+    const { runtime, sendMessage } = fakeRuntime<undefined>();
+    const pending = new Map<string, {
+      request: AttachmentUploadRequest<Blob>;
+      resolve: (value: AttachmentReference) => void;
+    }>();
+    const uploader = createAttachmentUploader<Blob>({
+      upload(request) {
+        return new Promise<AttachmentReference>((resolve) => {
+          pending.set(request.metadata.filename ?? "", { request, resolve });
+        });
+      },
+    });
+    const urls = objectUrls();
+    const { result } = renderHook(() => useConversationComposer({
+      uploader,
+      attachmentIntake: { previews: { objectUrlApi: urls.api } },
+    }), { wrapper: wrapper(runtime) });
+
+    expect(result.current.getFileInputProps().accept).toBe(
+      "image/jpeg,image/png,image/gif,image/webp,application/pdf",
+    );
+    const pickedPdf = file("picked.pdf", "application/pdf", "pdf");
+    const pickedImage = file("picked.png", "image/png", "image");
+    act(() => result.current.getFileInputProps().onChange({
+      currentTarget: { files: fileList(pickedPdf, pickedImage) },
+    } as never));
+    await waitFor(() => expect(pending.size).toBe(2));
+
+    act(() => pending.get("picked.png")!.request.onProgress({
+      uploadedBytes: 3,
+      totalBytes: pickedImage.size,
+    }));
+    expect(result.current.attachments).toEqual([
+      expect.objectContaining({
+        filename: "picked.pdf",
+        kind: "document",
+        mediaType: "application/pdf",
+        status: "uploading",
+        retryable: false,
+        cancellable: true,
+      }),
+      expect.objectContaining({
+        filename: "picked.png",
+        kind: "image",
+        mediaType: "image/png",
+        status: "uploading",
+        progress: { uploadedBytes: 3, totalBytes: pickedImage.size },
+      }),
+    ]);
+    expect(result.current.attachments[0]?.previewUrl).toBeUndefined();
+    expect(result.current.attachments[1]?.previewUrl).toBe("blob:composer-1");
+    expect(urls.created).toEqual([pickedImage]);
+
+    act(() => pending.get("picked.png")!.resolve(reference(
+      pending.get("picked.png")!.request,
+    )));
+    await waitFor(() => expect(result.current.attachments[1]?.status).toBe("ready"));
+    act(() => pending.get("picked.pdf")!.resolve(reference(
+      pending.get("picked.pdf")!.request,
+    )));
+    await waitFor(() => expect(result.current.canSend).toBe(true));
+
+    await act(() => result.current.submit());
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      attachments: [
+        expect.objectContaining({ filename: "picked.pdf", media_type: "application/pdf" }),
+        expect.objectContaining({ filename: "picked.png", media_type: "image/png" }),
+      ],
+    }));
+    expect(urls.revoked).toEqual(["blob:composer-1"]);
+
+    const droppedImage = file("drop.gif", "image/gif", "gif");
+    const droppedPdf = file("drop.pdf", "application/pdf", "drop-pdf");
+    const preventDefault = vi.fn();
+    act(() => result.current.getDropProps().onDrop({
+      dataTransfer: {
+        items: itemList(fileItem(droppedImage), fileItem(droppedPdf)),
+        files: fileList(droppedImage, droppedPdf),
+      },
+      preventDefault,
+    } as never));
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(result.current.attachments.map(({ filename, kind }) => ({ filename, kind })))
+      .toEqual([
+        { filename: "drop.gif", kind: "image" },
+        { filename: "drop.pdf", kind: "document" },
+      ]);
+  });
+
+  it("accepts only file-kind clipboard PDFs and never creates document previews", async () => {
+    const { runtime } = fakeRuntime<undefined>();
+    const urls = objectUrls();
+    const uploader = immediateUploader();
+    const { result } = renderHook(() => useConversationComposer({
+      uploader,
+      attachmentIntake: { previews: { objectUrlApi: urls.api } },
+    }), { wrapper: wrapper(runtime) });
+    const pdf = file("clipboard.pdf", "application/pdf", "pdf");
+    const preventDefault = vi.fn();
+    act(() => result.current.getTextareaProps().onPaste({
+      clipboardData: {
+        items: itemList(
+          { kind: "string", type: "text/plain", getAsFile: () => null } as DataTransferItem,
+          fileItem(pdf),
+        ),
+      },
+      preventDefault,
+    } as never));
+    expect(preventDefault).toHaveBeenCalledOnce();
+    await waitFor(() => expect(result.current.attachments[0]?.status).toBe("ready"));
+    expect(result.current.attachments[0]).toEqual(expect.objectContaining({
+      kind: "document",
+      mediaType: "application/pdf",
+      filename: "clipboard.pdf",
+    }));
+    expect(result.current.attachments[0]?.previewUrl).toBeUndefined();
+    expect(urls.created).toEqual([]);
+    expect(urls.revoked).toEqual([]);
+  });
+
+  it("gives attachmentIntake deterministic precedence over imageIntake", async () => {
+    const { runtime } = fakeRuntime<undefined>();
+    const uploader = immediateUploader();
+    const { result } = renderHook(() => useConversationComposer({
+      uploader,
+      attachmentIntake: {
+        acceptedMediaTypes: ["application/pdf"],
+        previews: false,
+      },
+      imageIntake: {
+        acceptedMediaTypes: ["image/png"],
+        previews: false,
+      },
+    }), { wrapper: wrapper(runtime) });
+    expect(result.current.getFileInputProps().accept).toBe("application/pdf");
+    act(() => result.current.getFileInputProps().onChange({
+      currentTarget: {
+        files: fileList(
+          file("ignored.png", "image/png", "image"),
+          file("accepted.pdf", "application/pdf", "pdf"),
+        ),
+      },
+    } as never));
+    await waitFor(() => expect(result.current.attachments).toHaveLength(1));
+    expect(result.current.attachments[0]).toEqual(expect.objectContaining({
+      filename: "accepted.pdf",
+      kind: "document",
+    }));
+    expect(result.current.errors).toContainEqual(expect.objectContaining({
+      code: "unsupported_type",
+    }));
+  });
+
+  it("reports bounded provider-neutral intake rejection messages", async () => {
+    const { runtime } = fakeRuntime<undefined>();
+    const uploader = immediateUploader();
+    const { result } = renderHook(() => useConversationComposer({
+      uploader,
+      attachmentIntake: {
+        previews: false,
+        maxFileBytes: { image: 4, document: 4 },
+        maxSelectionCount: { image: 1, document: 1 },
+      },
+    }), { wrapper: wrapper(runtime) });
+    const first = file("first.png", "image/png", "a");
+    act(() => result.current.getFileInputProps().onChange({
+      currentTarget: { files: fileList(
+        first,
+        first,
+        file("overflow.png", "image/png", "b"),
+        file("large.pdf", "application/pdf", "large"),
+        file("empty.pdf", "application/pdf", ""),
+        file("unsafe/name.pdf", "application/pdf", "x"),
+        file("notes.txt", "text/plain", "x"),
+      ) },
+    } as never));
+    await waitFor(() => expect(result.current.attachments).toHaveLength(1));
+    expect(result.current.errors.map(({ code, message }) => ({ code, message }))).toEqual([
+      { code: "duplicate", message: "The selected attachment is already attached." },
+      { code: "count_overflow", message: "The attachment selection limit has been reached." },
+      { code: "too_large", message: "The selected attachment is too large." },
+      { code: "empty_file", message: "The selected attachment is empty." },
+      { code: "unsafe_filename", message: "The selected attachment has an unsafe filename." },
+      { code: "unsupported_type", message: "The selected file is not a supported attachment type." },
+    ]);
+  });
+
+  it("cancels only owned uploads and exactly cleans image previews after partial intake failure", async () => {
+    const { runtime } = fakeRuntime<undefined>();
+    const urls = objectUrls();
+    const uploader = createAttachmentUploader<Blob>({
+      upload(request) {
+        return new Promise<AttachmentReference>((_resolve, reject) => {
+          request.signal.addEventListener("abort", () => reject(new Error("aborted")));
+        });
+      },
+    }, { maxImageCount: 1 });
+    const { result } = renderHook(() => useConversationComposer({
+      uploader,
+      attachmentIntake: {
+        previews: { objectUrlApi: urls.api },
+        maxSelectionCount: { image: 2 },
+      },
+    }), { wrapper: wrapper(runtime) });
+    act(() => result.current.getFileInputProps().onChange({
+      currentTarget: { files: fileList(file("one.png"), file("two.png")) },
+    } as never));
+    await waitFor(() => expect(result.current.errors).toContainEqual(expect.objectContaining({
+      code: "intake_failed",
+      message: "The selected attachments could not be prepared.",
+    })));
+    expect(result.current.attachments).toEqual([]);
+    expect(uploader.getSnapshot().items).toEqual([]);
+    expect(urls.created).toHaveLength(2);
+    expect(urls.revoked).toEqual(["blob:composer-1", "blob:composer-2"]);
+
+    const shared = createAttachmentUploader<Blob>({
+      upload(request) {
+        return new Promise<AttachmentReference>((_resolve, reject) => {
+          request.signal.addEventListener("abort", () => reject(new Error("aborted")));
+        });
+      },
+    });
+    const externalId = shared.enqueue({
+      source: file("external.png"),
+      fingerprint: "external-fingerprint",
+      idempotencyKey: "external-key",
+      mediaType: "image/png",
+      byteSize: 5,
+      filename: "external.png",
+    });
+    const owned = renderHook(() => useConversationComposer({
+      uploader: shared,
+      attachmentIntake: { previews: false },
+    }), { wrapper: wrapper(runtime) });
+    act(() => owned.result.current.getFileInputProps().onChange({
+      currentTarget: { files: fileList(file("owned.pdf", "application/pdf", "pdf")) },
+    } as never));
+    await waitFor(() => expect(owned.result.current.attachments).toHaveLength(1));
+    act(() => {
+      expect(owned.result.current.cancelAttachment(owned.result.current.attachments[0]!.id))
+        .toBe(true);
+    });
+    expect(owned.result.current.attachments).toEqual([]);
+    expect(shared.getSnapshot().items.some(({ id }) => id === externalId)).toBe(true);
+    owned.unmount();
+  });
+
   it("gates pending and failed uploads, then supports retry and removal", async () => {
     let resolvePending: ((value: AttachmentReference) => void) | undefined;
     const attempts = new Map<string, number>();
@@ -268,7 +521,7 @@ describe("useConversationComposer", () => {
         const name = request.metadata.filename ?? "";
         const attempt = (attempts.get(name) ?? 0) + 1;
         attempts.set(name, attempt);
-        if (name === "retry.png" && attempt === 1) {
+        if (name === "retry.pdf" && attempt === 1) {
           return Promise.reject(new AttachmentUploadAdapterError({ retryable: true }));
         }
         if (name === "pending.png") {
@@ -283,12 +536,15 @@ describe("useConversationComposer", () => {
     const { runtime } = fakeRuntime<undefined>();
     const { result } = renderHook(() => useConversationComposer({
       uploader,
-      imageIntake: { previews: false },
+      attachmentIntake: { previews: false },
     }), { wrapper: wrapper(runtime) });
 
     act(() => result.current.getFileInputProps().onChange({
       currentTarget: {
-        files: fileList(file("retry.png"), file("pending.png")),
+        files: fileList(
+          file("retry.pdf", "application/pdf", "pdf"),
+          file("pending.png"),
+        ),
       },
     } as never));
     await waitFor(() => expect(result.current.attachments.map(({ status }) => status)).toEqual([
@@ -354,7 +610,8 @@ describe("useConversationComposer", () => {
 
   it("cleans up previews and typing across conversation switches and unmount", async () => {
     const { runtime } = fakeRuntime<undefined>("conversation_one");
-    const uploader = immediateUploader();
+    const firstUploader = immediateUploader();
+    const secondUploader = immediateUploader();
     const urls = objectUrls();
     const presence = {
       noteActivity: vi.fn(),
@@ -365,36 +622,56 @@ describe("useConversationComposer", () => {
     const firstId = "conversation_one" as ConversationId;
     const secondId = "conversation_two" as ConversationId;
     const { result, rerender, unmount } = renderHook(
-      ({ conversationId }: { conversationId: ConversationId }) =>
+      ({ conversationId, uploader }: {
+        conversationId: ConversationId;
+        uploader: ReturnType<typeof immediateUploader>;
+      }) =>
         useConversationComposer({
           uploader,
           presence,
           conversationId,
-          imageIntake: { previews: { objectUrlApi: urls.api } },
+          attachmentIntake: { previews: { objectUrlApi: urls.api } },
         }),
       {
-        initialProps: { conversationId: firstId },
+        initialProps: { conversationId: firstId, uploader: firstUploader },
         wrapper: wrapper(runtime),
       },
     );
     act(() => result.current.setDraft("typing"));
     act(() => result.current.getFileInputProps().onChange({
-      currentTarget: { files: fileList(file("first.png")) },
+      currentTarget: {
+        files: fileList(file("first.png"), file("first.pdf", "application/pdf", "pdf")),
+      },
+    } as never));
+    await waitFor(() => expect(result.current.attachments).toHaveLength(2));
+
+    rerender({ conversationId: firstId, uploader: secondUploader });
+    await waitFor(() => expect(result.current.attachments).toEqual([]));
+    expect(firstUploader.getSnapshot().items).toEqual([]);
+    expect(urls.revoked).toEqual(["blob:composer-1"]);
+
+    act(() => result.current.getFileInputProps().onChange({
+      currentTarget: { files: fileList(file("switch.png")) },
     } as never));
     await waitFor(() => expect(result.current.attachments).toHaveLength(1));
-
-    rerender({ conversationId: secondId });
+    rerender({ conversationId: secondId, uploader: secondUploader });
     await waitFor(() => expect(result.current.attachments).toEqual([]));
-    expect(urls.revoked).toEqual(["blob:composer-1"]);
+    expect(urls.revoked).toEqual(["blob:composer-1", "blob:composer-2"]);
     expect(presence.stopTyping).toHaveBeenCalledWith("conversation_switch");
     expect(presence.switchConversation).toHaveBeenCalledWith(secondId);
 
     act(() => result.current.getFileInputProps().onChange({
-      currentTarget: { files: fileList(file("second.png")) },
+      currentTarget: {
+        files: fileList(file("second.pdf", "application/pdf", "pdf"), file("second.png")),
+      },
     } as never));
-    await waitFor(() => expect(result.current.attachments).toHaveLength(1));
+    await waitFor(() => expect(result.current.attachments).toHaveLength(2));
     unmount();
-    expect(urls.revoked).toEqual(["blob:composer-1", "blob:composer-2"]);
+    expect(urls.revoked).toEqual([
+      "blob:composer-1",
+      "blob:composer-2",
+      "blob:composer-3",
+    ]);
     expect(presence.stopTyping).toHaveBeenCalledWith("destroy");
   });
 
@@ -438,7 +715,9 @@ describe("useConversationComposer", () => {
     type Request = { readonly model: string };
     const options = {} as UseConversationComposerOptions<Request>;
     const composer = {} as ConversationComposerResult;
+    const intake = {} as ConversationComposerAttachmentIntakeOptions;
     expect(options).toBeDefined();
     expect(composer).toBeDefined();
+    expect(intake).toBeDefined();
   });
 });

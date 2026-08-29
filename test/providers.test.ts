@@ -14,6 +14,7 @@ import {
   type ProviderAdapterStream,
   type ProviderCost,
   type ProviderDocumentInputCapability,
+  type ProviderModelCapabilities,
   type ProviderUsage,
   type StreamEvent,
 } from "../src/index.js";
@@ -23,6 +24,14 @@ type NativeInvocationKey = Extract<
   "client" | "credentials" | "headers" | "native_request" | "provider_request" | "sdk_request"
 >;
 const invocationHasNoNativeKeys: NativeInvocationKey extends never ? true : false = true;
+type IsRequired<T, Key extends keyof T> = Pick<T, Key> extends Required<Pick<T, Key>>
+  ? true
+  : false;
+const adapterRequiresProviderContext: IsRequired<ProviderAdapter, "provider_context"> = true;
+const metadataRequiresProviderContext: IsRequired<
+  ProviderModelCapabilities,
+  "provider_context"
+> = true;
 
 const attribution: AuthoritativeAttribution = {
   organization: { id: "org_1", source: "server_derived", trust: "authoritative" },
@@ -463,6 +472,8 @@ describe("provider adapter contract", () => {
 
   it("has a provider-neutral TypeScript invocation surface", () => {
     expect(invocationHasNoNativeKeys).toBe(true);
+    expect(adapterRequiresProviderContext).toBe(true);
+    expect(metadataRequiresProviderContext).toBe(true);
   });
 
   it("exposes provider-neutral image references to adapters as serializable message content", () => {

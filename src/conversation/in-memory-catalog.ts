@@ -518,6 +518,23 @@ export class InMemoryConversationCatalog<TAuthorizationContext = unknown>
 function resolveLimits(
   overrides: Partial<InMemoryConversationCatalogLimits> | undefined,
 ): Readonly<InMemoryConversationCatalogLimits> {
+  if (
+    overrides !== undefined &&
+    (overrides === null || typeof overrides !== "object" || Array.isArray(overrides))
+  ) {
+    throw new TypeError("options.limits must be an object");
+  }
+  const allowed = new Set([
+    "maxRecords",
+    "maxTombstones",
+    "maxIdempotencyEntries",
+  ]);
+  if (
+    overrides !== undefined &&
+    Object.keys(overrides).some((name) => !allowed.has(name))
+  ) {
+    throw new TypeError("options.limits contains an unknown field");
+  }
   const limits = { ...DEFAULT_IN_MEMORY_CONVERSATION_CATALOG_LIMITS, ...overrides };
   for (const [name, value] of Object.entries(limits)) {
     if (

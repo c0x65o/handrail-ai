@@ -6,15 +6,22 @@ import {
   InMemoryConversationEventStore,
   ToolRegistry,
   createConversationRuntime,
+  normalizeCitationRecords,
   parseChatRequest,
   parseNormalizedUsageReceipt,
   runToolLoop,
   type ApplicationToolExecutor,
+  type ApplicationToolOutputProjection,
   type ApplicationToolPolicy,
+  type AppendConversationEventsInput,
+  type AppendConversationEventsResult,
   type AuthoritativeAttribution,
   type ChatRequest,
   type ConversationClientId,
   type ConversationId,
+  type ConversationEventStore,
+  type ReadConversationEventsInput,
+  type ReadConversationEventsResult,
   type ConversationTransport,
   type NormalizedUsageReceipt,
   type StartTurnInput,
@@ -170,6 +177,35 @@ class ScriptedTransport implements ConversationTransport<unknown, ChatRequest> {
   }
 }
 
+class OneShotAppendFailureStore implements ConversationEventStore {
+  readonly inner = new InMemoryConversationEventStore();
+  readonly checkpoints = this.inner.checkpoints;
+  #failed = false;
+
+  constructor(
+    readonly payloadType: string,
+    readonly phase: "before" | "after",
+  ) {}
+
+  async append(input: AppendConversationEventsInput): Promise<AppendConversationEventsResult> {
+    const matches = input.events.some((event) => event.payload.type === this.payloadType);
+    if (matches && !this.#failed) {
+      this.#failed = true;
+      if (this.phase === "after") await this.inner.append(input);
+      throw new Error(`simulated ${this.payloadType} append failure`);
+    }
+    return this.inner.append(input);
+  }
+
+  read(input: ReadConversationEventsInput): Promise<ReadConversationEventsResult> {
+    return this.inner.read(input);
+  }
+
+  getLatestRevision(id: ConversationId) {
+    return this.inner.getLatestRevision(id);
+  }
+}
+
 function toolDefinition(): ToolDefinition {
   return {
     name: "lookup",
@@ -188,6 +224,7 @@ async function harness(
   execute: ApplicationToolExecutor = async ({ query }) => ({ query: String(query ?? "") }),
   policy: ApplicationToolPolicy = () => ({ outcome: "allow" }),
   executorConcurrency = 4,
+  eventStore: ConversationEventStore = new InMemoryConversationEventStore(),
 ) {
   const registry = new ToolRegistry<ApplicationToolExecutor, undefined>();
   registry.register({ definition: toolDefinition(), executor: execute });
@@ -202,7 +239,7 @@ async function harness(
   const runtime = await createConversationRuntime({
     conversationId,
     clientId,
-    eventStore: new InMemoryConversationEventStore(),
+    eventStore,
     transport,
     createId: (kind) => `${kind}_${++id}`,
     now: () => "2026-08-28T12:00:00.000Z",
@@ -224,7 +261,30 @@ async function harness(
     metadata: { feature: "tool-loop" },
   });
   const initialTurn = await runtime.sendMessage({ content: "Use tools", request });
-  return { discoveredTools, executor, initialTurn, request, runtime, transport };
+  return { discoveredTools, eventStore, executor, initialTurn, request, runtime, transport };
+}
+
+function citedOutput(toolCallId: string): ApplicationToolOutputProjection {
+  const source = {
+    source_id: "source_lookup",
+    type: "web" as const,
+    label: "Lookup source",
+    locator: "https://example.com/lookup",
+  };
+  const citation = {
+    citation_id: "citation_lookup",
+    source_id: "source_lookup",
+    order: 0,
+    target: { type: "tool_result" as const, tool_call_id: toolCallId },
+  };
+  return {
+    type: "handrail.application_tool_output",
+    content: { found: true },
+    citation_records: normalizeCitationRecords({
+      sources: [source, { ...source }],
+      citations: [citation, { ...citation, target: { ...citation.target } }],
+    }),
+  };
 }
 
 async function run(h: Awaited<ReturnType<typeof harness>>, options: Record<string, unknown> = {}) {
@@ -344,6 +404,122 @@ describe("runToolLoop", () => {
     expect((await run(h)).status).toBe("completed");
     expect(execute).toHaveBeenCalledOnce();
     expect(h.transport.starts).toHaveLength(2);
+  });
+
+  it("durably links normalized tool citations after the result and keeps providers citation-free", async () => {
+    const execute = vi.fn<ApplicationToolExecutor>(async (_, context) =>
+      citedOutput(context.toolCallId));
+    const h = await harness([
+      { requestId: "request_cited_1", calls: [{ id: "call_cited" }], outcome: "tool_calls" },
+      { requestId: "request_cited_2", outcome: "stop", text: "answer" },
+    ], execute);
+
+    expect((await run(h)).status).toBe("completed");
+    expect((await run(h)).status).toBe("completed");
+
+    const snapshot = h.runtime.getSnapshot();
+    expect(snapshot.tool_calls[0]?.result?.citation_records).toMatchObject({
+      sources: [{ source_id: "source_lookup" }],
+      citations: [{ citation_id: "citation_lookup" }],
+    });
+    expect(snapshot.citations).toHaveLength(1);
+    expect(snapshot.citations[0]?.target).toEqual({
+      type: "tool_result",
+      tool_call_id: "call_cited",
+    });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(h.transport.starts[1]?.request.tool_results[0]).not.toHaveProperty(
+      "citation_records",
+    );
+
+    const durable = await h.eventStore.read({ conversationId });
+    const lifecycle = durable.entries
+      .map((entry) => entry.event.payload.type)
+      .filter((type) => type === "tool_call.result_recorded" ||
+        type === "citation.records_linked");
+    expect(lifecycle).toEqual([
+      "tool_call.result_recorded",
+      "citation.records_linked",
+    ]);
+  });
+
+  it("recovers an ambiguously accepted result append without repeating execution", async () => {
+    const store = new OneShotAppendFailureStore("tool_call.result_recorded", "after");
+    const execute = vi.fn<ApplicationToolExecutor>(async (_, context) =>
+      citedOutput(context.toolCallId));
+    const h = await harness([
+      { requestId: "request_result_failure_1", calls: [{ id: "call_result" }], outcome: "tool_calls" },
+      { requestId: "request_result_failure_2", outcome: "stop" },
+    ], execute, () => ({ outcome: "allow" }), 4, store);
+
+    await expect(run(h)).rejects.toThrow("simulated tool_call.result_recorded append failure");
+    expect((await run(h)).status).toBe("completed");
+    expect(execute).toHaveBeenCalledOnce();
+    expect(h.runtime.getSnapshot().citations).toHaveLength(1);
+  });
+
+  it("recovers an ambiguously accepted citation append idempotently", async () => {
+    const store = new OneShotAppendFailureStore("citation.records_linked", "after");
+    const execute = vi.fn<ApplicationToolExecutor>(async (_, context) =>
+      citedOutput(context.toolCallId));
+    const h = await harness([
+      { requestId: "request_citation_failure_1", calls: [{ id: "call_citation" }], outcome: "tool_calls" },
+      { requestId: "request_citation_failure_2", outcome: "stop" },
+    ], execute, () => ({ outcome: "allow" }), 4, store);
+
+    await expect(run(h)).rejects.toThrow("simulated citation.records_linked append failure");
+    expect((await run(h)).status).toBe("completed");
+    expect(execute).toHaveBeenCalledOnce();
+    const durable = await store.read({ conversationId });
+    expect(durable.entries.filter(
+      (entry) => entry.event.payload.type === "citation.records_linked",
+    )).toHaveLength(1);
+  });
+
+  it("replays a missing citation link after restart without re-executing the tool", async () => {
+    const store = new OneShotAppendFailureStore("citation.records_linked", "before");
+    const execute = vi.fn<ApplicationToolExecutor>(async (_, context) =>
+      citedOutput(context.toolCallId));
+    const h = await harness([
+      { requestId: "request_restart_1", calls: [{ id: "call_restart" }], outcome: "tool_calls" },
+      { requestId: "request_restart_2", outcome: "stop" },
+    ], execute, () => ({ outcome: "allow" }), 4, store);
+
+    await expect(run(h)).rejects.toThrow("simulated citation.records_linked append failure");
+    expect(execute).toHaveBeenCalledOnce();
+
+    const restartedExecution = vi.fn<ApplicationToolExecutor>(async () => {
+      throw new Error("tool must not execute after restart");
+    });
+    const registry = new ToolRegistry<ApplicationToolExecutor, undefined>();
+    registry.register({ definition: toolDefinition(), executor: restartedExecution });
+    const executor = new BoundedToolExecutor({
+      registry,
+      policy: () => ({ outcome: "allow" }),
+    });
+    let id = 1_000;
+    const restartedRuntime = await createConversationRuntime({
+      conversationId,
+      clientId,
+      eventStore: store,
+      transport: h.transport,
+      createId: (kind) => `restart_${kind}_${++id}`,
+      now: () => "2026-08-28T12:00:01.000Z",
+    });
+
+    const result = await runToolLoop({
+      runtime: restartedRuntime,
+      initialTurn: h.initialTurn,
+      request: h.request,
+      discoveredTools: h.discoveredTools,
+      executor,
+      applicationContext: undefined,
+      now: () => 1,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(restartedExecution).not.toHaveBeenCalled();
+    expect(restartedRuntime.getSnapshot().citations).toHaveLength(1);
   });
 
   it("permits parallel calls only with provider capability and configured parallelism", async () => {

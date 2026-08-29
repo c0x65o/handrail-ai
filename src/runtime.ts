@@ -862,6 +862,10 @@ export async function createConversationRuntime<TRequest>(
           return result(turnId, "disconnected");
         }
         if (cause instanceof CancellationRequestedError) {
+          const turn = store.getSnapshot().turns.find(
+            (candidate) => candidate.turn_id === turnId,
+          );
+          if (turn?.status === "cancelled") return result(turnId, "cancelled");
           return result(turnId, "interrupted", {
             code: "cancellation_requested",
             message: "Authoritative cancellation was requested while retrying",
@@ -1010,7 +1014,12 @@ export async function createConversationRuntime<TRequest>(
           context_fingerprint: contextFingerprint,
           history_position: historyPosition,
         });
-        if (assessment.valid && validCheckpointRecordVersion(record.store_version)) {
+        if (
+          assessment.valid &&
+          validCheckpointRecordVersion(record.store_version) &&
+          record.conversation_id === options.conversationId &&
+          record.context_fingerprint === contextFingerprint
+        ) {
           checkpoint = assessment.checkpoint;
         } else {
           const expectedVersion = validCheckpointRecordVersion(record.store_version)
@@ -1095,9 +1104,9 @@ export async function createConversationRuntime<TRequest>(
         return request;
       }
 
-      const effectiveCheckpoint = compacted.checkpoint;
+      let effectiveCheckpoint = compacted.checkpoint;
       if (compacted.status === "compacted" && effectiveCheckpoint !== null) {
-        await saveProviderContextCheckpoint(
+        effectiveCheckpoint = await saveProviderContextCheckpoint(
           configuration.checkpointStore,
           effectiveCheckpoint,
           fingerprintInput.model.provider_id,
@@ -1125,7 +1134,9 @@ export async function createConversationRuntime<TRequest>(
     request: TRequest,
   ): Promise<ConversationRuntimeTurnResult> => {
     const protocol = protocolState(protocolByTurn, turnId);
-    let preparedRequest: Promise<TRequest> | null = null;
+    let preparedStartInput: Promise<Parameters<
+      typeof options.transport.startTurn
+    >[0]> | null = null;
     return runTurnWithRetry(turnId, "start", async (signal) => {
       if (protocol.transportTurnId !== null) {
         const resumed = await options.transport.resumeTurn({
@@ -1150,20 +1161,19 @@ export async function createConversationRuntime<TRequest>(
         );
       }
 
-      preparedRequest ??= prepareProviderContextRequest(
+      preparedStartInput ??= prepareProviderContextRequest(
         request,
         idempotencyKey,
         signal,
-      );
-      const projectedRequest = await preparedRequest;
-      throwIfRuntimeAborted(signal);
-      const startInput = Object.freeze({
+      ).then((projectedRequest) => Object.freeze({
         conversationId: options.conversationId,
         conversationTurnId: turnId,
         mutationId: startMutationId,
         idempotencyKey,
         request: projectedRequest,
-      });
+      }));
+      const startInput = await preparedStartInput;
+      throwIfRuntimeAborted(signal);
       const started = await options.transport.startTurn(startInput);
       if (!started.ok) {
         const outcome = result(turnId, "failed", started.error);
@@ -1302,6 +1312,35 @@ export async function createConversationRuntime<TRequest>(
 
       const protocol = protocolByTurn.get(turnId);
       if (protocol?.transportTurnId === null || protocol?.transportTurnId === undefined) {
+        const preflightController = retryControllers.get(turnId);
+        if (
+          preflightController !== undefined &&
+          options.providerContext?.capability.supported === true
+        ) {
+          cancellationRequestedTurns.add(turnId);
+          requestedCancellationReasons.set(turnId, reason);
+          preflightController.abort(new CancellationRequestedError());
+          await persist([
+            cancellationDraft(
+              "turn.cancellation_requested",
+              turnId,
+              reason,
+              mutationId,
+              clientSource(),
+            ),
+            {
+              actor: { type: "assistant" },
+              source: runtimeSource(),
+              payload: { type: "turn.cancelled", turn_id: turnId, reason },
+            },
+          ]);
+          return cancellationResult(
+            turnId,
+            reason,
+            "cancellation_requested",
+            false,
+          );
+        }
         return cancellationResult(turnId, reason, "failed", true, {
           code: "missing_transport_turn_id",
           message: "The active turn has no durable transport identity",

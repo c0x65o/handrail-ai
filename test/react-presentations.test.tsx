@@ -72,7 +72,7 @@ describe("checked React presentation recipes", () => {
     }
   });
 
-  it("exposes named dialog, transcript/live semantics, presence, image, and actions", async () => {
+  it("exposes named dialog, transcript/live semantics, presence, attachments, and actions", async () => {
     const { ChatDialogRecipe } = await import("../examples/react-presentations.js");
     const value = await fixture();
     render(<ChatDialogRecipe runtime={value.runtime} uploader={value.uploader} />);
@@ -95,13 +95,22 @@ describe("checked React presentation recipes", () => {
       type: "image/png",
       lastModified: 1_700_000_000_000,
     });
-    fireEvent.change(within(dialog).getByLabelText("Attach images"), {
-      target: { files: [image] },
+    const pdf = new File(["pdf"], "guide.pdf", {
+      type: "application/pdf",
+      lastModified: 1_700_000_000_001,
+    });
+    const input = within(dialog).getByLabelText("Attach files");
+    expect(input.getAttribute("accept")).toBe(
+      "image/jpeg,image/png,image/gif,image/webp,application/pdf",
+    );
+    fireEvent.change(input, {
+      target: { files: [image, pdf] },
     });
     const remove = await within(dialog).findByRole("button", {
       name: "Remove example.png",
     });
     fireEvent.click(remove);
+    expect(await within(dialog).findByRole("button", { name: "Remove guide.pdf" })).toBeTruthy();
     await waitFor(() => {
       expect(within(dialog).queryByRole("button", { name: "Remove example.png" })).toBeNull();
     });
