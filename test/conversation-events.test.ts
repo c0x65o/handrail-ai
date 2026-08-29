@@ -117,6 +117,28 @@ const payloads: Fixture[] = [
     tool_call_id: "call_01",
   },
   {
+    type: "approval.proposal_created",
+    proposal_id: "proposal_01",
+    group_id: "group_01",
+    turn_id: "turn_01",
+    tool_call_id: "call_01",
+    tool_name: "lookup_order",
+    status: "pending",
+    proposal_version: 1,
+    expires_at: "2026-08-27T13:34:56.789Z",
+    reviewed_arguments: {
+      type: "redacted_json",
+      value: { order_id: "A-***" },
+    },
+  },
+  {
+    type: "approval.proposal_status_changed",
+    proposal_id: "proposal_01",
+    proposal_version: 2,
+    status: "confirmed",
+    decision_reason: "Approved by the account owner",
+  },
+  {
     type: "tool_call.result_recorded",
     turn_id: "turn_01",
     tool_call_id: "call_01",
@@ -155,13 +177,19 @@ const event = (payload: Fixture = payloads[0]!): Fixture => ({
   conversation_id: "conversation_01",
   revision: 1,
   occurred_at: "2026-08-27T12:34:56.789Z",
-  actor: { type: "user", id: "user_01" },
-  source: {
-    type: "client",
-    client_id: "client_01",
-    device_id: "device_01",
-  },
-  mutation_id: "mutation_01",
+  actor: payload.type === "approval.proposal_created"
+    ? { type: "system", id: "approval_host_01" }
+    : { type: "user", id: "user_01" },
+  source: payload.type === "approval.proposal_created"
+    ? { type: "runtime" }
+    : {
+        type: "client",
+        client_id: "client_01",
+        device_id: "device_01",
+      },
+  ...(payload.type === "approval.proposal_created"
+    ? {}
+    : { mutation_id: "mutation_01" }),
   metadata: { feature: "support" },
   payload,
 });
@@ -254,6 +282,116 @@ describe("durable conversation event contract", () => {
         new RegExp(`${key}.*required`),
       );
     }
+  });
+
+  it("accepts exactly one bounded safe approval argument review form", () => {
+    const proposal = {
+      type: "approval.proposal_created",
+      proposal_id: "proposal_safe",
+      group_id: "group_safe",
+      turn_id: "turn_01",
+      tool_call_id: "call_01",
+      tool_name: "send_order_update",
+      status: "pending",
+      proposal_version: 1,
+      expires_at: "2026-08-27T13:00:00Z",
+      reviewed_arguments: {
+        type: "redacted_json",
+        value: { order: "A-***", recipients: ["account owner"] },
+      },
+    };
+    expect(parseConversationEvent(event(proposal)).payload).toBe(proposal);
+
+    const opaque = {
+      ...proposal,
+      proposal_id: "proposal_opaque",
+      reviewed_arguments: {
+        type: "opaque_reference",
+        argument_ref: "approval-arguments/order-update/01",
+      },
+    };
+    expect(parseConversationEvent(event(opaque)).payload).toBe(opaque);
+
+    for (const reviewed_arguments of [
+      {
+        type: "redacted_json",
+        value: { safe: true },
+        argument_ref: "also-present",
+      },
+      { type: "redacted_json", value: { api_key: "redacted" } },
+      { type: "redacted_json", value: { provider_response: { id: "native" } } },
+      { type: "redacted_json", value: { system_prompt: "hidden" } },
+      { type: "redacted_json", value: { document: "A".repeat(256) } },
+      { type: "opaque_reference", argument_ref: "https://host.invalid/args" },
+      {
+        type: "opaque_reference",
+        argument_ref: "a".repeat(
+          CONVERSATION_EVENT_LIMITS.approvalArgumentReferenceLength + 1,
+        ),
+      },
+    ]) {
+      expect(() => parseConversationEvent(event({
+        ...proposal,
+        reviewed_arguments,
+      }))).toThrow(ConversationEventValidationError);
+    }
+
+    const oversizedSnapshot = Object.fromEntries(
+      Array.from({ length: 100 }, (_, index) => [`field_${index}`, "x".repeat(200)]),
+    );
+    expect(() => parseConversationEvent(event({
+      ...proposal,
+      reviewed_arguments: { type: "redacted_json", value: oversizedSnapshot },
+    }))).toThrow(/serialize to at most/);
+  });
+
+  it("validates lifecycle versions, actors, expiry, and safe reasons", () => {
+    const status = {
+      type: "approval.proposal_status_changed",
+      proposal_id: "proposal_01",
+      proposal_version: 2,
+      status: "rejected",
+      decision_reason: "The requested action is no longer wanted",
+    };
+    expect(parseConversationEvent(event(status)).payload).toBe(status);
+
+    for (const malformed of [
+      { ...status, proposal_version: 0 },
+      { ...status, status: "pending" },
+      {
+        ...status,
+        decision_reason: "x".repeat(CONVERSATION_EVENT_LIMITS.approvalReasonLength + 1),
+      },
+      { ...status, decision_reason: "Bearer abcdefghijklmnop" },
+      {
+        ...status,
+        status: "failed",
+        decision_reason: undefined,
+      },
+      { ...status, status: "executing", decision_reason: "unexpected" },
+    ]) {
+      expect(() => parseConversationEvent(event(malformed))).toThrow(
+        ConversationEventValidationError,
+      );
+    }
+
+    expect(() => parseConversationEvent(without({
+      ...event(status),
+      actor: { type: "assistant" },
+      source: { type: "runtime" },
+    }, "mutation_id"))).toThrow(/explicit user or host system actor/);
+
+    const created = payloads.find(
+      (payload) => payload.type === "approval.proposal_created",
+    )!;
+    expect(() => parseConversationEvent({
+      ...event(created),
+      actor: { type: "assistant" },
+    })).toThrow(/explicit host system actor/);
+    expect(() => parseConversationEvent(event({
+      ...created,
+      expires_at: "2026-08-27T12:00:00Z",
+    }))).toThrow(/expires_at.*later than occurred_at/);
   });
 
   it("requires non-empty event and conversation identifiers and a revision", () => {

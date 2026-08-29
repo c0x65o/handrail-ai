@@ -18,6 +18,8 @@ export const CONVERSATION_EVENT_TYPES = [
   "tool_call.discovered",
   "tool_call.started",
   "tool_call.approval_required",
+  "approval.proposal_created",
+  "approval.proposal_status_changed",
   "tool_call.result_recorded",
   "tool_loop.budget_exhausted",
   "usage.receipt_linked",
@@ -58,6 +60,15 @@ export const CONVERSATION_EVENT_LIMITS = {
   metadataKeyLength: 128,
   metadataStringLength: 4_096,
   metadataSerializedBytes: 16_384,
+  approvalReasonLength: 1_024,
+  approvalArgumentReferenceLength: 512,
+  approvalSnapshotDepth: 8,
+  approvalSnapshotNodes: 512,
+  approvalSnapshotArrayLength: 128,
+  approvalSnapshotObjectKeys: 128,
+  approvalSnapshotKeyLength: 128,
+  approvalSnapshotStringLength: 4_096,
+  approvalSnapshotSerializedBytes: 16_384,
 } as const;
 
 declare const opaqueConversationValue: unique symbol;
@@ -76,6 +87,12 @@ export type ConversationClientMutationId = OpaqueString<"ConversationClientMutat
 export type ConversationUsageReceiptId = OpaqueString<"ConversationUsageReceiptId">;
 export type ConversationAttachmentId = OpaqueString<"ConversationAttachmentId">;
 export type ConversationActorId = OpaqueString<"ConversationActorId">;
+export type ConversationApprovalProposalId =
+  OpaqueString<"ConversationApprovalProposalId">;
+export type ConversationApprovalGroupId =
+  OpaqueString<"ConversationApprovalGroupId">;
+export type ConversationApprovalArgumentReference =
+  OpaqueString<"ConversationApprovalArgumentReference">;
 export type ConversationTimestamp = OpaqueString<"ConversationTimestamp">;
 export type ConversationRevision = number & {
   readonly [opaqueConversationValue]: "ConversationRevision";
@@ -288,6 +305,103 @@ export interface ToolCallApprovalRequiredPayload {
   tool_call_id: ConversationToolCallId;
 }
 
+export const CONVERSATION_APPROVAL_PROPOSAL_STATUSES = [
+  "pending",
+  "confirmed",
+  "rejected",
+  "expired",
+  "executing",
+  "executed",
+  "failed",
+] as const;
+
+export type ConversationApprovalProposalStatus =
+  (typeof CONVERSATION_APPROVAL_PROPOSAL_STATUSES)[number];
+export type ConversationApprovalProposalTransitionStatus = Exclude<
+  ConversationApprovalProposalStatus,
+  "pending"
+>;
+
+/**
+ * Legal optimistic lifecycle edges. Terminal statuses have no successors;
+ * failed execution may be retried through a new executing version.
+ */
+export const CONVERSATION_APPROVAL_PROPOSAL_TRANSITIONS: Readonly<
+  Record<ConversationApprovalProposalStatus, readonly ConversationApprovalProposalStatus[]>
+> = Object.freeze({
+  pending: Object.freeze(["confirmed", "rejected", "expired"] as const),
+  confirmed: Object.freeze(["executing"] as const),
+  rejected: Object.freeze([] as const),
+  expired: Object.freeze([] as const),
+  executing: Object.freeze(["executed", "failed"] as const),
+  executed: Object.freeze([] as const),
+  failed: Object.freeze(["executing"] as const),
+});
+
+export function isLegalConversationApprovalProposalTransition(
+  from: ConversationApprovalProposalStatus,
+  to: ConversationApprovalProposalStatus,
+): boolean {
+  return CONVERSATION_APPROVAL_PROPOSAL_TRANSITIONS[from].includes(to);
+}
+
+/** A host-redacted, bounded JSON view suitable for a human review surface. */
+export interface ConversationApprovalRedactedArguments {
+  type: "redacted_json";
+  value: ConversationJsonObject;
+}
+
+/** A host-owned lookup key. It never contains the referenced arguments. */
+export interface ConversationApprovalOpaqueArguments {
+  type: "opaque_reference";
+  argument_ref: ConversationApprovalArgumentReference;
+}
+
+export type ConversationApprovalReviewedArguments =
+  | ConversationApprovalRedactedArguments
+  | ConversationApprovalOpaqueArguments;
+
+export interface ApprovalProposalCreatedPayload {
+  type: "approval.proposal_created";
+  proposal_id: ConversationApprovalProposalId;
+  group_id?: ConversationApprovalGroupId;
+  turn_id: ConversationTurnId;
+  tool_call_id: ConversationToolCallId;
+  tool_name: string;
+  status: "pending";
+  proposal_version: 1;
+  expires_at: ConversationTimestamp;
+  reviewed_arguments: ConversationApprovalReviewedArguments;
+}
+
+export interface ApprovalProposalDecisionPayload {
+  type: "approval.proposal_status_changed";
+  proposal_id: ConversationApprovalProposalId;
+  proposal_version: number;
+  status: "confirmed" | "rejected" | "expired";
+  decision_reason?: string;
+}
+
+export interface ApprovalProposalExecutionPayload {
+  type: "approval.proposal_status_changed";
+  proposal_id: ConversationApprovalProposalId;
+  proposal_version: number;
+  status: "executing" | "executed";
+}
+
+export interface ApprovalProposalFailedPayload {
+  type: "approval.proposal_status_changed";
+  proposal_id: ConversationApprovalProposalId;
+  proposal_version: number;
+  status: "failed";
+  failure_reason: string;
+}
+
+export type ApprovalProposalStatusChangedPayload =
+  | ApprovalProposalDecisionPayload
+  | ApprovalProposalExecutionPayload
+  | ApprovalProposalFailedPayload;
+
 export interface ConversationToolResultTextPart {
   type: "text";
   text: string;
@@ -353,6 +467,8 @@ export type ConversationEventPayload =
   | ToolCallDiscoveredPayload
   | ToolCallStartedPayload
   | ToolCallApprovalRequiredPayload
+  | ApprovalProposalCreatedPayload
+  | ApprovalProposalStatusChangedPayload
   | ToolCallResultRecordedPayload
   | ToolLoopBudgetExhaustedPayload
   | UsageReceiptLinkedPayload
@@ -446,6 +562,19 @@ const METADATA_FORBIDDEN_FIELD_NAMES = new Set([
   "xai",
 ]);
 
+const APPROVAL_SNAPSHOT_FORBIDDEN_FIELD_NAMES = new Set([
+  ...METADATA_FORBIDDEN_FIELD_NAMES,
+  "base64",
+  "binary",
+  "bytes",
+  "hiddeninstruction",
+  "hiddeninstructions",
+  "prompt",
+  "systeminstruction",
+  "systeminstructions",
+  "systemprompt",
+]);
+
 const METADATA_FORBIDDEN_STRING_VALUES = new Set([
   "anthropic",
   "chatcompletion",
@@ -460,6 +589,11 @@ const CREDENTIAL_VALUE_PATTERNS = [
   /\bbearer\s+[a-z0-9._~+/=-]{8,}/i,
   /\bsk-[a-z0-9_-]{8,}\b/i,
   /-----begin (?:rsa |ec |openssh )?private key-----/i,
+] as const;
+
+const APPROVAL_BINARY_VALUE_PATTERNS = [
+  /^data:[^,]{1,256};base64,/i,
+  /^(?:[a-z0-9+/]{256,}={0,2})$/i,
 ] as const;
 
 const TURN_STATUSES = ["queued", "running", "waiting_for_tool_result"] as const;
@@ -598,6 +732,7 @@ interface JsonLimits {
   maxStringLength: number;
   forbiddenFields: ReadonlySet<string>;
   forbiddenStringValues?: ReadonlySet<string>;
+  forbiddenStringPatterns?: readonly RegExp[];
 }
 
 const JSON_LIMITS: JsonLimits = {
@@ -619,6 +754,18 @@ const METADATA_LIMITS: JsonLimits = {
   maxStringLength: CONVERSATION_EVENT_LIMITS.metadataStringLength,
   forbiddenFields: METADATA_FORBIDDEN_FIELD_NAMES,
   forbiddenStringValues: METADATA_FORBIDDEN_STRING_VALUES,
+};
+
+const APPROVAL_SNAPSHOT_LIMITS: JsonLimits = {
+  maxDepth: CONVERSATION_EVENT_LIMITS.approvalSnapshotDepth,
+  maxNodes: CONVERSATION_EVENT_LIMITS.approvalSnapshotNodes,
+  maxArrayLength: CONVERSATION_EVENT_LIMITS.approvalSnapshotArrayLength,
+  maxObjectKeys: CONVERSATION_EVENT_LIMITS.approvalSnapshotObjectKeys,
+  maxKeyLength: CONVERSATION_EVENT_LIMITS.approvalSnapshotKeyLength,
+  maxStringLength: CONVERSATION_EVENT_LIMITS.approvalSnapshotStringLength,
+  forbiddenFields: APPROVAL_SNAPSHOT_FORBIDDEN_FIELD_NAMES,
+  forbiddenStringValues: METADATA_FORBIDDEN_STRING_VALUES,
+  forbiddenStringPatterns: APPROVAL_BINARY_VALUE_PATTERNS,
 };
 
 function validateJson(
@@ -656,6 +803,9 @@ function validateJson(
       }
       if (limits.forbiddenStringValues?.has(normalizeFieldName(current))) {
         fail(currentPath, "must not identify provider-native data");
+      }
+      if (limits.forbiddenStringPatterns?.some((pattern) => pattern.test(current))) {
+        fail(currentPath, "must not contain binary content");
       }
       return;
     }
@@ -758,6 +908,81 @@ function validateMetadata(
       path,
       `must serialize to at most ${CONVERSATION_EVENT_LIMITS.metadataSerializedBytes} bytes`,
     );
+  }
+}
+
+function validateApprovalReason(value: unknown, path: string): void {
+  const reason = stringValue(value, path, {
+    maxLength: CONVERSATION_EVENT_LIMITS.approvalReasonLength,
+  });
+  if (
+    CREDENTIAL_VALUE_PATTERNS.some((pattern) => pattern.test(reason)) ||
+    APPROVAL_BINARY_VALUE_PATTERNS.some((pattern) => pattern.test(reason))
+  ) {
+    fail(path, "must not contain credential or binary material");
+  }
+}
+
+export function isConversationApprovalReason(value: unknown): value is string {
+  try {
+    validateApprovalReason(value, "$reason");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function validateApprovalReviewedArguments(
+  value: unknown,
+  path: string,
+): asserts value is ConversationApprovalReviewedArguments {
+  const object = record(value, path);
+  requiredKeys(object, ["type"], path);
+  if (object.type === "redacted_json") {
+    requiredKeys(object, ["value"], path);
+    allowedKeys(object, ["type", "value"], path);
+    record(object.value, `${path}.value`);
+    validateJson(object.value, `${path}.value`, APPROVAL_SNAPSHOT_LIMITS);
+    if (
+      utf8ByteLength(JSON.stringify(object.value)) >
+      CONVERSATION_EVENT_LIMITS.approvalSnapshotSerializedBytes
+    ) {
+      fail(
+        `${path}.value`,
+        `must serialize to at most ${CONVERSATION_EVENT_LIMITS.approvalSnapshotSerializedBytes} bytes`,
+      );
+    }
+    return;
+  }
+  if (object.type === "opaque_reference") {
+    requiredKeys(object, ["argument_ref"], path);
+    allowedKeys(object, ["type", "argument_ref"], path);
+    const reference = stringValue(object.argument_ref, `${path}.argument_ref`, {
+      maxLength: CONVERSATION_EVENT_LIMITS.approvalArgumentReferenceLength,
+    });
+    if (
+      !/^[a-z0-9][a-z0-9._:/-]*$/i.test(reference) ||
+      reference.includes("://") ||
+      CREDENTIAL_VALUE_PATTERNS.some((pattern) => pattern.test(reference))
+    ) {
+      fail(
+        `${path}.argument_ref`,
+        "must be a safe host-owned opaque reference",
+      );
+    }
+    return;
+  }
+  fail(`${path}.type`, 'must equal "redacted_json" or "opaque_reference"');
+}
+
+export function isConversationApprovalReviewedArguments(
+  value: unknown,
+): value is ConversationApprovalReviewedArguments {
+  try {
+    validateApprovalReviewedArguments(value, "$reviewed_arguments");
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -1102,6 +1327,99 @@ function validatePayload(
       identifier(object.turn_id, `${path}.turn_id`);
       identifier(object.tool_call_id, `${path}.tool_call_id`);
       return;
+    case "approval.proposal_created":
+      requiredKeys(
+        object,
+        [
+          "proposal_id",
+          "turn_id",
+          "tool_call_id",
+          "tool_name",
+          "status",
+          "proposal_version",
+          "expires_at",
+          "reviewed_arguments",
+        ],
+        path,
+      );
+      allowedKeys(
+        object,
+        [
+          "type",
+          "proposal_id",
+          "group_id",
+          "turn_id",
+          "tool_call_id",
+          "tool_name",
+          "status",
+          "proposal_version",
+          "expires_at",
+          "reviewed_arguments",
+        ],
+        path,
+      );
+      identifier(object.proposal_id, `${path}.proposal_id`);
+      if (Object.hasOwn(object, "group_id")) {
+        identifier(object.group_id, `${path}.group_id`);
+      }
+      identifier(object.turn_id, `${path}.turn_id`);
+      identifier(object.tool_call_id, `${path}.tool_call_id`);
+      identifier(object.tool_name, `${path}.tool_name`);
+      if (object.status !== "pending") {
+        fail(`${path}.status`, 'must equal "pending"');
+      }
+      if (object.proposal_version !== 1) {
+        fail(`${path}.proposal_version`, "must equal the initial version 1");
+      }
+      validateTimestamp(object.expires_at, `${path}.expires_at`);
+      validateApprovalReviewedArguments(
+        object.reviewed_arguments,
+        `${path}.reviewed_arguments`,
+      );
+      return;
+    case "approval.proposal_status_changed": {
+      requiredKeys(
+        object,
+        ["proposal_id", "proposal_version", "status"],
+        path,
+      );
+      identifier(object.proposal_id, `${path}.proposal_id`);
+      positiveSafeInteger(object.proposal_version, `${path}.proposal_version`);
+      const status = enumValue(
+        object.status,
+        CONVERSATION_APPROVAL_PROPOSAL_STATUSES.filter(
+          (candidate) => candidate !== "pending",
+        ) as ConversationApprovalProposalTransitionStatus[],
+        `${path}.status`,
+      );
+      if (["confirmed", "rejected", "expired"].includes(status)) {
+        allowedKeys(
+          object,
+          ["type", "proposal_id", "proposal_version", "status", "decision_reason"],
+          path,
+        );
+        if (Object.hasOwn(object, "decision_reason")) {
+          validateApprovalReason(object.decision_reason, `${path}.decision_reason`);
+        }
+        return;
+      }
+      if (status === "failed") {
+        requiredKeys(object, ["failure_reason"], path);
+        allowedKeys(
+          object,
+          ["type", "proposal_id", "proposal_version", "status", "failure_reason"],
+          path,
+        );
+        validateApprovalReason(object.failure_reason, `${path}.failure_reason`);
+        return;
+      }
+      allowedKeys(
+        object,
+        ["type", "proposal_id", "proposal_version", "status"],
+        path,
+      );
+      return;
+    }
     case "tool_call.result_recorded":
       requiredKeys(
         object,
@@ -1216,6 +1534,35 @@ export function parseConversationEvent(value: unknown): ConversationEvent {
     validateMetadata(object.metadata, "$event.metadata");
   }
   validatePayload(object.payload, "$event.payload");
+  const payload = object.payload as ConversationEventPayload;
+  const actor = object.actor as ConversationEventActor;
+  if (payload.type === "approval.proposal_created") {
+    if (actor.type !== "system") {
+      fail(
+        "$event.actor.type",
+        "approval proposals must be created by an explicit host system actor",
+      );
+    }
+    if (Date.parse(payload.expires_at) <= Date.parse(object.occurred_at as string)) {
+      fail("$event.payload.expires_at", "must be later than occurred_at");
+    }
+  } else if (payload.type === "approval.proposal_status_changed") {
+    if (actor.type !== "user" && actor.type !== "system") {
+      fail(
+        "$event.actor.type",
+        "approval lifecycle changes require an explicit user or host system actor",
+      );
+    }
+    if (
+      ["expired", "executing", "executed", "failed"].includes(payload.status) &&
+      actor.type !== "system"
+    ) {
+      fail(
+        "$event.actor.type",
+        `${payload.status} lifecycle changes require a host system actor`,
+      );
+    }
+  }
   return value as ConversationEvent;
 }
 

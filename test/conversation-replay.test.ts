@@ -27,6 +27,9 @@ interface EventOptions {
   readonly eventId?: string;
   readonly mutationId?: string;
   readonly payload?: Record<string, unknown>;
+  readonly actor?: "assistant" | "user" | "system" | "tool";
+  readonly actorId?: string;
+  readonly occurredAt?: string;
 }
 
 function event(options: EventOptions): ConversationEvent {
@@ -35,8 +38,13 @@ function event(options: EventOptions): ConversationEvent {
     event_id: options.eventId ?? `event-${options.revision}`,
     conversation_id: conversationId,
     revision: options.revision,
-    occurred_at: `2026-08-27T12:00:${String(options.revision).padStart(2, "0")}Z`,
-    actor: { type: options.mutationId === undefined ? "assistant" : "user" },
+    occurred_at: options.occurredAt ??
+      `2026-08-27T12:00:${String(options.revision).padStart(2, "0")}Z`,
+    actor: {
+      type: options.actor ??
+        (options.mutationId === undefined ? "assistant" : "user"),
+      ...(options.actorId === undefined ? {} : { id: options.actorId }),
+    },
     source: options.mutationId === undefined
       ? { type: "runtime" }
       : { type: "client", client_id: "client-replay" },
@@ -91,6 +99,73 @@ const history = [
       turn_id: "turn-replay",
       outcome: "stop",
       output_message_ids: ["message-assistant"],
+    },
+  }),
+] as const;
+
+const approvalHistory = [
+  event({
+    revision: 1,
+    payload: {
+      type: "tool_call.requested",
+      turn_id: "turn-approval-replay",
+      tool_call_id: "call-approval-replay",
+      name: "send_update",
+      arguments: { destination: "account-owner" },
+    },
+  }),
+  event({
+    revision: 2,
+    actor: "system",
+    actorId: "approval-host",
+    payload: {
+      type: "approval.proposal_created",
+      proposal_id: "proposal-replay",
+      group_id: "group-replay",
+      turn_id: "turn-approval-replay",
+      tool_call_id: "call-approval-replay",
+      tool_name: "send_update",
+      status: "pending",
+      proposal_version: 1,
+      expires_at: "2026-08-27T13:00:00Z",
+      reviewed_arguments: {
+        type: "opaque_reference",
+        argument_ref: "approval-arguments/replay",
+      },
+    },
+  }),
+  event({
+    revision: 3,
+    mutationId: "confirm-replay",
+    actorId: "owner-replay",
+    payload: {
+      type: "approval.proposal_status_changed",
+      proposal_id: "proposal-replay",
+      proposal_version: 2,
+      status: "confirmed",
+      decision_reason: "Confirmed after review",
+    },
+  }),
+  event({
+    revision: 4,
+    actor: "system",
+    actorId: "approval-host",
+    payload: {
+      type: "approval.proposal_status_changed",
+      proposal_id: "proposal-replay",
+      proposal_version: 3,
+      status: "executing",
+    },
+  }),
+  event({
+    revision: 5,
+    actor: "system",
+    actorId: "approval-host",
+    payload: {
+      type: "approval.proposal_status_changed",
+      proposal_id: "proposal-replay",
+      proposal_version: 4,
+      status: "executed",
     },
   }),
 ] as const;
@@ -157,6 +232,116 @@ describe("replayConversation", () => {
     expect(result.store.getSnapshot()).toBe(result.state);
     expect(result.replayedEventCount).toBe(history.length);
     expect(result.lastRevision).toBe(5);
+  });
+
+  it("restarts from the durable log with an immutable approval projection", async () => {
+    const eventStore = new InMemoryConversationEventStore();
+    await append(eventStore, approvalHistory);
+
+    const first = await replayConversation({
+      conversationId,
+      eventStore,
+      checkpointPolicy: false,
+    });
+    const restarted = await replayConversation({
+      conversationId,
+      eventStore,
+      checkpointPolicy: false,
+    });
+
+    expect(restarted.state).toEqual(first.state);
+    expect(restarted.state.approval_proposals[0]).toMatchObject({
+      proposal_id: "proposal-replay",
+      group_id: "group-replay",
+      tool_call_id: "call-approval-replay",
+      status: "executed",
+      proposal_version: 4,
+      decision_attribution: {
+        actor: { type: "user", id: "owner-replay" },
+      },
+    });
+    expect(Object.isFrozen(restarted.state)).toBe(true);
+    expect(Object.isFrozen(restarted.state.approval_proposals[0])).toBe(true);
+  });
+
+  it("deduplicates repeated identities during full-log approval replay", async () => {
+    const duplicatedEntries = [
+      entry(approvalHistory[0], cursor("cursor-request")),
+      entry(approvalHistory[0], cursor("cursor-request-duplicate")),
+      ...approvalHistory.slice(1).map((item) => entry(item)),
+    ];
+    const result = await replayConversation({
+      conversationId,
+      eventStore: fixedReadStore(duplicatedEntries),
+      checkpointPolicy: false,
+    });
+
+    expect(result.duplicateEventCount).toBe(1);
+    expect(result.replayedEventCount).toBe(approvalHistory.length);
+    expect(result.state.approval_proposals[0]?.status).toBe("executed");
+    expect(result.state).toEqual(reduce(approvalHistory));
+  });
+
+  it("falls back from schema-1 approval checkpoints to full event replay", async () => {
+    const backing = new InMemoryConversationEventStore();
+    await append(backing, approvalHistory);
+    const currentState = reduce(approvalHistory.slice(0, 2));
+    const legacyState = { ...currentState } as Record<string, unknown>;
+    delete legacyState.approval_proposals;
+    const eventStore: ConversationEventStore = {
+      append: (input) => backing.append(input),
+      read: (input) => backing.read(input),
+      getLatestRevision: (id) => backing.getLatestRevision(id),
+      checkpoints: {
+        async read() {
+          return {
+            conversationId,
+            schemaVersion: 1,
+            revision: currentState.revision!,
+            state: JSON.parse(JSON.stringify(legacyState)) as ConversationJsonValue,
+          };
+        },
+        write: (value) => backing.checkpoints.write(value),
+      },
+    };
+
+    const result = await replayConversation({
+      conversationId,
+      eventStore,
+      checkpointPolicy: false,
+    });
+
+    expect(CONVERSATION_CHECKPOINT_SCHEMA_VERSION).toBe(2);
+    expect(result.checkpointStatus).toBe("invalid");
+    expect(result.replayedEventCount).toBe(approvalHistory.length);
+    expect(result.state).toEqual(reduce(approvalHistory));
+  });
+
+  it("replays the legacy approval_required event shape unchanged", async () => {
+    const legacyEvents = [
+      event({
+        revision: 1,
+        payload: {
+          type: "tool_call.approval_required",
+          turn_id: "turn-legacy-approval",
+          tool_call_id: "call-legacy-approval",
+        },
+      }),
+    ];
+    const eventStore = new InMemoryConversationEventStore();
+    await append(eventStore, legacyEvents);
+
+    const result = await replayConversation({
+      conversationId,
+      eventStore,
+      checkpointPolicy: false,
+    });
+
+    expect(result.state.tool_calls[0]).toMatchObject({
+      tool_call_id: "call-legacy-approval",
+      approval_required_at: "2026-08-27T12:00:01Z",
+    });
+    expect(result.state.approval_proposals).toEqual([]);
   });
 
   it("loads a valid checkpoint and folds only its ordered tail", async () => {

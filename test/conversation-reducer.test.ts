@@ -17,6 +17,9 @@ interface EventOptions {
   readonly payload: Fixture;
   readonly mutationId?: string;
   readonly conversationId?: string;
+  readonly actor?: "assistant" | "user" | "system" | "tool";
+  readonly actorId?: string;
+  readonly occurredAt?: string;
 }
 
 function event(options: EventOptions): ConversationEvent {
@@ -25,8 +28,13 @@ function event(options: EventOptions): ConversationEvent {
     event_id: options.eventId ?? `evt_${options.revision}`,
     conversation_id: options.conversationId ?? "conversation_01",
     revision: options.revision,
-    occurred_at: `2026-08-27T12:00:${String(options.revision).padStart(2, "0")}.000Z`,
-    actor: { type: options.mutationId === undefined ? "assistant" : "user" },
+    occurred_at: options.occurredAt ??
+      `2026-08-27T12:00:${String(options.revision).padStart(2, "0")}.000Z`,
+    actor: {
+      type: options.actor ??
+        (options.mutationId === undefined ? "assistant" : "user"),
+      ...(options.actorId === undefined ? {} : { id: options.actorId }),
+    },
     source:
       options.mutationId === undefined
         ? { type: "runtime" }
@@ -590,5 +598,436 @@ describe("reduceConversationEvent", () => {
       nested: { value: "original" },
     });
     expect(Object.isFrozen(state.tool_calls[0]?.arguments)).toBe(true);
+  });
+
+  it("projects grouped proposals and every documented legal lifecycle transition", () => {
+    const events: ConversationEvent[] = [
+      event({
+        revision: 1,
+        payload: {
+          type: "turn.started",
+          turn_id: "turn_approval",
+          input_message_ids: ["message_approval"],
+        },
+      }),
+    ];
+    const proposals = [
+      ["call_retry", "proposal_retry", "opaque_reference", "2026-08-27T12:01:00Z"],
+      ["call_reject", "proposal_reject", "redacted_json", "2026-08-27T12:01:00Z"],
+      ["call_expire", "proposal_expire", "redacted_json", "2026-08-27T12:00:15Z"],
+      ["call_success", "proposal_success", "redacted_json", "2026-08-27T12:01:00Z"],
+    ] as const;
+    let revision = 2;
+    for (const [callId, proposalId, reviewType, expiresAt] of proposals) {
+      events.push(event({
+        revision: revision++,
+        payload: {
+          type: "tool_call.requested",
+          turn_id: "turn_approval",
+          tool_call_id: callId,
+          name: "send_update",
+          arguments: { destination: "account-owner" },
+        },
+      }));
+      events.push(event({
+        revision: revision++,
+        actor: "system",
+        actorId: "approval-host",
+        payload: {
+          type: "approval.proposal_created",
+          proposal_id: proposalId,
+          group_id: "approval_group_01",
+          turn_id: "turn_approval",
+          tool_call_id: callId,
+          tool_name: "send_update",
+          status: "pending",
+          proposal_version: 1,
+          expires_at: expiresAt,
+          reviewed_arguments: reviewType === "opaque_reference"
+            ? {
+                type: "opaque_reference",
+                argument_ref: `approval-arguments/${proposalId}`,
+              }
+            : {
+                type: "redacted_json",
+                value: { destination: "account owner" },
+              },
+        },
+      }));
+    }
+    events.push(
+      event({
+        revision: revision++,
+        mutationId: "confirm-retry",
+        actorId: "owner-01",
+        payload: {
+          type: "approval.proposal_status_changed",
+          proposal_id: "proposal_retry",
+          proposal_version: 2,
+          status: "confirmed",
+          decision_reason: "Owner confirmed",
+        },
+      }),
+      event({
+        revision: revision++,
+        actor: "system",
+        actorId: "approval-host",
+        payload: {
+          type: "approval.proposal_status_changed",
+          proposal_id: "proposal_retry",
+          proposal_version: 3,
+          status: "executing",
+        },
+      }),
+      event({
+        revision: revision++,
+        actor: "system",
+        actorId: "approval-host",
+        payload: {
+          type: "approval.proposal_status_changed",
+          proposal_id: "proposal_retry",
+          proposal_version: 4,
+          status: "failed",
+          failure_reason: "Temporary downstream failure",
+        },
+      }),
+    );
+    const failedState = replay(events);
+    expect(failedState.approval_proposals[0]).toMatchObject({
+      status: "failed",
+      proposal_version: 4,
+      failure_reason: "Temporary downstream failure",
+    });
+    events.push(
+      event({
+        revision: revision++,
+        actor: "system",
+        actorId: "approval-host",
+        payload: {
+          type: "approval.proposal_status_changed",
+          proposal_id: "proposal_retry",
+          proposal_version: 5,
+          status: "executing",
+        },
+      }),
+      event({
+        revision: revision++,
+        actor: "system",
+        actorId: "approval-host",
+        payload: {
+          type: "approval.proposal_status_changed",
+          proposal_id: "proposal_retry",
+          proposal_version: 6,
+          status: "executed",
+        },
+      }),
+      event({
+        revision: revision++,
+        mutationId: "reject-proposal",
+        actorId: "owner-02",
+        payload: {
+          type: "approval.proposal_status_changed",
+          proposal_id: "proposal_reject",
+          proposal_version: 2,
+          status: "rejected",
+          decision_reason: "Owner rejected",
+        },
+      }),
+      event({
+        revision: revision++,
+        actor: "system",
+        actorId: "approval-host",
+        occurredAt: "2026-08-27T12:00:16Z",
+        payload: {
+          type: "approval.proposal_status_changed",
+          proposal_id: "proposal_expire",
+          proposal_version: 2,
+          status: "expired",
+          decision_reason: "Review window elapsed",
+        },
+      }),
+      event({
+        revision: revision++,
+        mutationId: "confirm-success",
+        actorId: "owner-03",
+        payload: {
+          type: "approval.proposal_status_changed",
+          proposal_id: "proposal_success",
+          proposal_version: 2,
+          status: "confirmed",
+        },
+      }),
+      event({
+        revision: revision++,
+        actor: "system",
+        actorId: "approval-host",
+        payload: {
+          type: "approval.proposal_status_changed",
+          proposal_id: "proposal_success",
+          proposal_version: 3,
+          status: "executing",
+        },
+      }),
+      event({
+        revision,
+        actor: "system",
+        actorId: "approval-host",
+        payload: {
+          type: "approval.proposal_status_changed",
+          proposal_id: "proposal_success",
+          proposal_version: 4,
+          status: "executed",
+        },
+      }),
+    );
+
+    const state = replay(events);
+    expect(state.approval_proposals.map((proposal) => proposal.proposal_id)).toEqual(
+      proposals.map(([, proposalId]) => proposalId),
+    );
+    expect(state.approval_proposals.map((proposal) => proposal.group_id)).toEqual(
+      Array(4).fill("approval_group_01"),
+    );
+    expect(state.approval_proposals.map((proposal) => proposal.status)).toEqual([
+      "executed", "rejected", "expired", "executed",
+    ]);
+    expect(state.approval_proposals[0]).toMatchObject({
+      turn_id: "turn_approval",
+      tool_call_id: "call_retry",
+      tool_name: "send_update",
+      proposal_version: 6,
+      failure_reason: null,
+      decision_attribution: {
+        actor: { type: "user", id: "owner-01" },
+      },
+    });
+    expect(state.approval_proposals[1]?.decision_attribution).toMatchObject({
+      actor: { type: "user", id: "owner-02" },
+    });
+    expect(state.tool_calls.every((toolCall) =>
+      toolCall.approval_required_at !== null
+    )).toBe(true);
+    expect(Object.isFrozen(state.approval_proposals)).toBe(true);
+    expect(Object.isFrozen(state.approval_proposals[0])).toBe(true);
+    expect(Object.isFrozen(state.approval_proposals[0]?.reviewed_arguments)).toBe(true);
+    expect(JSON.stringify(replay(events))).toBe(JSON.stringify(state));
+  });
+
+  it("no-ops illegal, stale, gapped, repeated, expired, and implicit approvals", () => {
+    const base = [
+      event({
+        revision: 1,
+        payload: {
+          type: "tool_call.requested",
+          turn_id: "turn_guarded",
+          tool_call_id: "call_guarded",
+          name: "dangerous_action",
+          arguments: { target: "bounded-target" },
+        },
+      }),
+      event({
+        revision: 2,
+        actor: "system",
+        payload: {
+          type: "approval.proposal_created",
+          proposal_id: "proposal_guarded",
+          turn_id: "turn_guarded",
+          tool_call_id: "call_guarded",
+          tool_name: "dangerous_action",
+          status: "pending",
+          proposal_version: 1,
+          expires_at: "2026-08-27T12:00:20Z",
+          reviewed_arguments: {
+            type: "redacted_json",
+            value: { target: "bounded target" },
+          },
+        },
+      }),
+    ];
+    const observations = [
+      event({
+        revision: 3,
+        actor: "system",
+        payload: {
+          type: "approval.proposal_status_changed",
+          proposal_id: "proposal_guarded",
+          proposal_version: 2,
+          status: "executing",
+        },
+      }),
+      event({
+        revision: 4,
+        mutationId: "gapped-confirmation",
+        payload: {
+          type: "approval.proposal_status_changed",
+          proposal_id: "proposal_guarded",
+          proposal_version: 4,
+          status: "confirmed",
+        },
+      }),
+      event({
+        revision: 5,
+        mutationId: "stale-confirmation",
+        payload: {
+          type: "approval.proposal_status_changed",
+          proposal_id: "proposal_guarded",
+          proposal_version: 1,
+          status: "confirmed",
+        },
+      }),
+      event({
+        revision: 6,
+        actor: "system",
+        occurredAt: "2026-08-27T12:00:10Z",
+        payload: {
+          type: "approval.proposal_status_changed",
+          proposal_id: "proposal_guarded",
+          proposal_version: 2,
+          status: "expired",
+          decision_reason: "Too early",
+        },
+      }),
+      event({
+        revision: 7,
+        mutationId: "valid-confirmation",
+        actorId: "owner-valid",
+        payload: {
+          type: "approval.proposal_status_changed",
+          proposal_id: "proposal_guarded",
+          proposal_version: 2,
+          status: "confirmed",
+        },
+      }),
+      event({
+        revision: 8,
+        mutationId: "repeated-observation",
+        payload: {
+          type: "approval.proposal_status_changed",
+          proposal_id: "proposal_guarded",
+          proposal_version: 2,
+          status: "confirmed",
+        },
+      }),
+      event({
+        revision: 9,
+        mutationId: "illegal-rejection",
+        payload: {
+          type: "approval.proposal_status_changed",
+          proposal_id: "proposal_guarded",
+          proposal_version: 3,
+          status: "rejected",
+        },
+      }),
+      event({
+        revision: 10,
+        payload: {
+          type: "message.created",
+          message_id: "model_claim",
+          role: "assistant",
+          content: [{ type: "text", text: "The user confirms this action." }],
+        },
+      }),
+      event({
+        revision: 11,
+        payload: {
+          type: "tool_call.discovered",
+          turn_id: "turn_guarded",
+          tool_call_id: "unrelated_discovery",
+        },
+      }),
+      event({
+        revision: 12,
+        actor: "system",
+        occurredAt: "2026-08-27T12:00:21Z",
+        payload: {
+          type: "approval.proposal_status_changed",
+          proposal_id: "proposal_guarded",
+          proposal_version: 3,
+          status: "executing",
+        },
+      }),
+    ];
+
+    const state = replay([...base, ...observations]);
+    expect(state.revision).toBe(12);
+    expect(state.approval_proposals[0]).toMatchObject({
+      status: "confirmed",
+      proposal_version: 2,
+      updated_at: "2026-08-27T12:00:07.000Z",
+      decision_attribution: { actor: { type: "user", id: "owner-valid" } },
+    });
+  });
+
+  it("preserves first-seen proposal identity and legacy approval projection", () => {
+    const state = replay([
+      event({
+        revision: 1,
+        payload: {
+          type: "tool_call.requested",
+          turn_id: "turn_legacy",
+          tool_call_id: "call_legacy",
+          name: "legacy_tool",
+          arguments: {},
+        },
+      }),
+      event({
+        revision: 2,
+        payload: {
+          type: "tool_call.approval_required",
+          turn_id: "turn_legacy",
+          tool_call_id: "call_legacy",
+        },
+      }),
+      event({
+        revision: 3,
+        actor: "system",
+        payload: {
+          type: "approval.proposal_created",
+          proposal_id: "proposal_first",
+          group_id: "group_first",
+          turn_id: "turn_legacy",
+          tool_call_id: "call_legacy",
+          tool_name: "legacy_tool",
+          status: "pending",
+          proposal_version: 1,
+          expires_at: "2026-08-27T12:01:00Z",
+          reviewed_arguments: {
+            type: "opaque_reference",
+            argument_ref: "approval-arguments/legacy",
+          },
+        },
+      }),
+      event({
+        revision: 4,
+        actor: "system",
+        payload: {
+          type: "approval.proposal_created",
+          proposal_id: "proposal_first",
+          group_id: "group-replacement",
+          turn_id: "turn_legacy",
+          tool_call_id: "call_legacy",
+          tool_name: "legacy_tool",
+          status: "pending",
+          proposal_version: 1,
+          expires_at: "2026-08-27T12:01:30Z",
+          reviewed_arguments: {
+            type: "opaque_reference",
+            argument_ref: "approval-arguments/replacement",
+          },
+        },
+      }),
+    ]);
+
+    expect(state.tool_calls[0]?.approval_required_at).toBe(
+      "2026-08-27T12:00:02.000Z",
+    );
+    expect(state.approval_proposals).toHaveLength(1);
+    expect(state.approval_proposals[0]).toMatchObject({
+      group_id: "group_first",
+      reviewed_arguments: {
+        type: "opaque_reference",
+        argument_ref: "approval-arguments/legacy",
+      },
+    });
   });
 });

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   AI_RUNTIME_ATTACHMENT_ID_GRAMMAR,
   AI_RUNTIME_CONTENT_REFERENCE_GRAMMAR,
+  AI_RUNTIME_DOCUMENT_MIME_TYPES,
   AI_RUNTIME_IMAGE_MIME_TYPES,
   AI_RUNTIME_PROTOCOL_LIMITS,
   AI_RUNTIME_PROTOCOL_VERSION,
@@ -134,6 +135,22 @@ const imagePart = (
   ...partOverrides,
 });
 
+const documentPart = (
+  attachmentOverrides: Record<string, unknown> = {},
+  partOverrides: Record<string, unknown> = {},
+) => ({
+  type: "document",
+  attachment: attachmentReference({
+    attachment_id: "att_01K3QW8PDFH9T0A7N4R2M6P5XC",
+    content_ref: "ref_upload_01K3QW8PDF4JE8H5J3RB9SNMVA",
+    media_type: "application/pdf",
+    byte_size: 1_048_576,
+    filename: "delivery-receipt.pdf",
+    ...attachmentOverrides,
+  }),
+  ...partOverrides,
+});
+
 const utf8ByteLength = (value: string) => new TextEncoder().encode(value).byteLength;
 
 function metadataWithSerializedByteLength(targetBytes: number, fill: string) {
@@ -222,7 +239,27 @@ describe("chat request protocol", () => {
     expect(JSON.parse(JSON.stringify(parsed))).toEqual(fixture);
   });
 
-  it("exports the exact image allowlist, identifier grammars, and conservative bounds", () => {
+  it("round-trips mixed text, image, and PDF document content in v1", () => {
+    const fixture = request();
+    fixture.messages = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Compare the receipt with this parcel." },
+          documentPart(),
+          imagePart(),
+        ],
+      },
+    ];
+
+    const parsed = parseChatRequest(fixture);
+    expect(parsed).toBe(fixture);
+    expect(parsed.protocol_version).toBe("handrail.ai-runtime.v1");
+    expect(isChatRequest(fixture)).toBe(true);
+    expect(JSON.parse(JSON.stringify(parsed))).toEqual(fixture);
+  });
+
+  it("exports exact attachment allowlists, identifier grammars, and conservative bounds", () => {
     expect(AI_RUNTIME_IMAGE_MIME_TYPES).toEqual([
       "image/jpeg",
       "image/png",
@@ -231,6 +268,7 @@ describe("chat request protocol", () => {
     ]);
     expect(AI_RUNTIME_IMAGE_MIME_TYPES).not.toContain("image/svg+xml");
     expect(AI_RUNTIME_IMAGE_MIME_TYPES.every((type) => !type.includes("*"))).toBe(true);
+    expect(AI_RUNTIME_DOCUMENT_MIME_TYPES).toEqual(["application/pdf"]);
     expect(AI_RUNTIME_ATTACHMENT_ID_GRAMMAR).toBe(
       "^att_[A-Za-z0-9][A-Za-z0-9._-]{0,251}$",
     );
@@ -246,15 +284,30 @@ describe("chat request protocol", () => {
       imageAttachmentMaxBytes: 10 * 1024 * 1024,
       imageAttachmentsPerMessage: 4,
       imageAttachmentsPerRequest: 8,
+      documentAttachmentMinBytes: 1,
+      documentAttachmentMaxBytes: 20 * 1024 * 1024,
+      documentAttachmentsPerMessage: 2,
+      documentAttachmentsPerRequest: 4,
     });
   });
 
-  it.each(["image/svg+xml", "image/*", "application/octet-stream"])(
+  it.each(["image/svg+xml", "image/*", "application/pdf", "application/octet-stream"])(
     "rejects unsupported image media type %s",
     (mediaType) => {
       const fixture = request();
       fixture.messages = [{ role: "user", content: [imagePart({ media_type: mediaType })] }];
       expect(() => parseChatRequest(fixture)).toThrow(/media_type.*must be one of/);
+    },
+  );
+
+  it.each(["image/png", "text/plain", "application/octet-stream", "application/*"])(
+    "rejects unsupported or mismatched document media type %s",
+    (mediaType) => {
+      const fixture = request();
+      fixture.messages = [
+        { role: "user", content: [documentPart({ media_type: mediaType })] },
+      ];
+      expect(() => parseChatRequest(fixture)).toThrow(/media_type.*application\/pdf/);
     },
   );
 
@@ -287,6 +340,30 @@ describe("chat request protocol", () => {
       }
     },
   );
+
+  it.each([
+    AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMinBytes,
+    AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMaxBytes,
+  ])("accepts PDF documents at byte boundary %s", (byteSize) => {
+    const fixture = request();
+    fixture.messages = [
+      { role: "user", content: [documentPart({ byte_size: byteSize })] },
+    ];
+    expect(parseChatRequest(fixture)).toBe(fixture);
+  });
+
+  it.each([
+    AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMinBytes - 1,
+    AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMaxBytes + 1,
+    1.5,
+    Number.NaN,
+  ])("rejects invalid PDF document byte size %s", (byteSize) => {
+    const fixture = request();
+    fixture.messages = [
+      { role: "user", content: [documentPart({ byte_size: byteSize })] },
+    ];
+    expect(() => parseChatRequest(fixture)).toThrow(/byte_size.*integer/);
+  });
 
   it("bounds alt text and accepts only safe bounded filenames", () => {
     const invalidParts = [
@@ -332,6 +409,59 @@ describe("chat request protocol", () => {
     expect(() => parseChatRequest(tooManyInRequest)).toThrow(/across the request/);
   });
 
+  it("enforces document counts independently per message and across mixed requests", () => {
+    const validMixed = request();
+    validMixed.messages = Array.from(
+      { length: AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentsPerRequest / 2 },
+      (_, messageIndex) => ({
+        role: "user",
+        content: [
+          ...Array.from(
+            { length: AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentsPerMessage },
+            (_, documentIndex) =>
+              documentPart({
+                attachment_id: `att_document_${messageIndex}_${documentIndex}`,
+              }),
+          ),
+          ...Array.from(
+            { length: AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentsPerMessage },
+            (_, imageIndex) =>
+              imagePart({ attachment_id: `att_image_${messageIndex}_${imageIndex}` }),
+          ),
+        ],
+      }),
+    );
+    expect(parseChatRequest(validMixed)).toBe(validMixed);
+
+    const tooManyInMessage = request();
+    tooManyInMessage.messages = [
+      {
+        role: "user",
+        content: Array.from(
+          { length: AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentsPerMessage + 1 },
+          (_, index) => documentPart({ attachment_id: `att_document_message_${index}` }),
+        ),
+      },
+    ];
+    expect(() => parseChatRequest(tooManyInMessage)).toThrow(/at most 2 document parts/);
+
+    const tooManyInRequest = request();
+    tooManyInRequest.messages = Array.from(
+      { length: AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentsPerRequest + 1 },
+      (_, index) => ({
+        role: "user",
+        content: [documentPart({ attachment_id: `att_document_request_${index}` })],
+      }),
+    );
+    expect(() => parseChatRequest(tooManyInRequest)).toThrow(/document parts across the request/);
+  });
+
+  it("rejects document parts in assistant messages", () => {
+    const fixture = request();
+    fixture.messages = [{ role: "assistant", content: [documentPart()] }];
+    expect(() => parseChatRequest(fixture)).toThrow(/document parts are user-only/);
+  });
+
   it.each([
     ["attachment_id", ""],
     ["attachment_id", "attachment 1"],
@@ -354,6 +484,36 @@ describe("chat request protocol", () => {
     const fixture = request();
     fixture.messages = [{ role: "user", content: [imagePart({ content_ref: contentRef })] }];
     expect(() => parseChatRequest(fixture)).toThrow(/content_ref.*opaque identifier/);
+  });
+
+  it("rejects unsafe PDF metadata and non-durable document values", () => {
+    class FileLike {
+      readonly name = "receipt.pdf";
+      readonly size = 4;
+      readonly type = "application/pdf";
+    }
+
+    const invalidParts: unknown[] = [
+      documentPart({ attachment_id: "document 1" }),
+      documentPart({ content_ref: "https://storage.example/receipt.pdf" }),
+      documentPart({ filename: "../private/receipt.pdf" }),
+      documentPart({ filename: "receipt\u0000.pdf" }),
+      documentPart({ bytes: [37, 80, 68, 70] }),
+      documentPart({}, { file_url: "https://example.test/receipt.pdf" }),
+      { type: "document", attachment: new Uint8Array([37, 80, 68, 70]) },
+      { type: "document", attachment: new FileLike() },
+      {
+        type: "document",
+        source: { type: "base64", media_type: "application/pdf", data: "JVBERi0=" },
+      },
+      { type: "input_file", file_url: "https://example.test/receipt.pdf" },
+    ];
+
+    for (const part of invalidParts) {
+      const fixture = request();
+      fixture.messages = [{ role: "user", content: [part] }];
+      expect(() => parseChatRequest(fixture)).toThrow(ProtocolValidationError);
+    }
   });
 
   it("rejects unknown fields and credential-bearing image fields or values", () => {

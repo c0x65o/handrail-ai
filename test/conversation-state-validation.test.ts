@@ -105,6 +105,63 @@ function projectedState(): {
   };
 }
 
+function projectedApprovalState(): {
+  readonly events: readonly ConversationEvent[];
+  readonly state: ConversationState;
+} {
+  const events = [
+    event(1, {
+      type: "tool_call.requested",
+      turn_id: "turn-approval",
+      tool_call_id: "call-approval",
+      name: "send_update",
+      arguments: { destination: "account-owner" },
+    }),
+    event(2, {
+      type: "approval.proposal_created",
+      proposal_id: "proposal-validation",
+      group_id: "group-validation",
+      turn_id: "turn-approval",
+      tool_call_id: "call-approval",
+      tool_name: "send_update",
+      status: "pending",
+      proposal_version: 1,
+      expires_at: "2026-08-28T13:00:00Z",
+      reviewed_arguments: {
+        type: "redacted_json",
+        value: { destination: "account owner" },
+      },
+    }),
+    event(3, {
+      type: "approval.proposal_status_changed",
+      proposal_id: "proposal-validation",
+      proposal_version: 2,
+      status: "confirmed",
+      decision_reason: "Host policy confirmed the reviewed decision",
+    }),
+    event(4, {
+      type: "approval.proposal_status_changed",
+      proposal_id: "proposal-validation",
+      proposal_version: 3,
+      status: "executing",
+    }),
+    event(5, {
+      type: "approval.proposal_status_changed",
+      proposal_id: "proposal-validation",
+      proposal_version: 4,
+      status: "failed",
+      failure_reason: "Bounded public failure",
+    }),
+  ] as const;
+  return {
+    events,
+    state: events.reduce(
+      reduceConversationEvent,
+      createInitialConversationState(conversationId),
+    ),
+  };
+}
+
 function withTurnFields(overrides: Record<string, unknown>): unknown {
   const { state } = projectedState();
   return {
@@ -312,6 +369,100 @@ describe("isConversationState", () => {
       conversationId,
       9 as ConversationState["revision"],
     )).toBe(false);
+  });
+
+  it("strictly accepts the linked bounded approval proposal projection", () => {
+    const { state } = projectedApprovalState();
+
+    expect(state.approval_proposals[0]).toMatchObject({
+      proposal_id: "proposal-validation",
+      group_id: "group-validation",
+      turn_id: "turn-approval",
+      tool_call_id: "call-approval",
+      tool_name: "send_update",
+      status: "failed",
+      proposal_version: 4,
+      failure_reason: "Bounded public failure",
+      decision_attribution: { actor: { type: "system" } },
+    });
+    expect(isConversationState(state, conversationId, state.revision)).toBe(true);
+  });
+
+  it("rejects legacy or malformed approval proposal checkpoint shapes", () => {
+    const { state } = projectedApprovalState();
+    const proposal = state.approval_proposals[0]!;
+    const withoutApprovalProjection = { ...state } as Record<string, unknown>;
+    delete withoutApprovalProjection.approval_proposals;
+    expect(isConversationState(
+      withoutApprovalProjection,
+      conversationId,
+      state.revision,
+    )).toBe(false);
+
+    const malformedProposals = [
+      { ...proposal, proposal_version: 0 },
+      { ...proposal, status: "pending" },
+      { ...proposal, decision_attribution: null },
+      { ...proposal, failure_reason: null },
+      { ...proposal, failure_reason: "Bearer abcdefghijklmnop" },
+      {
+        ...proposal,
+        reviewed_arguments: {
+          type: "redacted_json",
+          value: { provider_response: { native: true } },
+        },
+      },
+      {
+        ...proposal,
+        reviewed_arguments: {
+          type: "redacted_json",
+          value: { password: "redacted" },
+        },
+      },
+      { ...proposal, unexpected_internal: true },
+    ];
+    for (const malformed of malformedProposals) {
+      expect(isConversationState({
+        ...state,
+        approval_proposals: [malformed],
+      }, conversationId, state.revision)).toBe(false);
+    }
+
+    expect(isConversationState({
+      ...state,
+      approval_proposals: [proposal, { ...proposal }],
+    }, conversationId, state.revision)).toBe(false);
+    expect(isConversationState({
+      ...state,
+      tool_calls: [{ ...state.tool_calls[0], name: "mismatched_tool" }],
+    }, conversationId, state.revision)).toBe(false);
+  });
+
+  it("loads an approval projection through the version-2 checkpoint path", async () => {
+    const { events, state } = projectedApprovalState();
+    const eventStore = new InMemoryConversationEventStore();
+    await eventStore.append({
+      conversationId,
+      expectedRevision: null,
+      events,
+    });
+    await eventStore.checkpoints.write({
+      conversationId,
+      schemaVersion: CONVERSATION_CHECKPOINT_SCHEMA_VERSION,
+      revision: state.revision!,
+      state: JSON.parse(JSON.stringify(state)) as ConversationJsonValue,
+    });
+
+    const replayed = await replayConversation({
+      conversationId,
+      eventStore,
+      checkpointPolicy: false,
+    });
+
+    expect(CONVERSATION_CHECKPOINT_SCHEMA_VERSION).toBe(2);
+    expect(replayed.checkpointStatus).toBe("used");
+    expect(replayed.replayedEventCount).toBe(0);
+    expect(replayed.state).toEqual(state);
   });
 
   it("loads the reducer projection through the checkpoint replay path", async () => {

@@ -1,19 +1,23 @@
-import type {
-  ConversationAttachmentReference,
-  ConversationEvent,
-  ConversationEventActor,
-  ConversationEventSource,
-  ConversationJsonObject,
-  ConversationJsonValue,
-  ConversationMessageContentPart,
-  ConversationToolResultContentPart,
+import {
+  isLegalConversationApprovalProposalTransition,
+  type ConversationApprovalReviewedArguments,
+  type ConversationAttachmentReference,
+  type ConversationEvent,
+  type ConversationEventActor,
+  type ConversationEventSource,
+  type ConversationJsonObject,
+  type ConversationJsonValue,
+  type ConversationMessageContentPart,
+  type ConversationToolResultContentPart,
 } from "./events.js";
 import type {
+  ConversationApprovalProposalRecord,
   ConversationAttachmentRecord,
   ConversationEventAttribution,
   ConversationMessageRecord,
   ConversationReplayError,
   ConversationState,
+  ConversationStateApprovalReviewedArguments,
   ConversationStateJsonObject,
   ConversationStateJsonValue,
   ConversationStateToolResultContentPart,
@@ -395,6 +399,114 @@ export function reduceConversationEvent(
       });
     }
 
+    case "approval.proposal_created": {
+      if (
+        isTerminalTurn(accepted, payload.turn_id) ||
+        accepted.approval_proposals.some(
+          (proposal) => proposal.proposal_id === payload.proposal_id,
+        )
+      ) {
+        return accepted;
+      }
+      const toolCallIndex = accepted.tool_calls.findIndex(
+        (toolCall) => toolCall.tool_call_id === payload.tool_call_id,
+      );
+      const toolCall = accepted.tool_calls[toolCallIndex];
+      if (
+        toolCall === undefined ||
+        toolCall.turn_id !== payload.turn_id ||
+        toolCall.name !== payload.tool_name
+      ) {
+        return accepted;
+      }
+      const proposal: ConversationApprovalProposalRecord = freeze({
+        proposal_id: payload.proposal_id,
+        group_id: payload.group_id ?? null,
+        turn_id: payload.turn_id,
+        tool_call_id: payload.tool_call_id,
+        tool_name: payload.tool_name,
+        reviewed_arguments: cloneApprovalReviewedArguments(
+          payload.reviewed_arguments,
+        ),
+        status: payload.status,
+        proposal_version: payload.proposal_version,
+        expires_at: payload.expires_at,
+        created_at: event.occurred_at,
+        updated_at: event.occurred_at,
+        created_attribution: attribution,
+        latest_attribution: attribution,
+        decision_at: null,
+        decision_attribution: null,
+        decision_reason: null,
+        failure_reason: null,
+      });
+      const toolCalls = toolCall.approval_required_at === null
+        ? replaceAt(accepted.tool_calls, toolCallIndex, freeze({
+            ...toolCall,
+            approval_required_at: event.occurred_at,
+          }))
+        : accepted.tool_calls;
+      return freeze({
+        ...accepted,
+        tool_calls: toolCalls,
+        approval_proposals: freeze([
+          ...accepted.approval_proposals,
+          proposal,
+        ]),
+      });
+    }
+
+    case "approval.proposal_status_changed": {
+      const index = accepted.approval_proposals.findIndex(
+        (proposal) => proposal.proposal_id === payload.proposal_id,
+      );
+      if (index < 0) return accepted;
+      const current = accepted.approval_proposals[index]!;
+      if (
+        payload.proposal_version !== current.proposal_version + 1 ||
+        !isLegalConversationApprovalProposalTransition(
+          current.status,
+          payload.status,
+        )
+      ) {
+        return accepted;
+      }
+      const occurredAt = Date.parse(event.occurred_at);
+      const expiresAt = Date.parse(current.expires_at);
+      if (
+        (payload.status === "expired" && occurredAt < expiresAt) ||
+        (["confirmed", "executing"].includes(payload.status) &&
+          occurredAt >= expiresAt)
+      ) {
+        return accepted;
+      }
+      const isDecision = ["confirmed", "rejected", "expired"].includes(
+        payload.status,
+      );
+      const proposal: ConversationApprovalProposalRecord = freeze({
+        ...current,
+        status: payload.status,
+        proposal_version: payload.proposal_version,
+        updated_at: event.occurred_at,
+        latest_attribution: attribution,
+        decision_at: isDecision ? event.occurred_at : current.decision_at,
+        decision_attribution: isDecision
+          ? attribution
+          : current.decision_attribution,
+        decision_reason:
+          isDecision && "decision_reason" in payload
+            ? payload.decision_reason ?? null
+            : current.decision_reason,
+        failure_reason:
+          payload.status === "failed"
+            ? payload.failure_reason
+            : payload.status === "executing"
+              ? null
+              : current.failure_reason,
+      });
+      return updateApprovalProposal(accepted, index, proposal);
+    }
+
     case "tool_call.result_recorded": {
       const result: ConversationToolResultRecord = freeze({
         content: cloneToolResultContent(payload.content),
@@ -590,6 +702,14 @@ function cloneJsonObject(value: ConversationJsonObject): ConversationStateJsonOb
   return cloneJson(value) as ConversationStateJsonObject;
 }
 
+function cloneApprovalReviewedArguments(
+  value: ConversationApprovalReviewedArguments,
+): ConversationStateApprovalReviewedArguments {
+  return value.type === "opaque_reference"
+    ? freeze({ type: value.type, argument_ref: value.argument_ref })
+    : freeze({ type: value.type, value: cloneJsonObject(value.value) });
+}
+
 function cloneJson(value: ConversationJsonValue): ConversationStateJsonValue {
   if (Array.isArray(value)) {
     return freeze(value.map((item) => cloneJson(item)));
@@ -770,6 +890,27 @@ function updateToolCall(
   const toolCalls = [...state.tool_calls];
   toolCalls[index] = toolCall;
   return freeze({ ...state, tool_calls: freeze(toolCalls) });
+}
+
+function updateApprovalProposal(
+  state: ConversationState,
+  index: number,
+  proposal: ConversationApprovalProposalRecord,
+): ConversationState {
+  return freeze({
+    ...state,
+    approval_proposals: replaceAt(state.approval_proposals, index, proposal),
+  });
+}
+
+function replaceAt<T>(
+  values: readonly T[],
+  index: number,
+  value: T,
+): readonly T[] {
+  const next = [...values];
+  next[index] = value;
+  return freeze(next);
 }
 
 function freeze<T extends object>(value: T): Readonly<T> {

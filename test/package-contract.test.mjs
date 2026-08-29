@@ -78,6 +78,16 @@ test("resolves every public ESM export from the built package", async () => {
   }
 });
 
+test("exports citation records and normalization from the built core entry", async () => {
+  const moduleUrl = pathToFileURL(
+    path.join(packageRoot, packageJson.exports["."].import),
+  ).href;
+  const imported = await import(moduleUrl);
+  assert.deepEqual(imported.CITATION_SOURCE_TYPES, ["web", "document", "tool"]);
+  assert.equal(typeof imported.normalizeCitationRecords, "function");
+  assert.equal(typeof imported.deduplicateCitationRecords, "function");
+});
+
 test("imports core and browser entries when React resolution is unavailable", () => {
   const loaderUrl = new URL("./fixtures/reject-react-loader.mjs", import.meta.url);
   const entryUrls = [".", "./browser"].map((exportName) =>

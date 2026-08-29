@@ -52,6 +52,8 @@ export const AI_RUNTIME_IMAGE_MIME_TYPES = [
   "image/webp",
 ] as const;
 
+export const AI_RUNTIME_DOCUMENT_MIME_TYPES = ["application/pdf"] as const;
+
 export const AI_RUNTIME_ATTACHMENT_ID_GRAMMAR =
   "^att_[A-Za-z0-9][A-Za-z0-9._-]{0,251}$" as const;
 export const AI_RUNTIME_CONTENT_REFERENCE_GRAMMAR =
@@ -69,6 +71,10 @@ export const AI_RUNTIME_PROTOCOL_LIMITS = {
   imageAttachmentMaxBytes: 10_485_760,
   imageAttachmentsPerMessage: 4,
   imageAttachmentsPerRequest: 8,
+  documentAttachmentMinBytes: 1,
+  documentAttachmentMaxBytes: 20_971_520,
+  documentAttachmentsPerMessage: 2,
+  documentAttachmentsPerRequest: 4,
   jsonDepth: 20,
   jsonNodes: 10_000,
   jsonArrayLength: 2_000,
@@ -98,16 +104,20 @@ export type PublicErrorCategory =
   (typeof AI_RUNTIME_ERROR_CATEGORIES)[number];
 export type PublicErrorCode = (typeof AI_RUNTIME_ERROR_CODES)[number];
 export type ImageMimeType = (typeof AI_RUNTIME_IMAGE_MIME_TYPES)[number];
+export type DocumentMimeType = (typeof AI_RUNTIME_DOCUMENT_MIME_TYPES)[number];
+export type AttachmentMimeType = ImageMimeType | DocumentMimeType;
 
 export interface MessageTextPart {
   type: "text";
   text: string;
 }
 
-export interface AttachmentReference {
+export interface AttachmentReference<
+  TMediaType extends AttachmentMimeType = AttachmentMimeType,
+> {
   attachment_id: string;
   content_ref: string;
-  media_type: ImageMimeType;
+  media_type: TMediaType;
   byte_size: number;
   filename?: string;
 }
@@ -115,11 +125,20 @@ export interface AttachmentReference {
 /** A trusted host or transport resolves attachment.content_ref before provider input is built. */
 export interface MessageImagePart {
   type: "image";
-  attachment: AttachmentReference;
+  attachment: AttachmentReference<ImageMimeType>;
   alt_text?: string;
 }
 
-export type MessageContentPart = MessageTextPart | MessageImagePart;
+/** Document inputs are user-only; hosts resolve content_ref outside this durable protocol. */
+export interface MessageDocumentPart {
+  type: "document";
+  attachment: AttachmentReference<DocumentMimeType>;
+}
+
+export type MessageContentPart =
+  | MessageTextPart
+  | MessageImagePart
+  | MessageDocumentPart;
 
 export interface ChatMessage {
   role: "user" | "assistant";
@@ -690,45 +709,79 @@ function validateSafeFilename(value: unknown, path: string): void {
   }
 }
 
+function validateAttachmentReference(
+  value: unknown,
+  path: string,
+  mediaTypes: readonly AttachmentMimeType[],
+  minBytes: number,
+  maxBytes: number,
+): void {
+  const attachment = record(value, path);
+  requiredKeys(
+    attachment,
+    ["attachment_id", "content_ref", "media_type", "byte_size"],
+    path,
+  );
+  allowedKeys(
+    attachment,
+    ["attachment_id", "content_ref", "media_type", "byte_size", "filename"],
+    path,
+  );
+  validateAttachmentIdentifier(attachment.attachment_id, `${path}.attachment_id`);
+  validateContentReference(attachment.content_ref, `${path}.content_ref`);
+  enumValue(attachment.media_type, mediaTypes, `${path}.media_type`);
+  if (
+    !Number.isInteger(attachment.byte_size) ||
+    (attachment.byte_size as number) < minBytes ||
+    (attachment.byte_size as number) > maxBytes
+  ) {
+    fail(
+      `${path}.byte_size`,
+      `must be an integer from ${minBytes} through ${maxBytes}`,
+    );
+  }
+  if (Object.hasOwn(attachment, "filename")) {
+    validateSafeFilename(attachment.filename, `${path}.filename`);
+  }
+}
+
 function validateImagePart(value: unknown, path: string): asserts value is MessageImagePart {
   const object = record(value, path);
   requiredKeys(object, ["type", "attachment"], path);
   allowedKeys(object, ["type", "attachment", "alt_text"], path);
   if (object.type !== "image") fail(`${path}.type`, 'must equal "image"');
 
-  const attachment = record(object.attachment, `${path}.attachment`);
-  requiredKeys(
-    attachment,
-    ["attachment_id", "content_ref", "media_type", "byte_size"],
+  validateAttachmentReference(
+    object.attachment,
     `${path}.attachment`,
+    AI_RUNTIME_IMAGE_MIME_TYPES,
+    AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMinBytes,
+    AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMaxBytes,
   );
-  allowedKeys(
-    attachment,
-    ["attachment_id", "content_ref", "media_type", "byte_size", "filename"],
-    `${path}.attachment`,
-  );
-  validateAttachmentIdentifier(attachment.attachment_id, `${path}.attachment.attachment_id`);
-  validateContentReference(attachment.content_ref, `${path}.attachment.content_ref`);
-  enumValue(attachment.media_type, AI_RUNTIME_IMAGE_MIME_TYPES, `${path}.attachment.media_type`);
-  if (
-    !Number.isInteger(attachment.byte_size) ||
-    (attachment.byte_size as number) < AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMinBytes ||
-    (attachment.byte_size as number) > AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMaxBytes
-  ) {
-    fail(
-      `${path}.attachment.byte_size`,
-      `must be an integer from ${AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMinBytes} through ${AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMaxBytes}`,
-    );
-  }
-  if (Object.hasOwn(attachment, "filename")) {
-    validateSafeFilename(attachment.filename, `${path}.attachment.filename`);
-  }
   if (Object.hasOwn(object, "alt_text")) {
     const altText = stringValue(object.alt_text, `${path}.alt_text`, {
       maxLength: AI_RUNTIME_PROTOCOL_LIMITS.attachmentAltTextLength,
     });
     rejectCredentialMaterial(altText, `${path}.alt_text`);
   }
+}
+
+function validateDocumentPart(
+  value: unknown,
+  path: string,
+): asserts value is MessageDocumentPart {
+  const object = record(value, path);
+  requiredKeys(object, ["type", "attachment"], path);
+  allowedKeys(object, ["type", "attachment"], path);
+  if (object.type !== "document") fail(`${path}.type`, 'must equal "document"');
+
+  validateAttachmentReference(
+    object.attachment,
+    `${path}.attachment`,
+    AI_RUNTIME_DOCUMENT_MIME_TYPES,
+    AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMinBytes,
+    AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMaxBytes,
+  );
 }
 
 function validateMessageContentPart(
@@ -744,21 +797,36 @@ function validateMessageContentPart(
     validateImagePart(value, path);
     return;
   }
-  fail(`${path}.type`, 'must equal "text" or "image"');
+  if (object.type === "document") {
+    validateDocumentPart(value, path);
+    return;
+  }
+  fail(`${path}.type`, 'must equal "text", "image", or "document"');
 }
 
-function validateMessage(value: unknown, path: string): number {
+interface MessageAttachmentCounts {
+  imageCount: number;
+  documentCount: number;
+}
+
+function validateMessage(value: unknown, path: string): MessageAttachmentCounts {
   const object = record(value, path);
   requiredKeys(object, ["role", "content"], path);
   allowedKeys(object, ["role", "content"], path);
-  enumValue(object.role, ["user", "assistant"], `${path}.role`);
+  const role = enumValue(object.role, ["user", "assistant"], `${path}.role`);
   if (!Array.isArray(object.content) || object.content.length === 0) {
     fail(`${path}.content`, "must be a non-empty array");
   }
   let imageCount = 0;
+  let documentCount = 0;
   object.content.forEach((part, index) => {
-    validateMessageContentPart(part, `${path}.content[${index}]`);
+    const partPath = `${path}.content[${index}]`;
+    validateMessageContentPart(part, partPath);
     if (part.type === "image") imageCount += 1;
+    if (part.type === "document") {
+      if (role !== "user") fail(`${partPath}.type`, "document parts are user-only");
+      documentCount += 1;
+    }
   });
   if (imageCount > AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentsPerMessage) {
     fail(
@@ -766,7 +834,13 @@ function validateMessage(value: unknown, path: string): number {
       `must contain at most ${AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentsPerMessage} image parts`,
     );
   }
-  return imageCount;
+  if (documentCount > AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentsPerMessage) {
+    fail(
+      `${path}.content`,
+      `must contain at most ${AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentsPerMessage} document parts`,
+    );
+  }
+  return { imageCount, documentCount };
 }
 
 function validateToolDefinition(value: unknown, path: string): asserts value is ToolDefinition {
@@ -893,13 +967,22 @@ export function parseChatRequest(value: unknown): ChatRequest {
     fail("$request.messages", "must be a non-empty array");
   }
   let requestImageCount = 0;
+  let requestDocumentCount = 0;
   object.messages.forEach((message, index) => {
-    requestImageCount += validateMessage(message, `$request.messages[${index}]`);
+    const counts = validateMessage(message, `$request.messages[${index}]`);
+    requestImageCount += counts.imageCount;
+    requestDocumentCount += counts.documentCount;
   });
   if (requestImageCount > AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentsPerRequest) {
     fail(
       "$request.messages",
       `must contain at most ${AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentsPerRequest} image parts across the request`,
+    );
+  }
+  if (requestDocumentCount > AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentsPerRequest) {
+    fail(
+      "$request.messages",
+      `must contain at most ${AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentsPerRequest} document parts across the request`,
     );
   }
   if (!Array.isArray(object.tools)) fail("$request.tools", "must be an array");

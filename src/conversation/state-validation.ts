@@ -1,6 +1,8 @@
-import type {
-  ConversationId,
-  ConversationRevision,
+import {
+  isConversationApprovalReason,
+  isConversationApprovalReviewedArguments,
+  type ConversationId,
+  type ConversationRevision,
 } from "./events.js";
 import type { ConversationState } from "./state.js";
 
@@ -13,7 +15,8 @@ export function isConversationState(
   const requiredKeys = [
     "conversation_id", "revision", "last_event_id", "processed_event_ids",
     "processed_mutation_ids", "messages", "attachments", "turns",
-    "active_turn_id", "tool_calls", "tool_loop_budget_exhaustions",
+    "active_turn_id", "tool_calls", "approval_proposals",
+    "tool_loop_budget_exhaustions",
     "usage_receipt_links", "metadata",
     "title", "replay_error",
   ];
@@ -41,6 +44,18 @@ export function isConversationState(
   if (!recordArray(value.attachments, isAttachmentRecord)) return false;
   if (!recordArray(value.turns, isTurn)) return false;
   if (!recordArray(value.tool_calls, isToolCall)) return false;
+  if (!recordArray(value.approval_proposals, isApprovalProposal)) return false;
+  const proposalIds = (value.approval_proposals as Record<string, unknown>[])
+    .map((proposal) => proposal.proposal_id);
+  if (new Set(proposalIds).size !== proposalIds.length) return false;
+  for (const proposal of value.approval_proposals as Record<string, unknown>[]) {
+    if (!(value.tool_calls as Record<string, unknown>[]).some(
+      (toolCall) => toolCall.tool_call_id === proposal.tool_call_id &&
+        toolCall.turn_id === proposal.turn_id &&
+        toolCall.name === proposal.tool_name &&
+        toolCall.approval_required_at !== null,
+    )) return false;
+  }
   if (!recordArray(value.tool_loop_budget_exhaustions, isToolLoopBudgetExhaustion)) return false;
   if (!recordArray(value.usage_receipt_links, isUsageLink)) return false;
   if (!(value.active_turn_id === null || isIdentifier(value.active_turn_id))) return false;
@@ -134,7 +149,7 @@ function isOneOf<const Values extends readonly string[]>(
   return typeof value === "string" && values.includes(value);
 }
 
-function isPositiveSafeInteger(value: unknown): boolean {
+function isPositiveSafeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) > 0;
 }
 
@@ -142,7 +157,7 @@ function isNonnegativeSafeInteger(value: unknown): boolean {
   return Number.isSafeInteger(value) && (value as number) >= 0;
 }
 
-function isConversationTimestamp(value: unknown): boolean {
+function isConversationTimestamp(value: unknown): value is string {
   if (typeof value !== "string" || value.length > 64) return false;
   const match =
     /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?Z$/.exec(value);
@@ -171,6 +186,56 @@ function isToolCall(value: Record<string, unknown>): boolean {
     (value.approval_required_at === null || typeof value.approval_required_at === "string") &&
     isNullableAttribution(value.attribution) &&
     (value.result === null || isToolResult(value.result));
+}
+
+function isApprovalProposal(value: Record<string, unknown>): boolean {
+  const expectedKeys = [
+    "proposal_id", "group_id", "turn_id", "tool_call_id", "tool_name",
+    "reviewed_arguments", "status", "proposal_version", "expires_at",
+    "created_at", "updated_at", "created_attribution", "latest_attribution",
+    "decision_at", "decision_attribution", "decision_reason", "failure_reason",
+  ];
+  if (
+    !hasExactKeys(value, expectedKeys) ||
+    !isIdentifier(value.proposal_id) ||
+    !(value.group_id === null || isIdentifier(value.group_id)) ||
+    !isIdentifier(value.turn_id) ||
+    !isIdentifier(value.tool_call_id) ||
+    !isIdentifier(value.tool_name) ||
+    !isConversationApprovalReviewedArguments(value.reviewed_arguments) ||
+    !isOneOf(value.status, [
+      "pending", "confirmed", "rejected", "expired", "executing", "executed",
+      "failed",
+    ]) ||
+    !isPositiveSafeInteger(value.proposal_version) ||
+    !isConversationTimestamp(value.expires_at) ||
+    !isConversationTimestamp(value.created_at) ||
+    !isConversationTimestamp(value.updated_at) ||
+    Date.parse(value.expires_at) <= Date.parse(value.created_at) ||
+    Date.parse(value.updated_at) < Date.parse(value.created_at) ||
+    !isAttribution(value.created_attribution) ||
+    value.created_attribution.actor.type !== "system" ||
+    !isAttribution(value.latest_attribution) ||
+    !(value.decision_at === null || isConversationTimestamp(value.decision_at)) ||
+    !isNullableAttribution(value.decision_attribution) ||
+    !(value.decision_reason === null || isConversationApprovalReason(value.decision_reason)) ||
+    !(value.failure_reason === null || isConversationApprovalReason(value.failure_reason))
+  ) return false;
+
+  if (value.status === "pending") {
+    return value.proposal_version === 1 && value.decision_at === null &&
+      value.decision_attribution === null && value.decision_reason === null &&
+      value.failure_reason === null;
+  }
+  if (
+    value.proposal_version < 2 || value.decision_at === null ||
+    value.decision_attribution === null ||
+    !["user", "system"].includes(String(value.decision_attribution.actor.type))
+  ) return false;
+  if (["confirmed", "rejected", "expired", "executing", "executed"].includes(
+    value.status,
+  ) && value.failure_reason !== null) return false;
+  return value.status !== "failed" || value.failure_reason !== null;
 }
 
 function isToolLoopBudgetExhaustion(value: Record<string, unknown>): boolean {
@@ -213,11 +278,18 @@ function isTurnError(value: unknown): boolean {
     typeof value.message === "string" && typeof value.retryable === "boolean";
 }
 
-function isNullableAttribution(value: unknown): boolean {
+type AttributionRecord = {
+  actor: Record<string, unknown>;
+  source: Record<string, unknown>;
+};
+
+function isNullableAttribution(
+  value: unknown,
+): value is AttributionRecord | null {
   return value === null || isAttribution(value);
 }
 
-function isAttribution(value: unknown): boolean {
+function isAttribution(value: unknown): value is AttributionRecord {
   if (!isPlainRecord(value) || !isPlainRecord(value.actor) || !isPlainRecord(value.source)) {
     return false;
   }

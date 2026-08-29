@@ -21,7 +21,9 @@ import {
   type ConversationStore,
 } from "./store.js";
 
-export const CONVERSATION_CHECKPOINT_SCHEMA_VERSION = 1 as const;
+// Version 2 adds the strict durable approval proposal projection. Version 1
+// checkpoints intentionally fall back to full durable-log replay.
+export const CONVERSATION_CHECKPOINT_SCHEMA_VERSION = 2 as const;
 
 export interface ConversationCheckpointPolicy {
   /** Write after at least this many events have been folded since the checkpoint. */

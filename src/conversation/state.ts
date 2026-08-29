@@ -1,6 +1,10 @@
 import type {
   ConversationAttachmentId,
   ConversationAttachmentReference,
+  ConversationApprovalArgumentReference,
+  ConversationApprovalGroupId,
+  ConversationApprovalProposalId,
+  ConversationApprovalProposalStatus,
   ConversationClientMutationId,
   ConversationEventActor,
   ConversationEventId,
@@ -135,6 +139,16 @@ export type ConversationStateToolResultContentPart =
   | ConversationStateToolResultTextPart
   | ConversationStateToolResultJsonPart;
 
+export type ConversationStateApprovalReviewedArguments =
+  | {
+      readonly type: "redacted_json";
+      readonly value: ConversationStateJsonObject;
+    }
+  | {
+      readonly type: "opaque_reference";
+      readonly argument_ref: ConversationApprovalArgumentReference;
+    };
+
 export interface ConversationToolCallRecord {
   readonly tool_call_id: ConversationToolCallId;
   readonly turn_id: ConversationTurnId;
@@ -147,6 +161,27 @@ export interface ConversationToolCallRecord {
   readonly approval_required_at: ConversationTimestamp | null;
   readonly attribution: ConversationEventAttribution | null;
   readonly result: ConversationToolResultRecord | null;
+}
+
+/** Current durable projection; the event log remains the authoritative audit history. */
+export interface ConversationApprovalProposalRecord {
+  readonly proposal_id: ConversationApprovalProposalId;
+  readonly group_id: ConversationApprovalGroupId | null;
+  readonly turn_id: ConversationTurnId;
+  readonly tool_call_id: ConversationToolCallId;
+  readonly tool_name: string;
+  readonly reviewed_arguments: ConversationStateApprovalReviewedArguments;
+  readonly status: ConversationApprovalProposalStatus;
+  readonly proposal_version: number;
+  readonly expires_at: ConversationTimestamp;
+  readonly created_at: ConversationTimestamp;
+  readonly updated_at: ConversationTimestamp;
+  readonly created_attribution: ConversationEventAttribution;
+  readonly latest_attribution: ConversationEventAttribution;
+  readonly decision_at: ConversationTimestamp | null;
+  readonly decision_attribution: ConversationEventAttribution | null;
+  readonly decision_reason: string | null;
+  readonly failure_reason: string | null;
 }
 
 export interface ConversationToolLoopBudgetExhaustion {
@@ -207,6 +242,7 @@ export interface ConversationState {
   readonly turns: readonly ConversationTurnRecord[];
   readonly active_turn_id: ConversationTurnId | null;
   readonly tool_calls: readonly ConversationToolCallRecord[];
+  readonly approval_proposals: readonly ConversationApprovalProposalRecord[];
   readonly tool_loop_budget_exhaustions: readonly ConversationToolLoopBudgetExhaustion[];
   /** References only; receipt bodies live behind the usage contract/store. */
   readonly usage_receipt_links: readonly ConversationUsageReceiptLink[];
@@ -229,6 +265,7 @@ export function createInitialConversationState(
     turns: Object.freeze([]),
     active_turn_id: null,
     tool_calls: Object.freeze([]),
+    approval_proposals: Object.freeze([]),
     tool_loop_budget_exhaustions: Object.freeze([]),
     usage_receipt_links: Object.freeze([]),
     metadata: Object.freeze({}),

@@ -1,4 +1,5 @@
 export * from "./attachments/index.js";
+export * from "./citations.js";
 export * from "./conversation/index.js";
 export * from "./presence/index.js";
 export * from "./protocol.js";
