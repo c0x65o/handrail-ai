@@ -38,6 +38,19 @@ test("declares request protection as an explicit trusted-server boundary", () =>
   });
 });
 
+test("isolates the new client, UI, gateway, MCP, and Postgres boundaries", () => {
+  for (const subpath of [
+    "./client", "./react/styled", "./server/application-gateway",
+    "./connectors/mcp", "./persistence/postgres",
+  ]) {
+    assert.ok(packageJson.exports[subpath], `missing explicit export ${subpath}`);
+  }
+  for (const dependency of ["express", "pg", "@modelcontextprotocol/sdk"]) {
+    assert.equal(packageJson.dependencies[dependency], undefined);
+    assert.equal(packageJson.peerDependencies[dependency], undefined);
+  }
+});
+
 test("declares OpenAI as an explicit opt-in provider boundary", () => {
   assert.deepEqual(packageJson.exports["./providers/openai"], {
     types: "./dist/providers/openai.d.ts",
@@ -367,12 +380,22 @@ test("dry pack contains only intended package assets", () => {
     "dist/index.d.ts",
     "dist/browser/index.js",
     "dist/browser/index.d.ts",
+    "dist/client/index.js",
+    "dist/client/index.d.ts",
     "dist/react/index.js",
     "dist/react/index.d.ts",
+    "dist/react-styled/index.js",
+    "dist/react-styled/index.d.ts",
+    "dist/server/application-gateway.js",
+    "dist/server/application-gateway.d.ts",
     "dist/server/managed.js",
     "dist/server/managed.d.ts",
     "dist/server/trusted-server.js",
     "dist/server/trusted-server.d.ts",
+    "dist/mcp/index.js",
+    "dist/mcp/index.d.ts",
+    "dist/postgres/index.js",
+    "dist/postgres/index.d.ts",
     "dist/providers/openai.js",
     "dist/providers/openai.d.ts",
     "dist/providers/openai-transcription.js",
@@ -390,11 +413,12 @@ test("dry pack contains only intended package assets", () => {
   }
 
   for (const filePath of packedFiles) {
+    assert.doesNotMatch(filePath, /(?:^|\/)\.dart_tool\//u);
     assert.doesNotMatch(filePath, /^(?:scripts|src|test)\//u);
     assert.doesNotMatch(
       filePath,
       /\.(?:css|less|sass|scss|eot|otf|ttf|woff2?)$/u,
     );
-    assert.match(filePath, /^(?:dist\/|LICENSE$|README\.md$|package\.json$)/u);
+    assert.match(filePath, /^(?:dist\/|docs\/|flutter\/handrail_ai_client\/|LICENSE$|README\.md$|package\.json$)/u);
   }
 });

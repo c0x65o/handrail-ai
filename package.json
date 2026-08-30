@@ -1,6 +1,6 @@
 {
   "name": "@handrail/ai",
-  "version": "0.1.41",
+  "version": "0.1.42",
   "description": "Provider-neutral TypeScript primitives and runtime tooling for building AI applications with Handrail.",
   "license": "UNLICENSED",
   "type": "module",
@@ -17,20 +17,45 @@
       "import": "./dist/browser/index.js",
       "default": "./dist/browser/index.js"
     },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "import": "./dist/client/index.js",
+      "default": "./dist/client/index.js"
+    },
     "./react": {
       "types": "./dist/react/index.d.ts",
       "import": "./dist/react/index.js",
       "default": "./dist/react/index.js"
+    },
+    "./react/styled": {
+      "types": "./dist/react-styled/index.d.ts",
+      "import": "./dist/react-styled/index.js",
+      "default": "./dist/react-styled/index.js"
     },
     "./server/managed": {
       "types": "./dist/server/managed.d.ts",
       "import": "./dist/server/managed.js",
       "default": "./dist/server/managed.js"
     },
+    "./server/application-gateway": {
+      "types": "./dist/server/application-gateway.d.ts",
+      "import": "./dist/server/application-gateway.js",
+      "default": "./dist/server/application-gateway.js"
+    },
     "./server/trusted-server": {
       "types": "./dist/server/trusted-server.d.ts",
       "import": "./dist/server/trusted-server.js",
       "default": "./dist/server/trusted-server.js"
+    },
+    "./connectors/mcp": {
+      "types": "./dist/mcp/index.d.ts",
+      "import": "./dist/mcp/index.js",
+      "default": "./dist/mcp/index.js"
+    },
+    "./persistence/postgres": {
+      "types": "./dist/postgres/index.d.ts",
+      "import": "./dist/postgres/index.js",
+      "default": "./dist/postgres/index.js"
     },
     "./providers/openai": {
       "types": "./dist/providers/openai.d.ts",
@@ -65,6 +90,10 @@
   },
   "files": [
     "dist",
+    "docs",
+    "flutter/handrail_ai_client/lib",
+    "flutter/handrail_ai_client/pubspec.yaml",
+    "flutter/handrail_ai_client/README.md",
     "README.md",
     "LICENSE"
   ],

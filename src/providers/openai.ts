@@ -41,6 +41,8 @@ import {
 } from "../provider-context.js";
 
 export * from "./openai-context.js";
+export * from "./openai-responses-tools.js";
+export * from "./openai-responses.js";
 export * from "./openai-transcription.js";
 
 export interface OpenAIImageSource {

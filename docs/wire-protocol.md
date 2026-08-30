@@ -1,0 +1,14 @@
+# Application gateway wire protocol v1
+
+`handrail.application-gateway.v1` is JSON over HTTPS with SSE turn delivery. The TypeScript `@handrail/ai/client` entry works in browsers and React Native runtimes that provide Fetch, AbortController, ReadableStream, TextDecoder, and crypto-grade application IDs. The Dart reference client is in `flutter/handrail_ai_client`.
+
+All endpoints are relative to an application-owned mount path. Every request must pass the application's authentication, authorization, origin/CSRF, rate-limit, concurrency, body-size, and idempotency controls. Provider credentials never enter a client.
+
+- `GET /capabilities` returns cancellation, attachment limits/media types/upload URL, presence, and sync support.
+- `POST /turns/start` accepts `StartTurnInput` and streams `started`, `event`, then exactly one `terminal` SSE frame.
+- `POST /turns/resume` accepts the conversation/turn IDs and last event ID, opaque cursor, and revision. Replayed events must be idempotent.
+- `POST /turns/cancel` requests authoritative cancellation using a distinct mutation and idempotency key. Closing an SSE connection only disconnects that device.
+
+Each `event` frame contains `{type:"event", event, checkpoint}`. Canonical `StreamEvent` values represent text, citations, tool calls/results, approvals, attachments, errors, usage, cancellation, and completion. Presence uses separate `handrail.live-presence.v1` ephemeral frames and must never be appended to the conversation event log.
+
+Clients must ignore unknown additive fields and event types they do not render, reject an incompatible major protocol string, preserve opaque IDs/cursors byte-for-byte, and resume only after durably applying the associated event. Servers must bound JSON/SSE sizes, redact public errors, authorize every conversation and attachment, and never trust client-supplied tenancy or actor identity.

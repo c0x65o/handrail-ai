@@ -15,9 +15,14 @@ Node.js 20 or newer is required for package tooling and trusted-server use.
 | --- | --- | --- |
 | `@handrail/ai` | Protocol, conversation runtime/store/catalog, citations, provider-context, approval, transcription, realtime voice, web-search, event-store and sync contracts, tools, presence, retry, and usage APIs | Runtime-neutral core; direct-provider construction and side effects are trusted-server only |
 | `@handrail/ai/browser` | IndexedDB stores plus generalized image/PDF attachment intake, audio capture, and WebRTC voice helpers | Browser only; no provider credentials or server-side tool execution |
+| `@handrail/ai/client` | Application-gateway transport and language-neutral wire types | Browser, React Native, and other Fetch/stream clients |
 | `@handrail/ai/react` | Optional unstyled React bindings and accessible composition seams for chat, citations, conversation picking, approvals, transcription, and realtime voice | Browser/React; React is an optional peer |
+| `@handrail/ai/react/styled` | Optional responsive styled launcher/dialog/drawer/page preset | Browser/React; theme variables and renderers are application-owned |
+| `@handrail/ai/server/application-gateway` | Express-compatible adapter for the web-standard streaming gateway | Trusted application server only |
 | `@handrail/ai/server/managed` | Optional Handrail AI Runtime v1 streaming transport | Trusted server only |
 | `@handrail/ai/server/trusted-server` | Framework-neutral request protection contracts | Trusted server only |
+| `@handrail/ai/connectors/mcp` | Injected-client MCP tool-plugin/discovery adapter | Optional connector boundary |
+| `@handrail/ai/persistence/postgres` | Injected-client reference Postgres persistence | Optional database boundary |
 | `@handrail/ai/providers/openai` | OpenAI provider adapter | Trusted server only |
 | `@handrail/ai/providers/openai/transcription` | OpenAI transcription capability | Trusted server only |
 | `@handrail/ai/providers/openai/realtime` | OpenAI realtime bootstrap, event normalization, and session authority | Trusted server only |
@@ -115,10 +120,28 @@ tab-hide handlers only change local visibility; authoritative cancellation is
 reserved for the explicit Stop action. The fake transport and uploader are
 deterministic and perform no network, provider, or Handrail control-plane call.
 
-The SDK injects no CSS, fonts, branding, layout, or theme. Every `app-*` class
-in the recipes is a consumer-owned placeholder. Responsive layout, breakpoints,
-drawer/launcher placement, and all visual styling remain the host application's
-responsibility.
+The unstyled entry injects no CSS, fonts, branding, layout, or theme. Applications
+that want a ready surface can import `StyledChatPreset` and
+`StyledChatPresetStyles` from `@handrail/ai/react/styled`; every visual can still
+be replaced through the unstyled entry, CSS custom properties, slots, and tool
+result renderer keys.
+
+## Application-owned gateway and mobile clients
+
+`createApplicationGateway` exposes protected capability, start, resume, and
+authoritative cancellation endpoints as web-standard `Request`/`Response`
+handling. `createApplicationGatewayTransport` supplies the matching browser or
+React Native transport, including protected-request hooks and negotiated Blob
+uploads. The server does not depend on Express; the optional structural adapter
+and [`examples/trusted-server-application-gateway-express.ts`](./examples/trusted-server-application-gateway-express.ts)
+show an Express mount.
+
+See [`docs/wire-protocol.md`](./docs/wire-protocol.md) for the language-neutral
+contract and `flutter/handrail_ai_client` for the tested Dart implementation.
+See [`docs/platform-contracts.md`](./docs/platform-contracts.md) for security,
+compatibility, package boundaries, and production persistence guidance. The
+read-only Spartan Aegis mapping is in
+[`docs/spartan-aegis-migration.md`](./docs/spartan-aegis-migration.md).
 
 ## Direct/BYOK and managed operation
 

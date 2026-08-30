@@ -1,4 +1,8 @@
 import { parseServerSentEvents } from "./sse.js";
+import type { AttachmentReference } from "../protocol.js";
+import type { AttachmentUploadAdapter } from "../attachments/types.js";
+import type { LivePresenceEnvelope } from "../presence/live-delivery.js";
+import type { PresenceRecord } from "../presence/types.js";
 import type {
   AuthoritativeCancelTurnResult,
   CancelTurnInput,
@@ -179,13 +183,98 @@ export function createApplicationGateway<TEvent, TRequest, TContext extends Appl
   });
 }
 
-export interface ApplicationGatewayTransportOptions<TEvent> {
+export interface ApplicationGatewayTransportOptions<TEvent, TSynchronization = unknown> {
   readonly baseUrl: string;
   readonly fetch?: typeof globalThis.fetch;
   /** Supplies application-owned cookies, bearer tokens, CSRF headers, and correlation metadata. */
   readonly protectedRequest?: (input: RequestInit & { readonly url: string }) => Promise<RequestInit> | RequestInit;
   readonly decodeEvent?: (value: unknown) => TEvent;
   readonly capabilities?: ApplicationGatewayCapabilities;
+  /** Application-specific durable sync adapter, enabled only when the server also negotiates it. */
+  readonly synchronization?: TSynchronization;
+}
+
+export type ApplicationGatewayAttachmentSource = Blob;
+
+export interface ApplicationGatewayPresenceClient {
+  publish(conversationId: string, kind: "upsert" | "leave", record: PresenceRecord): Promise<void>;
+  subscribe(conversationId: string, signal?: AbortSignal): AsyncIterable<LivePresenceEnvelope>;
+}
+
+function createGatewayPresenceClient<TEvent>(options: ApplicationGatewayTransportOptions<TEvent>): ApplicationGatewayPresenceClient {
+  const fetcher = options.fetch ?? globalThis.fetch;
+  const urlFor = (conversationId: string) => `${options.baseUrl.replace(/\/+$/, "")}/presence?conversationId=${encodeURIComponent(conversationId)}`;
+  return Object.freeze({
+    async publish(conversationId: string, kind: "upsert" | "leave", record: PresenceRecord) {
+      const url = urlFor(conversationId);
+      const initial: RequestInit = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ kind, record }) };
+      const response = await fetcher(url, await options.protectedRequest?.({ url, ...initial }) ?? initial);
+      if (!response.ok) throw new TypeError("Presence publish failed");
+    },
+    subscribe(conversationId: string, signal?: AbortSignal) {
+      const url = urlFor(conversationId);
+      return (async function* () {
+        const initial: RequestInit = { method: "GET", ...(signal ? { signal } : {}) };
+        const response = await fetcher(url, await options.protectedRequest?.({ url, ...initial }) ?? initial);
+        if (!response.ok || !response.body) throw new TypeError("Presence subscription failed");
+        for await (const frame of parseServerSentEvents(response.body)) {
+          if (frame.data) yield JSON.parse(frame.data) as LivePresenceEnvelope;
+        }
+      })();
+    },
+  });
+}
+
+function createGatewayAttachmentUploadAdapter<TEvent>(
+  options: ApplicationGatewayTransportOptions<TEvent>,
+  capability: Exclude<ApplicationGatewayCapabilities["attachments"], false>,
+): AttachmentUploadAdapter<ApplicationGatewayAttachmentSource> | null {
+  const uploadUrl = capability.uploadUrl;
+  if (!uploadUrl || typeof FormData === "undefined") return null;
+  const fetcher = options.fetch ?? globalThis.fetch;
+  return {
+    async upload(request) {
+      if (request.metadata.byteSize > capability.maximumBytesPerFile ||
+        !capability.acceptedMediaTypes.some((accepted) => accepted.endsWith("/*")
+          ? request.metadata.mediaType.startsWith(accepted.slice(0, -1)) : accepted === request.metadata.mediaType)) {
+        throw new TypeError("Attachment does not satisfy negotiated gateway limits");
+      }
+      const url = new URL(uploadUrl, options.baseUrl).toString();
+      const form = new FormData();
+      form.set("file", request.source, request.metadata.filename ?? "attachment");
+      form.set("idempotencyKey", request.idempotencyKey);
+      form.set("kind", request.metadata.kind ?? "image");
+      const initial: RequestInit = { method: "POST", body: form, signal: request.signal };
+      const response = await fetcher(url, await options.protectedRequest?.({ url, ...initial }) ?? initial);
+      if (!response.ok) throw new TypeError("Attachment upload failed");
+      request.onProgress({ uploadedBytes: request.metadata.byteSize, totalBytes: request.metadata.byteSize });
+      const result = await response.json() as { readonly ok?: boolean; readonly value?: unknown };
+      if (!result.ok) throw new TypeError("Attachment upload failed");
+      const value = result.value as Partial<AttachmentReference> | undefined;
+      if (!value || typeof value.attachment_id !== "string" || typeof value.content_ref !== "string" ||
+        value.media_type !== request.metadata.mediaType || value.byte_size !== request.metadata.byteSize) {
+        throw new TypeError("Attachment gateway returned an invalid reference");
+      }
+      return Object.freeze({ attachment_id: value.attachment_id, content_ref: value.content_ref,
+        media_type: value.media_type, byte_size: value.byte_size,
+        ...(typeof value.filename === "string" ? { filename: value.filename } : {}) });
+    },
+  };
+}
+
+export async function negotiateApplicationGatewayCapabilities(
+  options: Pick<ApplicationGatewayTransportOptions<unknown>, "baseUrl" | "fetch" | "protectedRequest">,
+): Promise<ApplicationGatewayCapabilities> {
+  const fetcher = options.fetch ?? globalThis.fetch;
+  const url = `${options.baseUrl.replace(/\/+$/, "")}/capabilities`;
+  const initial: RequestInit = { method: "GET" };
+  const response = await fetcher(url, await options.protectedRequest?.({ url, ...initial }) ?? initial);
+  if (!response.ok) throw new TypeError("Application gateway capability negotiation failed");
+  const result = await response.json() as { readonly ok?: boolean; readonly value?: ApplicationGatewayCapabilities };
+  if (!result.ok || result.value?.protocolVersion !== APPLICATION_GATEWAY_PROTOCOL_VERSION) {
+    throw new TypeError("Application gateway returned an incompatible protocol version");
+  }
+  return Object.freeze(result.value);
 }
 
 async function readGatewayStream<TEvent>(
@@ -197,9 +286,9 @@ async function readGatewayStream<TEvent>(
   if (!response.ok || response.body === null) throw response;
   let resolveResult!: (result: TurnObservationResult) => void;
   const result = new Promise<TurnObservationResult>((resolve) => { resolveResult = resolve; });
+  let checkpoint = EMPTY_CHECKPOINT;
   const events = (async function* () {
     let terminal = false;
-    let checkpoint = EMPTY_CHECKPOINT;
     try {
       for await (const frame of parseServerSentEvents(response.body!)) {
         if (!frame.data) continue;
@@ -211,19 +300,22 @@ async function readGatewayStream<TEvent>(
       if (!terminal) resolveResult({ status: "disconnected", checkpoint });
     } catch { resolveResult({ status: "disconnected", checkpoint }); }
   })();
-  return { events, result, disconnect() { disconnectRequest(); } };
+  return { events, result, disconnect() {
+    disconnectRequest();
+    resolveResult({ status: "disconnected", checkpoint });
+  } };
 }
 
 /** Browser and React-Native-compatible transport for an application-owned gateway. */
-export function createApplicationGatewayTransport<TEvent = unknown, TRequest = unknown>(
-  options: ApplicationGatewayTransportOptions<TEvent>,
-): ConversationTransport<TEvent, TRequest> {
+export function createApplicationGatewayTransport<TEvent = unknown, TRequest = unknown, TSynchronization = unknown>(
+  options: ApplicationGatewayTransportOptions<TEvent, TSynchronization>,
+): ConversationTransport<TEvent, TRequest, AttachmentUploadAdapter<ApplicationGatewayAttachmentSource>, ApplicationGatewayPresenceClient, TSynchronization> {
   const fetcher = options.fetch ?? globalThis.fetch;
   const base = options.baseUrl.replace(/\/+$/, "");
   const decode = options.decodeEvent ?? ((value: unknown) => value as TEvent);
   const invoke = async (path: string, payload: unknown, signal?: AbortSignal): Promise<Response> => {
     const url = `${base}${path}`;
-    const initial: RequestInit = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload), signal };
+    const initial: RequestInit = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload), ...(signal ? { signal } : {}) };
     return fetcher(url, await options.protectedRequest?.({ url, ...initial }) ?? initial);
   };
   const cancellation = {
@@ -233,10 +325,22 @@ export function createApplicationGatewayTransport<TEvent = unknown, TRequest = u
     },
   };
   const negotiated = options.capabilities;
-  const capabilities: ConversationTransportCapabilities = {
-    authoritativeCancellation: negotiated?.authoritativeCancellation === false ? { supported: false } : { supported: true, capability: cancellation },
-    documentInput: { supported: false }, attachmentUpload: { supported: false },
-    presence: { supported: false }, synchronization: { supported: false },
+  const attachmentUpload = negotiated?.attachments
+    ? createGatewayAttachmentUploadAdapter(options, negotiated.attachments)
+    : null;
+  const capabilities: ConversationTransportCapabilities<AttachmentUploadAdapter<ApplicationGatewayAttachmentSource>, ApplicationGatewayPresenceClient, TSynchronization> = {
+    authoritativeCancellation: negotiated?.authoritativeCancellation === true
+      ? { supported: true, capability: cancellation }
+      : { supported: false },
+    documentInput: { supported: false }, attachmentUpload: attachmentUpload
+      ? { supported: true, capability: attachmentUpload }
+      : { supported: false },
+    presence: negotiated?.presence === true
+      ? { supported: true, capability: createGatewayPresenceClient(options) }
+      : { supported: false },
+    synchronization: negotiated?.synchronization === true && options.synchronization !== undefined
+      ? { supported: true, capability: options.synchronization }
+      : { supported: false },
   };
   return Object.freeze({
     capabilities,

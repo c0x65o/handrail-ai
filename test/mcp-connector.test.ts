@@ -1,0 +1,38 @@
+import { describe, expect, it, vi } from "vitest";
+import { createMcpConnectorAdapter } from "../src/mcp/index.js";
+
+describe("MCP connector adapter", () => {
+  it("authorizes discovery and execution and forwards tool-call idempotency", async () => {
+    const authorize = vi.fn(async () => "allow" as const);
+    const callTool = vi.fn(async () => ({ ok: true } as const));
+    const adapter = createMcpConnectorAdapter({
+      connectorId: "erp", namespace: "aegis", authorize,
+      executionContext: (context: { applicationContext: { actor: string } }) => context.applicationContext,
+      client: {
+        async listTools() { return { tools: [{ name: "get_asset", description: "Get an asset", inputSchema: { type: "object", additionalProperties: false } }] }; },
+        callTool,
+      },
+    });
+    const registrations = await adapter.registrations({ actor: "owner" });
+    const values = [];
+    for await (const registration of registrations) values.push(registration);
+    expect(values[0]?.definition.name).toBe("aegis.get_asset");
+    const result = await values[0]!.executor({}, {
+      applicationContext: { actor: "owner" }, definition: values[0]!.definition,
+      signal: new AbortController().signal, toolCallId: "call-123",
+    });
+    expect(result).toEqual({ ok: true });
+    expect(callTool).toHaveBeenCalledWith(expect.objectContaining({ name: "get_asset", idempotencyKey: "call-123" }));
+    expect(authorize).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not disclose a catalog when discovery is denied", async () => {
+    const listTools = vi.fn();
+    const adapter = createMcpConnectorAdapter({
+      connectorId: "private", authorize: async () => "deny" as const, executionContext: (context) => context.applicationContext,
+      client: { listTools, async callTool() { return null; } },
+    });
+    expect(await adapter.registrations({})).toEqual([]);
+    expect(listTools).not.toHaveBeenCalled();
+  });
+});
