@@ -1,6 +1,6 @@
 {
   "name": "@handrail/ai",
-  "version": "0.1.38",
+  "version": "0.1.39",
   "description": "Provider-neutral TypeScript primitives and runtime tooling for building AI applications with Handrail.",
   "license": "UNLICENSED",
   "type": "module",
@@ -27,10 +27,25 @@
       "import": "./dist/server/managed.js",
       "default": "./dist/server/managed.js"
     },
+    "./server/trusted-server": {
+      "types": "./dist/server/trusted-server.d.ts",
+      "import": "./dist/server/trusted-server.js",
+      "default": "./dist/server/trusted-server.js"
+    },
     "./providers/openai": {
       "types": "./dist/providers/openai.d.ts",
       "import": "./dist/providers/openai.js",
       "default": "./dist/providers/openai.js"
+    },
+    "./providers/openai/transcription": {
+      "types": "./dist/providers/openai-transcription.d.ts",
+      "import": "./dist/providers/openai-transcription.js",
+      "default": "./dist/providers/openai-transcription.js"
+    },
+    "./providers/openai/realtime": {
+      "types": "./dist/providers/openai-realtime.d.ts",
+      "import": "./dist/providers/openai-realtime.js",
+      "default": "./dist/providers/openai-realtime.js"
     },
     "./providers/anthropic": {
       "types": "./dist/providers/anthropic.d.ts",
@@ -60,6 +75,7 @@
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json",
     "check:examples": "npm run build && node scripts/check-readme-examples.mjs",
+    "check:protected-web-search-example": "npm run build && node scripts/check-protected-web-search-example.mjs",
     "check:package-contract": "npm run build && node --test test/package-contract.test.mjs",
     "check:public-surface": "node scripts/check-provider-public-surface.mjs",
     "check:vite-consumer": "npm run build && node scripts/check-vite-consumer.mjs && node scripts/check-browser-attachments-vite.mjs",

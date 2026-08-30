@@ -1,4 +1,7 @@
 import {
+  AI_RUNTIME_ATTACHMENT_ID_GRAMMAR,
+  AI_RUNTIME_CONTENT_REFERENCE_GRAMMAR,
+  AI_RUNTIME_PROTOCOL_LIMITS,
   AI_RUNTIME_PROTOCOL_VERSION,
   type ApplicationToolResult,
   type AttachmentReference,
@@ -8,8 +11,16 @@ import {
   type ProtocolMetadata,
   type StreamEvent,
 } from "../protocol.js";
+import {
+  CITATION_LIMITS,
+  normalizeCitationRecords,
+  normalizeCitationSource,
+  type CitationRecordSet,
+} from "../citations.js";
+import { parseProviderDocumentInputCapability } from "./index.js";
 import type {
   ClientRequestError,
+  DocumentInputCapabilityDescriptor,
   ProviderAdapter,
   ProviderAdapterError,
   ProviderAdapterInvocation,
@@ -30,6 +41,7 @@ import {
 } from "../provider-context.js";
 
 export * from "./openai-context.js";
+export * from "./openai-transcription.js";
 
 export interface OpenAIImageSource {
   readonly url: string;
@@ -46,11 +58,25 @@ export interface OpenAIChatCompletionImagePart {
   readonly image_url: OpenAIImageSource;
 }
 
+export interface OpenAIChatCompletionFileSource {
+  readonly filename: string;
+  readonly file_data: string;
+}
+
+export interface OpenAIChatCompletionFilePart {
+  readonly type: "file";
+  readonly file: OpenAIChatCompletionFileSource;
+}
+
 export interface OpenAIChatCompletionMessage {
   readonly role: "user" | "assistant";
   readonly content:
     | string
-    | readonly (OpenAIChatCompletionTextPart | OpenAIChatCompletionImagePart)[];
+    | readonly (
+        | OpenAIChatCompletionTextPart
+        | OpenAIChatCompletionImagePart
+        | OpenAIChatCompletionFilePart
+      )[];
 }
 
 export interface OpenAIChatCompletionToolResultMessage {
@@ -121,6 +147,8 @@ export interface OpenAIProviderAdapterOptions {
   readonly measure_context?: OpenAIProviderContextMeasureRequestFunction;
   readonly compact_context?: OpenAIProviderContextCompactRequestFunction;
   readonly resolve_image_reference?: OpenAIImageReferenceResolver;
+  /** Explicit PDF limits; document input remains unsupported when omitted. */
+  readonly document_input?: DocumentInputCapabilityDescriptor;
   readonly context_window_tokens?: number | null;
   readonly max_output_tokens?: number | null;
   readonly supports_tool_calls?: boolean;
@@ -141,11 +169,57 @@ interface ParsedCompletion {
     name: string;
     arguments: JsonObject;
   }[];
+  citationRecords: CitationRecordSet;
   usage: ProviderUsage;
 }
 
+interface OpenAIUrlCitationAnnotation {
+  readonly type: "url_citation";
+  readonly startIndex: number;
+  readonly endIndex: number;
+  readonly title: string;
+  readonly url: string;
+}
+
+interface OpenAIFileCitationAnnotation {
+  readonly type: "file_citation";
+  readonly index: number;
+  readonly fileId: string;
+  readonly filename: string;
+}
+
+type OpenAIRecognizedAnnotation =
+  | OpenAIUrlCitationAnnotation
+  | OpenAIFileCitationAnnotation;
+
 class OpenAIPreflightError extends Error {}
 class OpenAIMalformedStreamError extends Error {}
+
+const ATTACHMENT_ID_PATTERN = new RegExp(AI_RUNTIME_ATTACHMENT_ID_GRAMMAR);
+const CONTENT_REFERENCE_PATTERN = new RegExp(
+  AI_RUNTIME_CONTENT_REFERENCE_GRAMMAR,
+);
+const CREDENTIAL_VALUE_PATTERNS = [
+  /\bbearer\s+[a-z0-9._~+/=-]{8,}/i,
+  /(?:^|[^a-z0-9])sk-[a-z0-9_-]{8,}\b/i,
+  /-----begin (?:rsa |ec |openssh )?private key-----/i,
+] as const;
+const BASE64_ALPHABET =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+function opaqueHash(value: string): string {
+  let first = 0x811c9dc5;
+  let second = 0x9e3779b9;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    first = Math.imul(first ^ code, 0x01000193);
+    second = Math.imul(second ^ code, 0x85ebca6b);
+    second ^= second >>> 13;
+  }
+  return `${(first >>> 0).toString(16).padStart(8, "0")}${(second >>> 0)
+    .toString(16)
+    .padStart(8, "0")}`;
+}
 
 function record(value: unknown): UnknownRecord | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -157,6 +231,290 @@ function safeInteger(value: unknown): number | null {
   return Number.isSafeInteger(value) && (value as number) >= 0
     ? (value as number)
     : null;
+}
+
+function exactKeys(
+  value: UnknownRecord,
+  expected: readonly string[],
+): boolean {
+  const actual = Object.keys(value).sort();
+  const required = [...expected].sort();
+  return (
+    actual.length === required.length &&
+    actual.every((key, index) => key === required[index])
+  );
+}
+
+function boundedUpstreamString(value: unknown, maxLength: number): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > maxLength ||
+    [...value].some((character) => {
+      const codePoint = character.codePointAt(0)!;
+      return codePoint <= 31 || codePoint === 127;
+    }) ||
+    CREDENTIAL_VALUE_PATTERNS.some((pattern) => pattern.test(value))
+  ) {
+    throw new OpenAIMalformedStreamError();
+  }
+  return value;
+}
+
+function parseOpenAIAnnotation(value: unknown): OpenAIRecognizedAnnotation | null {
+  const annotation = record(value);
+  if (!annotation || typeof annotation.type !== "string") {
+    throw new OpenAIMalformedStreamError();
+  }
+  if (annotation.type === "url_citation") {
+    if (
+      !exactKeys(annotation, [
+        "type",
+        "start_index",
+        "end_index",
+        "title",
+        "url",
+      ])
+    ) {
+      throw new OpenAIMalformedStreamError();
+    }
+    const startIndex = safeInteger(annotation.start_index);
+    const endIndex = safeInteger(annotation.end_index);
+    if (startIndex === null || endIndex === null || endIndex < startIndex) {
+      throw new OpenAIMalformedStreamError();
+    }
+    return {
+      type: "url_citation",
+      startIndex,
+      endIndex,
+      title: boundedUpstreamString(
+        annotation.title,
+        CITATION_LIMITS.labelLength,
+      ),
+      url: boundedUpstreamString(
+        annotation.url,
+        CITATION_LIMITS.locatorLength,
+      ),
+    };
+  }
+  if (annotation.type === "file_citation") {
+    if (!exactKeys(annotation, ["type", "index", "file_id", "filename"])) {
+      throw new OpenAIMalformedStreamError();
+    }
+    const index = safeInteger(annotation.index);
+    if (index === null) throw new OpenAIMalformedStreamError();
+    return {
+      type: "file_citation",
+      index,
+      fileId: boundedUpstreamString(
+        annotation.file_id,
+        CITATION_LIMITS.identifierLength,
+      ),
+      filename: boundedUpstreamString(
+        annotation.filename,
+        CITATION_LIMITS.labelLength,
+      ),
+    };
+  }
+
+  // Unknown OpenAI annotation types are intentionally ignored. Their payloads
+  // are neither inspected nor retained at the provider-neutral boundary.
+  return null;
+}
+
+function normalizeOpenAIAnnotations(
+  annotations: readonly OpenAIRecognizedAnnotation[],
+  requestId: string,
+  traceId: string,
+): CitationRecordSet {
+  const target = {
+    type: "assistant_message" as const,
+    message_id: `assistant:${opaqueHash(`${requestId}\u0000${traceId}`)}`,
+  };
+  const sources: unknown[] = [];
+  const citations: unknown[] = [];
+  const seenAnnotations = new Set<string>();
+  const seenSources = new Map<string, string>();
+
+  for (const annotation of annotations) {
+    let source: ReturnType<typeof normalizeCitationSource>;
+    let annotationIdentity: string;
+    if (annotation.type === "url_citation") {
+      const canonical = normalizeCitationSource({
+        source_id: "source:pending",
+        type: "web",
+        label: annotation.title,
+        locator: annotation.url,
+      });
+      const sourceHash = opaqueHash(`url\u0000${canonical.locator}`);
+      source = normalizeCitationSource({
+        ...canonical,
+        source_id: `source:${sourceHash}`,
+      });
+      annotationIdentity = JSON.stringify([
+        annotation.type,
+        annotation.startIndex,
+        annotation.endIndex,
+        source.label,
+        source.locator,
+      ]);
+    } else {
+      const sourceHash = opaqueHash(`file\u0000${annotation.fileId}`);
+      source = normalizeCitationSource({
+        source_id: `source:${sourceHash}`,
+        type: "document",
+        label: annotation.filename,
+        locator: `document:${sourceHash}`,
+      });
+      annotationIdentity = JSON.stringify([
+        annotation.type,
+        annotation.index,
+        annotation.fileId,
+        source.label,
+      ]);
+    }
+    if (seenAnnotations.has(annotationIdentity)) continue;
+    seenAnnotations.add(annotationIdentity);
+    const sourceFingerprint = JSON.stringify(source);
+    const previousSource = seenSources.get(source.source_id);
+    if (previousSource === undefined) {
+      seenSources.set(source.source_id, sourceFingerprint);
+      sources.push(source);
+    } else if (previousSource !== sourceFingerprint) {
+      // Retain a conflicting identity so the shared parser remains the
+      // authoritative rejection path for provider-neutral source records.
+      sources.push(source);
+    }
+    const order = citations.length;
+    citations.push({
+      citation_id: `citation:${opaqueHash(annotationIdentity)}`,
+      source_id: source.source_id,
+      order,
+      target,
+    });
+  }
+
+  try {
+    return normalizeCitationRecords({ sources, citations });
+  } catch {
+    throw new OpenAIMalformedStreamError();
+  }
+}
+
+function aborted(): never {
+  throw new DOMException("Aborted", "AbortError");
+}
+
+function rejectCredentialMaterial(value: string): void {
+  if (CREDENTIAL_VALUE_PATTERNS.some((pattern) => pattern.test(value))) {
+    throw new OpenAIPreflightError();
+  }
+}
+
+function safeFilename(value: unknown): value is string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > AI_RUNTIME_PROTOCOL_LIMITS.attachmentFilenameLength ||
+    value === "." ||
+    value === ".." ||
+    CREDENTIAL_VALUE_PATTERNS.some((pattern) => pattern.test(value))
+  ) {
+    return false;
+  }
+  return ![...value].some((character) => {
+    const codePoint = character.codePointAt(0)!;
+    return (
+      codePoint <= 31 ||
+      codePoint === 127 ||
+      '<>:"/\\|?*'.includes(character)
+    );
+  });
+}
+
+function validateDocumentAttachment(
+  attachment: AttachmentReference,
+  maxDocumentBytes: number,
+): void {
+  const attachmentRecord = record(attachment);
+  const attachmentKeys = attachmentRecord
+    ? Object.keys(attachmentRecord).sort()
+    : [];
+  const allowedKeys = [
+    "attachment_id",
+    "byte_size",
+    "content_ref",
+    "filename",
+    "media_type",
+  ];
+  if (
+    !attachmentRecord ||
+    attachmentKeys.some((key) => !allowedKeys.includes(key)) ||
+    !["attachment_id", "byte_size", "content_ref", "media_type"].every(
+      (key) => attachmentKeys.includes(key),
+    ) ||
+    typeof attachment.attachment_id !== "string" ||
+    !ATTACHMENT_ID_PATTERN.test(attachment.attachment_id) ||
+    typeof attachment.content_ref !== "string" ||
+    /^(?:data|blob|https?):/i.test(attachment.content_ref) ||
+    !CONTENT_REFERENCE_PATTERN.test(attachment.content_ref) ||
+    attachment.media_type !== "application/pdf" ||
+    !Number.isSafeInteger(attachment.byte_size) ||
+    attachment.byte_size < AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMinBytes ||
+    attachment.byte_size > maxDocumentBytes ||
+    (attachment.filename !== undefined && !safeFilename(attachment.filename))
+  ) {
+    throw new OpenAIPreflightError();
+  }
+  rejectCredentialMaterial(attachment.attachment_id);
+  rejectCredentialMaterial(attachment.content_ref);
+}
+
+function base64(bytes: Uint8Array): string {
+  const chunks: string[] = [];
+  let chunk = "";
+  for (let index = 0; index < bytes.length; index += 3) {
+    const first = bytes[index]!;
+    const hasSecond = index + 1 < bytes.length;
+    const hasThird = index + 2 < bytes.length;
+    const second = hasSecond ? bytes[index + 1]! : 0;
+    const third = hasThird ? bytes[index + 2]! : 0;
+    chunk +=
+      BASE64_ALPHABET[first >> 2]! +
+      BASE64_ALPHABET[((first & 3) << 4) | (second >> 4)]! +
+      (hasSecond
+        ? BASE64_ALPHABET[((second & 15) << 2) | (third >> 6)]!
+        : "=") +
+      (hasThird ? BASE64_ALPHABET[third & 63]! : "=");
+    if (chunk.length >= 16_384) {
+      chunks.push(chunk);
+      chunk = "";
+    }
+  }
+  if (chunk.length > 0) chunks.push(chunk);
+  return chunks.join("");
+}
+
+async function resolveWithAbort<T>(
+  resolution: T | Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  return await new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve(resolution).then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        if (signal.aborted) reject(new DOMException("Aborted", "AbortError"));
+        else resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+    if (signal.aborted) onAbort();
+  });
 }
 
 function setStableFragment(
@@ -244,6 +602,8 @@ function toolResultContent(result: ApplicationToolResult): string {
 async function mapMessage(
   message: ChatMessage,
   resolveImageReference: OpenAIImageReferenceResolver | undefined,
+  invocation: ProviderAdapterInvocation,
+  maxDocumentBytes: number | null,
 ): Promise<OpenAIChatCompletionMessage> {
   if (message.content.every((part) => part.type === "text")) {
     return {
@@ -252,24 +612,69 @@ async function mapMessage(
     };
   }
 
-  const content: (OpenAIChatCompletionTextPart | OpenAIChatCompletionImagePart)[] = [];
+  const content: (
+    | OpenAIChatCompletionTextPart
+    | OpenAIChatCompletionImagePart
+    | OpenAIChatCompletionFilePart
+  )[] = [];
   for (const part of message.content) {
+    if (invocation.signal.aborted) aborted();
     if (part.type === "text") {
       content.push({ type: "text", text: part.text });
       continue;
     }
-    if (!resolveImageReference) throw new OpenAIPreflightError();
-    const source = await resolveImageReference(part.attachment);
+    if (part.type === "image") {
+      if (!resolveImageReference) throw new OpenAIPreflightError();
+      const source = await resolveWithAbort(
+        resolveImageReference(part.attachment),
+        invocation.signal,
+      );
+      if (
+        !source ||
+        typeof source.url !== "string" ||
+        source.url.length === 0 ||
+        (source.detail !== undefined &&
+          !["auto", "low", "high"].includes(source.detail))
+      ) {
+        throw new OpenAIPreflightError();
+      }
+      content.push({ type: "image_url", image_url: source });
+      continue;
+    }
+
+    if (maxDocumentBytes === null || !invocation.resolve_document_reference) {
+      throw new OpenAIPreflightError();
+    }
+    const resolved = await resolveWithAbort(
+      invocation.resolve_document_reference(part.attachment, {
+        signal: invocation.signal,
+      }),
+      invocation.signal,
+    );
+    const resolvedRecord = record(resolved);
     if (
-      !source ||
-      typeof source.url !== "string" ||
-      source.url.length === 0 ||
-      (source.detail !== undefined &&
-        !["auto", "low", "high"].includes(source.detail))
+      !resolvedRecord ||
+      Object.keys(resolvedRecord).sort().join(",") !== "bytes,media_type" ||
+      resolved.media_type !== "application/pdf" ||
+      !(resolved.bytes instanceof Uint8Array) ||
+      resolved.bytes.length !== part.attachment.byte_size ||
+      resolved.bytes.length <
+        AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMinBytes ||
+      resolved.bytes.length > maxDocumentBytes
     ) {
       throw new OpenAIPreflightError();
     }
-    content.push({ type: "image_url", image_url: source });
+    const filename =
+      part.attachment.filename ??
+      `${part.attachment.attachment_id.slice(0, 251)}.pdf`;
+    if (!safeFilename(filename)) throw new OpenAIPreflightError();
+    content.push({
+      type: "file",
+      file: {
+        filename,
+        file_data: `data:application/pdf;base64,${base64(resolved.bytes)}`,
+      },
+    });
   }
   return { role: message.role, content };
 }
@@ -438,6 +843,24 @@ export class OpenAIProviderAdapter implements ProviderAdapter {
     }
     this.request = options.request;
     this.resolveImageReference = options.resolve_image_reference;
+    const documentInput =
+      options.document_input === undefined
+        ? parseProviderDocumentInputCapability({ supported: false })
+        : parseProviderDocumentInputCapability({
+            supported: true,
+            capability: options.document_input,
+          });
+    if (
+      documentInput.supported &&
+      (!documentInput.capability.supported_mime_types.includes(
+        "application/pdf",
+      ) ||
+        !documentInput.capability.requires_host_resolution)
+    ) {
+      throw new TypeError(
+        "document_input must support application/pdf through host resolution",
+      );
+    }
     this.provider_context = createOpenAIProviderContextCapability({
       model: options.model,
       ...(options.measure_context === undefined
@@ -456,7 +879,8 @@ export class OpenAIProviderAdapter implements ProviderAdapter {
         tool_calls: options.supports_tool_calls ?? true,
         parallel_tool_calls: false,
         reasoning: true,
-        document_input: { supported: false },
+        document_input: documentInput,
+        citation_projection: { supported: true },
         provider_context: describeProviderContextCapability(this.provider_context),
         context_window_tokens: options.context_window_tokens ?? null,
         max_output_tokens: options.max_output_tokens ?? null,
@@ -485,12 +909,34 @@ export class OpenAIProviderAdapter implements ProviderAdapter {
     ) {
       throw new OpenAIPreflightError();
     }
-    if (
-      invocation.messages.some((message) =>
-        message.content.some((part) => part.type === "document"),
-      )
-    ) {
-      throw new OpenAIPreflightError();
+    const documentParts = invocation.messages.flatMap((message) =>
+      message.content.filter((part) => part.type === "document"),
+    );
+    const documentInput = this.metadata.capabilities.document_input;
+    if (documentParts.length > 0) {
+      if (
+        !documentInput.supported ||
+        !invocation.resolve_document_reference ||
+        documentParts.length > documentInput.capability.max_document_count ||
+        invocation.messages.some(
+          (message) =>
+            message.content.filter((part) => part.type === "document").length >
+            AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentsPerMessage,
+        ) ||
+        invocation.messages.some(
+          (message) =>
+            message.role === "assistant" &&
+            message.content.some((part) => part.type === "document"),
+        )
+      ) {
+        throw new OpenAIPreflightError();
+      }
+      for (const part of documentParts) {
+        validateDocumentAttachment(
+          part.attachment,
+          documentInput.capability.max_document_bytes,
+        );
+      }
     }
     if (
       invocation.messages.some(
@@ -506,11 +952,19 @@ export class OpenAIProviderAdapter implements ProviderAdapter {
       throw new OpenAIPreflightError();
     }
 
-    const messages = await Promise.all(
-      invocation.messages.map((message) =>
-        mapMessage(message, this.resolveImageReference),
-      ),
-    );
+    const messages: OpenAIChatCompletionMessage[] = [];
+    for (const message of invocation.messages) {
+      messages.push(
+        await mapMessage(
+          message,
+          this.resolveImageReference,
+          invocation,
+          documentInput.supported
+            ? documentInput.capability.max_document_bytes
+            : null,
+        ),
+      );
+    }
     const toolResults: OpenAIChatCompletionToolResultMessage[] =
       invocation.tool_results.map((result) => ({
         role: "tool",
@@ -581,6 +1035,7 @@ export class OpenAIProviderAdapter implements ProviderAdapter {
       }
 
       const toolCalls = new Map<number, ToolCallAssembly>();
+      const annotations: OpenAIRecognizedAnnotation[] = [];
       let finishReason: string | null = null;
       let usage: ProviderUsage | null = null;
 
@@ -645,6 +1100,19 @@ export class OpenAIProviderAdapter implements ProviderAdapter {
             toolCalls.set(index, assembly);
           }
         }
+        if (delta?.annotations !== undefined) {
+          if (!Array.isArray(delta.annotations)) {
+            throw new OpenAIMalformedStreamError();
+          }
+          for (const annotationValue of delta.annotations) {
+            const annotation = parseOpenAIAnnotation(annotationValue);
+            if (annotation === null) continue;
+            if (annotations.length >= CITATION_LIMITS.citationsPerRecordSet) {
+              throw new OpenAIMalformedStreamError();
+            }
+            annotations.push(annotation);
+          }
+        }
 
         if (choice.finish_reason !== undefined && choice.finish_reason !== null) {
           if (
@@ -658,6 +1126,16 @@ export class OpenAIProviderAdapter implements ProviderAdapter {
       }
 
       if (!usage || finishReason === null) throw new OpenAIMalformedStreamError();
+      let citationRecords: CitationRecordSet;
+      try {
+        citationRecords = normalizeOpenAIAnnotations(
+          annotations,
+          invocation.context.request_id,
+          invocation.context.trace_id,
+        );
+      } catch {
+        throw new OpenAIMalformedStreamError();
+      }
       if (finishReason === "content_filter") {
         const policyError: ProviderAdapterError = {
           kind: "policy",
@@ -724,7 +1202,12 @@ export class OpenAIProviderAdapter implements ProviderAdapter {
       ) {
         throw new OpenAIMalformedStreamError();
       }
-      parsed = { outcome, toolCalls: completedToolCalls, usage };
+      parsed = {
+        outcome,
+        toolCalls: completedToolCalls,
+        citationRecords,
+        usage,
+      };
     } catch (error) {
       if (isAbortError(error, invocation.signal)) {
         const reason = cancellationReason(invocation.signal);
@@ -749,6 +1232,19 @@ export class OpenAIProviderAdapter implements ProviderAdapter {
         ...envelope(invocation, "response.tool_call", sequence++),
         type: "response.tool_call",
         ...toolCall,
+      };
+    }
+    if (parsed.citationRecords.citations.length > 0) {
+      const firstCitation = parsed.citationRecords.citations[0]!;
+      if (firstCitation.target.type !== "assistant_message") {
+        throw new OpenAIMalformedStreamError();
+      }
+      yield {
+        ...envelope(invocation, "response.citation_batch", sequence++),
+        type: "response.citation_batch",
+        target: firstCitation.target,
+        sources: parsed.citationRecords.sources,
+        citations: parsed.citationRecords.citations,
       };
     }
     yield {

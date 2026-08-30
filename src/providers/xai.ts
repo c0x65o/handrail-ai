@@ -390,6 +390,7 @@ export class XAIProviderAdapter implements ProviderAdapter {
         parallel_tool_calls: false,
         reasoning: options.supports_reasoning ?? false,
         document_input: { supported: false },
+        citation_projection: { supported: false },
         provider_context: this.provider_context,
         context_window_tokens: options.context_window_tokens ?? null,
         max_output_tokens: options.max_output_tokens ?? null,

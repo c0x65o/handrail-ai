@@ -6,6 +6,7 @@ export * from "./event-store.js";
 export * from "./events.js";
 export * from "./reducer.js";
 export * from "./replay.js";
+export * from "./runtime-registry.js";
 export * from "./state.js";
 export * from "./state-validation.js";
 export * from "./store.js";

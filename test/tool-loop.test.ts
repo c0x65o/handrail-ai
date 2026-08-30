@@ -13,6 +13,9 @@ import {
   type ApplicationToolExecutor,
   type ApplicationToolOutputProjection,
   type ApplicationToolPolicy,
+  type ApprovalExecutionCoordinator,
+  type ConversationApprovalProposalId,
+  type ConversationEventAttribution,
   type AppendConversationEventsInput,
   type AppendConversationEventsResult,
   type AuthoritativeAttribution,
@@ -392,6 +395,77 @@ describe("runToolLoop", () => {
     });
     expect(resumed).toMatchObject({ status: "completed", iterations: 1, totalToolCalls: 1 });
     expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it("resumes through trusted proposal evidence while policy still requires approval", async () => {
+    const execute = vi.fn<ApplicationToolExecutor>(async () => "approved once");
+    const policy = vi.fn<ApplicationToolPolicy>(() => ({
+      outcome: "external_approval_required",
+    }));
+    const h = await harness([
+      { requestId: "request_durable_approval_1", calls: [{ id: "call_durable_approval" }], outcome: "tool_calls" },
+      { requestId: "request_durable_approval_2", outcome: "stop" },
+    ], execute, policy);
+    const paused = await run(h);
+    expect(paused.status).toBe("external_approval_required");
+
+    const approvalCoordinator: ApprovalExecutionCoordinator<string> = {
+      claim: vi.fn(async (input) => {
+        expect(input).toMatchObject({
+          conversationId,
+          turnId: paused.turn.turnId,
+          toolCallId: "call_durable_approval",
+          toolName: "lookup",
+          expectedProposalVersion: 2,
+        });
+        return {
+          outcome: "claimed",
+          proposalId: input.proposalId,
+          executingVersion: 3,
+          executionId: input.executionId,
+        } as const;
+      }),
+      settle: vi.fn(async () => ({ outcome: "recorded", proposalVersion: 4 } as const)),
+    };
+    const resumedRegistry = new ToolRegistry<ApplicationToolExecutor, undefined>();
+    resumedRegistry.register({ definition: toolDefinition(), executor: execute });
+    const resumedExecutor = new BoundedToolExecutor({
+      registry: resumedRegistry,
+      policy,
+      approvalCoordinator,
+    });
+    const executionAttribution = {
+      actor: { type: "system", id: "trusted-tool-host" },
+      source: { type: "runtime" },
+    } as unknown as ConversationEventAttribution;
+
+    const resumed = await runToolLoop({
+      runtime: h.runtime,
+      initialTurn: paused.turn,
+      request: paused.request,
+      discoveredTools: resumedRegistry.discover({ context: undefined }),
+      executor: resumedExecutor,
+      applicationContext: undefined,
+      progress: paused.progress,
+      resolveApprovalResume: () => ({
+        permissionContext: "allowed",
+        proposalId: "proposal-durable-approval" as ConversationApprovalProposalId,
+        expectedProposalVersion: 2,
+        executionId: "execute-durable-approval",
+        argumentBinding: {
+          type: "reviewed_arguments_digest",
+          digest: "digest-durable-approval",
+        },
+        attribution: executionAttribution,
+      }),
+      now: () => 1,
+    });
+
+    expect(resumed).toMatchObject({ status: "completed", iterations: 1, totalToolCalls: 1 });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(approvalCoordinator.claim).toHaveBeenCalledOnce();
+    expect(approvalCoordinator.settle).toHaveBeenCalledOnce();
+    expect(policy).toHaveBeenCalledTimes(2);
   });
 
   it("uses durable results and continuation identity to make duplicate replay side-effect safe", async () => {

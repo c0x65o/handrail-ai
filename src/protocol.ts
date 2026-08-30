@@ -1,6 +1,9 @@
 import {
   normalizeCitationRecords,
+  type AssistantMessageCitationTarget,
+  type Citation,
   type CitationRecordSet,
+  type CitationSource,
 } from "./citations.js";
 
 export const AI_RUNTIME_PROTOCOL_VERSION = "handrail.ai-runtime.v1" as const;
@@ -9,6 +12,7 @@ export const AI_RUNTIME_STREAM_EVENT_TYPES = [
   "response.started",
   "response.text.delta",
   "response.tool_call",
+  "response.citation_batch",
   "response.usage",
   "response.completed",
   "response.cancelled",
@@ -254,6 +258,17 @@ export interface ResponseToolCallEvent extends StreamEventEnvelope {
   arguments: JsonObject;
 }
 
+/**
+ * A checked provider-neutral batch linked to one stable assistant output.
+ * Providers must emit deterministic, contiguous citation order across batches.
+ */
+export interface ResponseCitationBatchEvent extends StreamEventEnvelope {
+  type: "response.citation_batch";
+  target: AssistantMessageCitationTarget;
+  sources: readonly CitationSource[];
+  citations: readonly Citation[];
+}
+
 export interface Usage {
   input_tokens: number;
   output_tokens: number;
@@ -291,6 +306,7 @@ export type StreamEvent =
   | ResponseStartedEvent
   | ResponseTextDeltaEvent
   | ResponseToolCallEvent
+  | ResponseCitationBatchEvent
   | ResponseUsageEvent
   | ResponseCompletedEvent
   | ResponseCancelledEvent
@@ -1121,6 +1137,71 @@ function validateUsage(value: unknown, path: string): asserts value is Usage {
   }
 }
 
+function validateCitationBatch(
+  object: UnknownRecord,
+  path: string,
+): void {
+  validateEnvelope(object, path, ["target", "sources", "citations"]);
+  requiredKeys(object, ["target", "sources", "citations"], path);
+
+  let records: CitationRecordSet;
+  try {
+    records = normalizeCitationRecords({
+      sources: object.sources,
+      citations: object.citations,
+    });
+  } catch (error) {
+    fail(
+      path,
+      error instanceof Error
+        ? error.message
+        : "contains invalid citation records",
+    );
+  }
+  if (records.citations.length === 0) {
+    fail(`${path}.citations`, "must contain at least one citation link");
+  }
+  if (
+    JSON.stringify(records.sources) !== JSON.stringify(object.sources) ||
+    JSON.stringify(records.citations) !== JSON.stringify(object.citations)
+  ) {
+    fail(
+      path,
+      "citation records must already be normalized and identity-deduplicated",
+    );
+  }
+
+  const target = record(object.target, `${path}.target`);
+  requiredKeys(target, ["type", "message_id"], `${path}.target`);
+  allowedKeys(target, ["type", "message_id"], `${path}.target`);
+  if (target.type !== "assistant_message") {
+    fail(`${path}.target.type`, 'must equal "assistant_message"');
+  }
+
+  let previousOrder: number | undefined;
+  for (const [index, citation] of records.citations.entries()) {
+    if (
+      citation.target.type !== "assistant_message" ||
+      citation.target.message_id !== target.message_id
+    ) {
+      fail(
+        `${path}.citations[${index}].target`,
+        "must match the assistant output target",
+      );
+    }
+    if (
+      previousOrder !== undefined &&
+      citation.order !== previousOrder + 1
+    ) {
+      fail(
+        `${path}.citations[${index}].order`,
+        "must be contiguous and strictly increasing within the batch",
+      );
+    }
+    previousOrder = citation.order;
+  }
+}
+
 function validatePublicError(value: unknown, path: string): asserts value is PublicError {
   const object = record(value, path);
   const keys = ["category", "code", "message", "retryable"] as const;
@@ -1160,6 +1241,9 @@ export function parseStreamEvent(value: unknown): StreamEvent {
       stringValue(object.name, "$event.name");
       record(object.arguments, "$event.arguments");
       validateCredentialsAbsent(object.arguments, "$event.arguments");
+      break;
+    case "response.citation_batch":
+      validateCitationBatch(object, "$event");
       break;
     case "response.usage":
       validateEnvelope(object, "$event", ["usage"]);
@@ -1202,6 +1286,10 @@ export function parseStreamEvents(value: unknown): StreamEvent[] {
   let lastUsage: Usage | undefined;
   let toolCallCount = 0;
   const toolCallIds = new Set<string>();
+  let citationTargetId: string | undefined;
+  let nextCitationOrder = 0;
+  const citationIds = new Set<string>();
+  const citationSources = new Map<string, string>();
 
   events.forEach((event, index) => {
     if (event.request_id !== requestId) fail(`$events[${index}].request_id`, "must match the stream request_id");
@@ -1235,6 +1323,45 @@ export function parseStreamEvents(value: unknown): StreamEvent[] {
         fail(`$events[${index}].tool_call_id`, "must be unique within the stream");
       }
       toolCallIds.add(event.tool_call_id);
+    }
+    if (event.type === "response.citation_batch") {
+      if (
+        citationTargetId !== undefined &&
+        event.target.message_id !== citationTargetId
+      ) {
+        fail(
+          `$events[${index}].target.message_id`,
+          "must match the stream assistant output target",
+        );
+      }
+      citationTargetId ??= event.target.message_id;
+      for (const [sourceIndex, source] of event.sources.entries()) {
+        const fingerprint = JSON.stringify(source);
+        const previous = citationSources.get(source.source_id);
+        if (previous !== undefined && previous !== fingerprint) {
+          fail(
+            `$events[${index}].sources[${sourceIndex}].source_id`,
+            "conflicts with an earlier source identity",
+          );
+        }
+        citationSources.set(source.source_id, fingerprint);
+      }
+      for (const [citationIndex, citation] of event.citations.entries()) {
+        if (citation.order !== nextCitationOrder) {
+          fail(
+            `$events[${index}].citations[${citationIndex}].order`,
+            `must equal ${nextCitationOrder}`,
+          );
+        }
+        if (citationIds.has(citation.citation_id)) {
+          fail(
+            `$events[${index}].citations[${citationIndex}].citation_id`,
+            "must be unique within the stream",
+          );
+        }
+        citationIds.add(citation.citation_id);
+        nextCitationOrder += 1;
+      }
     }
   });
 

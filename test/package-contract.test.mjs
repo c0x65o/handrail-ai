@@ -30,6 +30,14 @@ test("declares managed runtime support as an explicit trusted-server boundary", 
   });
 });
 
+test("declares request protection as an explicit trusted-server boundary", () => {
+  assert.deepEqual(packageJson.exports["./server/trusted-server"], {
+    types: "./dist/server/trusted-server.d.ts",
+    import: "./dist/server/trusted-server.js",
+    default: "./dist/server/trusted-server.js",
+  });
+});
+
 test("declares OpenAI as an explicit opt-in provider boundary", () => {
   assert.deepEqual(packageJson.exports["./providers/openai"], {
     types: "./dist/providers/openai.d.ts",
@@ -37,6 +45,23 @@ test("declares OpenAI as an explicit opt-in provider boundary", () => {
     default: "./dist/providers/openai.js",
   });
   assert.equal(packageJson.dependencies.openai, undefined);
+});
+
+test("declares OpenAI voice features as dedicated opt-in provider boundaries", () => {
+  assert.deepEqual(packageJson.exports["./providers/openai/transcription"], {
+    types: "./dist/providers/openai-transcription.d.ts",
+    import: "./dist/providers/openai-transcription.js",
+    default: "./dist/providers/openai-transcription.js",
+  });
+  assert.deepEqual(packageJson.exports["./providers/openai/realtime"], {
+    types: "./dist/providers/openai-realtime.d.ts",
+    import: "./dist/providers/openai-realtime.js",
+    default: "./dist/providers/openai-realtime.js",
+  });
+  assert.equal(packageJson.dependencies.openai, undefined);
+  assert.equal(packageJson.devDependencies.openai, undefined);
+  assert.equal(packageJson.peerDependencies.openai, undefined);
+  assert.equal(packageJson.optionalDependencies?.openai, undefined);
 });
 
 test("declares Anthropic as an explicit opt-in provider boundary", () => {
@@ -88,6 +113,46 @@ test("exports citation records and normalization from the built core entry", asy
   assert.equal(typeof imported.deduplicateCitationRecords, "function");
 });
 
+test("exports bounded web search without an HTTP or provider dependency", async () => {
+  const moduleUrl = pathToFileURL(
+    path.join(packageRoot, packageJson.exports["."].import),
+  ).href;
+  const imported = await import(moduleUrl);
+  assert.equal(typeof imported.WEB_SEARCH_LIMITS, "object");
+  assert.equal(typeof imported.WebSearchService, "function");
+  assert.equal(typeof imported.WebSearchError, "function");
+  assert.equal(typeof imported.createWebSearchCitationRecords, "function");
+  assert.equal(typeof imported.createWebSearchToolRegistration, "function");
+  assert.equal(imported.fetch, undefined);
+  assert.equal(imported.OpenAI, undefined);
+});
+
+test("exports provider-neutral realtime voice without browser or provider code", async () => {
+  const moduleUrl = pathToFileURL(
+    path.join(packageRoot, packageJson.exports["."].import),
+  ).href;
+  const imported = await import(moduleUrl);
+  assert.equal(
+    imported.REALTIME_VOICE_CONTRACT_VERSION,
+    "handrail.realtime-voice.v1",
+  );
+  assert.equal(typeof imported.parseRealtimeVoiceBootstrapRequest, "function");
+  assert.equal(typeof imported.createRealtimeVoiceClientSession, "function");
+  assert.equal(
+    typeof imported.createIdempotentRealtimeVoiceSessionAuthority,
+    "function",
+  );
+  assert.equal(typeof imported.parseRealtimeVoiceServerToolCall, "function");
+  assert.equal(typeof imported.createRealtimeVoiceServerToolBridge, "function");
+  assert.equal(
+    typeof imported.InMemoryRealtimeVoiceToolCallBindingStore,
+    "function",
+  );
+  assert.equal(imported.RTCPeerConnection, undefined);
+  assert.equal(imported.OpenAI, undefined);
+  assert.equal(imported.React, undefined);
+});
+
 test("exports the provider-neutral transcription contract from the built core entry", async () => {
   const moduleUrl = pathToFileURL(
     path.join(packageRoot, packageJson.exports["."].import),
@@ -102,6 +167,135 @@ test("exports the provider-neutral transcription contract from the built core en
   assert.equal(typeof imported.executeTranscription, "function");
   assert.equal(imported.OpenAI, undefined);
   assert.equal(imported.React, undefined);
+});
+
+test("isolates OpenAI transcription to the existing opt-in provider entry", async () => {
+  const core = await import(pathToFileURL(
+    path.join(packageRoot, packageJson.exports["."].import),
+  ).href);
+  const browser = await import(pathToFileURL(
+    path.join(packageRoot, packageJson.exports["./browser"].import),
+  ).href);
+  const openai = await import(pathToFileURL(
+    path.join(packageRoot, packageJson.exports["./providers/openai"].import),
+  ).href);
+  const transcription = await import(pathToFileURL(
+    path.join(
+      packageRoot,
+      packageJson.exports["./providers/openai/transcription"].import,
+    ),
+  ).href);
+
+  assert.equal(core.createOpenAITranscriptionCapability, undefined);
+  assert.equal(browser.createOpenAITranscriptionCapability, undefined);
+  assert.equal(typeof openai.createOpenAITranscriptionCapability, "function");
+  assert.equal(typeof openai.OPENAI_TRANSCRIPTION_LIMITS, "object");
+  assert.equal(
+    typeof transcription.createOpenAITranscriptionCapability,
+    "function",
+  );
+  assert.equal(typeof transcription.OPENAI_TRANSCRIPTION_LIMITS, "object");
+  assert.ok(Array.isArray(transcription.OPENAI_TRANSCRIPTION_AUDIO_FORMATS));
+});
+
+test("isolates OpenAI realtime to its dedicated opt-in provider entry", async () => {
+  const core = await import(pathToFileURL(
+    path.join(packageRoot, packageJson.exports["."].import),
+  ).href);
+  const browser = await import(pathToFileURL(
+    path.join(packageRoot, packageJson.exports["./browser"].import),
+  ).href);
+  const openai = await import(pathToFileURL(
+    path.join(packageRoot, packageJson.exports["./providers/openai"].import),
+  ).href);
+  const realtime = await import(pathToFileURL(
+    path.join(packageRoot, packageJson.exports["./providers/openai/realtime"].import),
+  ).href);
+
+  assert.equal(core.createOpenAIRealtimeServer, undefined);
+  assert.equal(browser.createOpenAIRealtimeServer, undefined);
+  assert.equal(openai.createOpenAIRealtimeServer, undefined);
+  assert.equal(typeof realtime.createOpenAIRealtimeServer, "function");
+  assert.equal(typeof realtime.OPENAI_REALTIME_LIMITS, "object");
+});
+
+test("exports trusted-server protection only from its dedicated server entry", async () => {
+  const core = await import(pathToFileURL(
+    path.join(packageRoot, packageJson.exports["."].import),
+  ).href);
+  const browser = await import(pathToFileURL(
+    path.join(packageRoot, packageJson.exports["./browser"].import),
+  ).href);
+  const trustedServer = await import(pathToFileURL(
+    path.join(packageRoot, packageJson.exports["./server/trusted-server"].import),
+  ).href);
+
+  assert.equal(core.createTrustedServerRequestProtectorV1, undefined);
+  assert.equal(browser.createTrustedServerRequestProtectorV1, undefined);
+  assert.equal(
+    trustedServer.TRUSTED_SERVER_REQUEST_PROTECTION_VERSION,
+    "trusted-server.request-protection.v1",
+  );
+  assert.equal(typeof trustedServer.TRUSTED_SERVER_V1_LIMITS, "object");
+  assert.equal(
+    typeof trustedServer.createTrustedServerRequestProtectorV1,
+    "function",
+  );
+});
+
+test("exports browser audio capture only from the browser entry", async () => {
+  const core = await import(pathToFileURL(
+    path.join(packageRoot, packageJson.exports["."].import),
+  ).href);
+  const browser = await import(pathToFileURL(
+    path.join(packageRoot, packageJson.exports["./browser"].import),
+  ).href);
+
+  assert.equal(core.createBrowserAudioCaptureController, undefined);
+  assert.equal(core.intakeBrowserAudio, undefined);
+  assert.equal(core.BrowserAudioCaptureError, undefined);
+  assert.equal(typeof browser.createBrowserAudioCaptureController, "function");
+  assert.equal(typeof browser.intakeBrowserAudio, "function");
+  assert.equal(typeof browser.BrowserAudioCaptureError, "function");
+  assert.ok(Array.isArray(browser.BROWSER_AUDIO_CAPTURE_ERROR_CODES));
+  assert.equal(browser.React, undefined);
+});
+
+test("exports WebRTC voice control only from the browser entry", async () => {
+  const core = await import(pathToFileURL(
+    path.join(packageRoot, packageJson.exports["."].import),
+  ).href);
+  const browser = await import(pathToFileURL(
+    path.join(packageRoot, packageJson.exports["./browser"].import),
+  ).href);
+
+  assert.equal(core.createBrowserRealtimeVoiceController, undefined);
+  assert.equal(core.BROWSER_REALTIME_VOICE_LIMITS, undefined);
+  assert.equal(typeof browser.createBrowserRealtimeVoiceController, "function");
+  assert.equal(typeof browser.BROWSER_REALTIME_VOICE_LIMITS, "object");
+  assert.equal(browser.OpenAI, undefined);
+  assert.equal(browser.React, undefined);
+});
+
+test("imports the browser entry without browser audio globals", () => {
+  const browserEntry = pathToFileURL(
+    path.join(packageRoot, packageJson.exports["./browser"].import),
+  ).href;
+  const result = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `for (const name of ["navigator", "MediaRecorder", "RTCPeerConnection", "document", "Blob", "File", "URL"]) Reflect.deleteProperty(globalThis, name); await import(${JSON.stringify(browserEntry)});`,
+    ],
+    { cwd: packageRoot, encoding: "utf8" },
+  );
+
+  assert.equal(
+    result.status,
+    0,
+    `Browser-global-free import failed:\n${result.stderr || result.stdout}`,
+  );
 });
 
 test("exports the approval proposal store contract from the built core entry", async () => {
@@ -177,8 +371,14 @@ test("dry pack contains only intended package assets", () => {
     "dist/react/index.d.ts",
     "dist/server/managed.js",
     "dist/server/managed.d.ts",
+    "dist/server/trusted-server.js",
+    "dist/server/trusted-server.d.ts",
     "dist/providers/openai.js",
     "dist/providers/openai.d.ts",
+    "dist/providers/openai-transcription.js",
+    "dist/providers/openai-transcription.d.ts",
+    "dist/providers/openai-realtime.js",
+    "dist/providers/openai-realtime.d.ts",
     "dist/providers/anthropic.js",
     "dist/providers/anthropic.d.ts",
     "dist/providers/gemini.js",

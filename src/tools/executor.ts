@@ -11,7 +11,14 @@ import {
   type ToolDefinition,
   type ToolResultContentPart,
 } from "../protocol.js";
-import { ToolRegistry } from "./registry.js";
+import type {
+  ApprovalExecutionCoordinator,
+  ApprovalExecutionFailureReason,
+  ApprovalExecutionResume,
+  ClaimedApprovalExecution,
+} from "./approval-execution.js";
+import { ToolRegistry, type ToolRegistration } from "./registry.js";
+import type { ToolDiscoveryQuery } from "./registry.js";
 
 export interface ApplicationToolCall {
   readonly tool_call_id: string;
@@ -112,12 +119,20 @@ export const DEFAULT_BOUNDED_TOOL_EXECUTOR_LIMITS: Readonly<BoundedToolExecutorL
     maxResultDepth: 12,
   });
 
-export interface BoundedToolExecutionRequest<TContext = unknown> {
+export interface BoundedToolExecutionRequest<
+  TContext = unknown,
+  TApprovalPermissionContext = unknown,
+> {
   readonly call: ApplicationToolCall;
   /** Must be the current array returned by ToolRegistry.discover(). */
   readonly discoveredTools: readonly ToolDefinition[];
   readonly applicationContext: TContext;
   readonly signal?: AbortSignal;
+  /** Trusted host evidence for resuming one exact persisted approval proposal. */
+  readonly approval?: ApprovalExecutionResume<TApprovalPermissionContext> & {
+    readonly conversationId: import("../conversation/events.js").ConversationId;
+    readonly turnId: import("../conversation/events.js").ConversationTurnId;
+  };
   /** Awaited after authorization and before a previously unseen side effect begins. */
   readonly onExecutionStarted?: () => void | Promise<void>;
 }
@@ -133,10 +148,15 @@ export type BoundedToolExecutionOutcome =
       readonly name: string;
     };
 
-export interface BoundedToolExecutorOptions<TContext = unknown, TDiscoveryContext = unknown> {
+export interface BoundedToolExecutorOptions<
+  TContext = unknown,
+  TDiscoveryContext = unknown,
+  TApprovalPermissionContext = unknown,
+> {
   readonly registry: ToolRegistry<ApplicationToolExecutor<TContext>, TDiscoveryContext>;
   readonly policy: ApplicationToolPolicy<TContext>;
   readonly ledger?: ToolExecutionLedger;
+  readonly approvalCoordinator?: ApprovalExecutionCoordinator<TApprovalPermissionContext>;
   readonly limits?: Partial<BoundedToolExecutorLimits>;
 }
 
@@ -592,23 +612,48 @@ function normalizeOutput(
   }
 }
 
-export class BoundedToolExecutor<TContext = unknown, TDiscoveryContext = unknown> {
+export class BoundedToolExecutor<
+  TContext = unknown,
+  TDiscoveryContext = unknown,
+  TApprovalPermissionContext = unknown,
+> {
   readonly #registry: ToolRegistry<ApplicationToolExecutor<TContext>, TDiscoveryContext>;
   readonly #policy: ApplicationToolPolicy<TContext>;
   readonly #ledger: ToolExecutionLedger;
+  readonly #approvalCoordinator:
+    | ApprovalExecutionCoordinator<TApprovalPermissionContext>
+    | undefined;
   readonly #limits: Readonly<BoundedToolExecutorLimits>;
   readonly #limiter: ConcurrencyLimiter;
   readonly #operations = new Map<string, Promise<BoundedToolExecutionOutcome>>();
 
-  constructor(options: BoundedToolExecutorOptions<TContext, TDiscoveryContext>) {
+  constructor(
+    options: BoundedToolExecutorOptions<
+      TContext,
+      TDiscoveryContext,
+      TApprovalPermissionContext
+    >,
+  ) {
     this.#registry = options.registry;
     this.#policy = options.policy;
     this.#ledger = options.ledger ?? new InMemoryToolExecutionLedger();
+    this.#approvalCoordinator = options.approvalCoordinator;
     this.#limits = resolvedLimits(options.limits);
     this.#limiter = new ConcurrencyLimiter(this.#limits.maxConcurrency);
   }
 
-  async execute(request: BoundedToolExecutionRequest<TContext>): Promise<ApplicationToolResult> {
+  /**
+   * Discovers from the exact registry bound to this executor. Orchestration
+   * layers must still pass this returned array back to `executeDetailed`; the
+   * executor remains the authorization and registration boundary.
+   */
+  discoverTools(query: ToolDiscoveryQuery<TDiscoveryContext>): readonly ToolDefinition[] {
+    return this.#registry.discover(query);
+  }
+
+  async execute(
+    request: BoundedToolExecutionRequest<TContext, TApprovalPermissionContext>,
+  ): Promise<ApplicationToolResult> {
     const outcome = await this.executeDetailed(request);
     return outcome.status === "completed"
       ? outcome.result
@@ -625,17 +670,22 @@ export class BoundedToolExecutor<TContext = unknown, TDiscoveryContext = unknown
    * inserted into the execution ledger, so a later approved retry can proceed.
    */
   async executeDetailed(
-    request: BoundedToolExecutionRequest<TContext>,
+    request: BoundedToolExecutionRequest<TContext, TApprovalPermissionContext>,
   ): Promise<BoundedToolExecutionOutcome> {
     const toolCallId = safeIdentifier(request.call.tool_call_id, "unknown_tool_call");
     const name = safeIdentifier(request.call.name, "unknown_tool");
-    const completed = this.#ledger.get?.(toolCallId);
+    const completed = request.approval === undefined
+      ? this.#ledger.get?.(toolCallId)
+      : undefined;
     if (completed !== undefined) {
       return Object.freeze({ status: "completed", result: await completed });
     }
-    const existing = this.#operations.get(toolCallId);
+    const existing = request.approval === undefined
+      ? this.#operations.get(toolCallId)
+      : undefined;
     if (existing !== undefined) return existing;
     const operation = this.#executeDetailedOnce(request, toolCallId, name);
+    if (request.approval !== undefined) return operation;
     this.#operations.set(toolCallId, operation);
     void operation.finally(() => {
       if (this.#operations.get(toolCallId) === operation) this.#operations.delete(toolCallId);
@@ -644,13 +694,13 @@ export class BoundedToolExecutor<TContext = unknown, TDiscoveryContext = unknown
   }
 
   async #executeDetailedOnce(
-    request: BoundedToolExecutionRequest<TContext>,
+    request: BoundedToolExecutionRequest<TContext, TApprovalPermissionContext>,
     toolCallId: string,
     name: string,
   ): Promise<BoundedToolExecutionOutcome> {
     const controller = new AbortController();
     let timedOut = false;
-    let phase: "arguments" | "policy" | "execution" = "arguments";
+    let phase: "arguments" | "policy" | "approval" | "execution" = "arguments";
     const onCallerAbort = () => controller.abort();
     if (request.signal?.aborted) controller.abort();
     else request.signal?.addEventListener("abort", onCallerAbort, { once: true });
@@ -695,47 +745,75 @@ export class BoundedToolExecutor<TContext = unknown, TDiscoveryContext = unknown
         ) };
       }
       if (decision?.outcome === "external_approval_required") {
-        return Object.freeze({ status: "external_approval_required", toolCallId, name });
+        if (request.approval === undefined || this.#approvalCoordinator === undefined) {
+          return Object.freeze({ status: "external_approval_required", toolCallId, name });
+        }
+        phase = "approval";
+        const claim = await this.#approvalCoordinator.claim({
+          ...request.approval,
+          toolCallId: toolCallId as never,
+          toolName: name,
+          arguments: arguments_,
+          definition: registration.definition,
+          signal: controller.signal,
+        });
+        if (claim.outcome === "approval_required") {
+          return Object.freeze({ status: "external_approval_required", toolCallId, name });
+        }
+        if (claim.outcome === "reuse") {
+          const retained = this.#ledger.get?.(toolCallId);
+          if (retained !== undefined) {
+            return Object.freeze({
+              status: "completed",
+              result: await raceWithSignal(retained, controller.signal),
+            });
+          }
+          return Object.freeze({
+            status: "completed",
+            result: errorResult(
+              toolCallId,
+              name,
+              "Tool execution result is temporarily unavailable.",
+            ),
+          });
+        }
+        if (claim.outcome !== "claimed") {
+          const message = claim.outcome === "cancelled"
+            ? "Tool execution was cancelled."
+            : claim.outcome === "unavailable"
+              ? "Tool approval could not be checked right now."
+              : "Tool approval could not be verified.";
+          return Object.freeze({
+            status: "completed",
+            result: errorResult(toolCallId, name, message),
+          });
+        }
+        phase = "execution";
+        return Object.freeze({
+          status: "completed",
+          result: await this.#executeAuthorized(
+            request,
+            registration,
+            arguments_,
+            controller.signal,
+            toolCallId,
+            name,
+            () => timedOut,
+            claim,
+          ),
+        });
       }
       if (decision?.outcome !== "allow") throw new InvalidPolicyDecision();
 
       phase = "execution";
-      await request.onExecutionStarted?.();
-      const result = await raceWithSignal(
-        this.#ledger.getOrCreate(toolCallId, async () => {
-          try {
-            const release = await this.#limiter.acquire(controller.signal);
-            const invocation = Promise.resolve()
-              .then(() => registration.executor(arguments_, {
-                applicationContext: request.applicationContext,
-                definition: registration.definition,
-                signal: controller.signal,
-                toolCallId,
-              }))
-              .then((output) => normalizeOutput(output, this.#limits, toolCallId));
-            void invocation.then(release, release);
-            const normalized = await raceWithSignal(invocation, controller.signal);
-            return resultForExecution(
-              toolCallId,
-              name,
-              normalized.content,
-              normalized.citationRecords,
-            );
-          } catch (error: unknown) {
-            if (error instanceof ExecutionCancelled) {
-              return errorResult(
-                toolCallId,
-                name,
-                timedOut ? "Tool execution timed out." : "Tool execution was cancelled.",
-              );
-            }
-            if (error instanceof InvalidOutput) {
-              return errorResult(toolCallId, name, "Tool returned an invalid or unsafe result.");
-            }
-            return errorResult(toolCallId, name, "Tool execution failed.");
-          }
-        }),
+      const result = await this.#executeAuthorized(
+        request,
+        registration,
+        arguments_,
         controller.signal,
+        toolCallId,
+        name,
+        () => timedOut,
       );
       return Object.freeze({ status: "completed", result });
     } catch (error: unknown) {
@@ -746,6 +824,8 @@ export class BoundedToolExecutor<TContext = unknown, TDiscoveryContext = unknown
         message = "Tool arguments did not match the declared schema.";
       } else if (error instanceof InvalidPolicyDecision) {
         message = "Tool authorization returned an invalid decision.";
+      } else if (phase === "approval") {
+        message = "Tool approval could not be verified.";
       } else if (phase === "policy") {
         message = "Tool authorization could not be completed.";
       }
@@ -757,6 +837,90 @@ export class BoundedToolExecutor<TContext = unknown, TDiscoveryContext = unknown
       clearTimeout(timeout);
       request.signal?.removeEventListener("abort", onCallerAbort);
     }
+  }
+
+  async #executeAuthorized(
+    request: BoundedToolExecutionRequest<TContext, TApprovalPermissionContext>,
+    registration: ToolRegistration<ApplicationToolExecutor<TContext>, TDiscoveryContext>,
+    arguments_: JsonObject,
+    signal: AbortSignal,
+    toolCallId: string,
+    name: string,
+    timedOut: () => boolean,
+    approvalClaim?: ClaimedApprovalExecution,
+  ): Promise<ApplicationToolResult> {
+    return raceWithSignal(
+      this.#ledger.getOrCreate(toolCallId, async () => {
+        let executionResult: ApplicationToolResult;
+        let failureReason: ApprovalExecutionFailureReason | undefined;
+        let executionStartRecorded = request.onExecutionStarted === undefined;
+        try {
+          await request.onExecutionStarted?.();
+          executionStartRecorded = true;
+          const release = await this.#limiter.acquire(signal);
+          const invocation = Promise.resolve()
+            .then(() => registration.executor(arguments_, {
+              applicationContext: request.applicationContext,
+              definition: registration.definition,
+              signal,
+              toolCallId,
+            }))
+            .then((output) => normalizeOutput(output, this.#limits, toolCallId));
+          void invocation.then(release, release);
+          const normalized = await raceWithSignal(invocation, signal);
+          executionResult = resultForExecution(
+            toolCallId,
+            name,
+            normalized.content,
+            normalized.citationRecords,
+          );
+        } catch (error: unknown) {
+          if (error instanceof ExecutionCancelled) {
+            failureReason = timedOut() ? "execution_timed_out" : "execution_cancelled";
+            executionResult = errorResult(
+              toolCallId,
+              name,
+              timedOut() ? "Tool execution timed out." : "Tool execution was cancelled.",
+            );
+          } else if (error instanceof InvalidOutput) {
+            failureReason = "invalid_tool_output";
+            executionResult = errorResult(
+              toolCallId,
+              name,
+              "Tool returned an invalid or unsafe result.",
+            );
+          } else {
+            failureReason = executionStartRecorded
+              ? "tool_execution_failed"
+              : "execution_recording_failed";
+            executionResult = errorResult(toolCallId, name, "Tool execution failed.");
+          }
+        }
+
+        if (approvalClaim !== undefined && this.#approvalCoordinator !== undefined) {
+          const settled = await this.#approvalCoordinator.settle({
+            permissionContext: request.approval!.permissionContext,
+            conversationId: request.approval!.conversationId,
+            proposalId: approvalClaim.proposalId,
+            executingVersion: approvalClaim.executingVersion,
+            executionId: approvalClaim.executionId,
+            attribution: request.approval!.attribution,
+            status: failureReason === undefined ? "executed" : "failed",
+            ...(failureReason === undefined ? {} : { failureReason }),
+            signal,
+          });
+          if (settled.outcome !== "recorded") {
+            return errorResult(
+              toolCallId,
+              name,
+              "Tool execution result could not be recorded.",
+            );
+          }
+        }
+        return executionResult;
+      }),
+      signal,
+    );
   }
 }
 

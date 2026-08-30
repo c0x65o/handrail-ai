@@ -15,6 +15,13 @@ describe("package entry point", () => {
     expect(handrailAi.ConversationCatalogError).toBeTypeOf("function");
   });
 
+  it("exports the bounded conversation runtime registry", () => {
+    expect(handrailAi.CONVERSATION_RUNTIME_REGISTRY_LIMITS).toBeTypeOf("object");
+    expect(handrailAi.ConversationRuntimeRegistry).toBeTypeOf("function");
+    expect(handrailAi.ConversationRuntimeRegistryError).toBeTypeOf("function");
+    expect(handrailAi.createConversationRuntimeRegistry).toBeTypeOf("function");
+  });
+
   it("exports the headless approval coordinator", () => {
     expect(handrailAi.createApprovalCoordinator).toBeTypeOf("function");
     expect(handrailAi.APPROVAL_COORDINATOR_LIMITS).toBeTypeOf("object");
@@ -39,5 +46,13 @@ describe("package entry point", () => {
     expect(handrailAi.createIdempotentRealtimeVoiceSessionAuthority).toBeTypeOf(
       "function",
     );
+  });
+
+  it("exports the bounded provider-neutral web-search contract", () => {
+    expect(handrailAi.WEB_SEARCH_LIMITS).toBeTypeOf("object");
+    expect(handrailAi.WebSearchService).toBeTypeOf("function");
+    expect(handrailAi.WebSearchError).toBeTypeOf("function");
+    expect(handrailAi.createWebSearchCitationRecords).toBeTypeOf("function");
+    expect(handrailAi.createWebSearchToolRegistration).toBeTypeOf("function");
   });
 });

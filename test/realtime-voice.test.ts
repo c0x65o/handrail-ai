@@ -14,6 +14,8 @@ import {
   normalizeRealtimeVoiceError,
   parseRealtimeVoiceBootstrapRequest,
   parseRealtimeVoiceBootstrapResult,
+  parseRealtimeVoiceCleanupRequest,
+  parseRealtimeVoiceHangupRequest,
   parseRealtimeVoiceSafeError,
   parseRealtimeVoiceSessionState,
   realtimeVoiceSafeError,
@@ -439,6 +441,54 @@ describe("trusted-server authoritative hangup and cleanup", () => {
     })).rejects.toMatchObject({ code: "cancelled" });
     expect(endSession).not.toHaveBeenCalled();
     expect(cleanupSession).not.toHaveBeenCalled();
+  });
+
+  it("does not repeat an authoritative end when retrying failed cleanup", async () => {
+    const endSession = vi.fn(async () => undefined);
+    const cleanupSession = vi.fn()
+      .mockRejectedValueOnce(new Error("private provider cleanup failure"))
+      .mockResolvedValueOnce(undefined);
+    const authority = createIdempotentRealtimeVoiceSessionAuthority({
+      adapter: { endSession, cleanupSession },
+      now: () => NOW,
+    });
+    const signal = new AbortController().signal;
+    const hangup = parseRealtimeVoiceHangupRequest({
+      version: REALTIME_VOICE_CONTRACT_VERSION,
+      request_id: "hangup-cleanup-retry",
+      idempotency_key: "hangup:cleanup-retry",
+      session_id: "session-cleanup-retry",
+      reason: "failure",
+      signal,
+    });
+
+    await expect(authority.hangup(hangup)).rejects.toMatchObject({
+      code: "internal_failure",
+      message: "The realtime voice operation failed.",
+    });
+    await expect(authority.hangup(hangup)).resolves.toMatchObject({
+      status: "ended",
+    });
+    expect(endSession).toHaveBeenCalledTimes(1);
+    expect(cleanupSession).toHaveBeenCalledTimes(2);
+  });
+
+  it("strictly validates trusted-server hangup and cleanup inputs", () => {
+    const signal = new AbortController().signal;
+    expect(() => parseRealtimeVoiceHangupRequest({
+      version: REALTIME_VOICE_CONTRACT_VERSION,
+      request_id: "hangup-strict",
+      idempotency_key: "hangup:strict",
+      session_id: "session-strict",
+      reason: "client_request",
+      signal,
+      provider_request: { api_key: "secret" },
+    })).toThrow(/provider_request/);
+    expect(() => parseRealtimeVoiceCleanupRequest({
+      session_id: "session-strict",
+      signal,
+      raw_response: { transcript: "private" },
+    })).toThrow(/raw_response/);
   });
 });
 

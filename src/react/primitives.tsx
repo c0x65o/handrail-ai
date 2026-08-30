@@ -41,6 +41,11 @@ import type {
 } from "../presence/controller.js";
 import type { PresenceParticipantSummary } from "../presence/types.js";
 import { ConversationContext } from "./context.js";
+import {
+  PrimitiveContext,
+  type PrimitiveContextValue,
+  useResolvedState,
+} from "./primitive-context.js";
 import type {
   ConversationComposerAttachment,
   ConversationComposerError,
@@ -96,43 +101,12 @@ export type PresenceRenderer = (
   index: number,
 ) => ReactNode;
 
-interface PrimitiveContextValue {
-  readonly composer: ConversationComposerResult | null;
-  readonly presence: PresenceController | null;
-  readonly presenceSnapshot: PresenceControllerSnapshot | null;
-  readonly state: ConversationState | undefined;
-}
-
-const PrimitiveContext = createContext<PrimitiveContextValue | null>(null);
-
 const EMPTY_PRESENCE_SNAPSHOT: PresenceControllerSnapshot = Object.freeze({
   conversationId: null as never,
   connected: false,
   records: Object.freeze([]),
   participants: Object.freeze([]),
 });
-
-const subscribeToNothing = () => () => undefined;
-const getNoState = () => undefined;
-
-function useResolvedState(explicit?: ConversationState): ConversationState | undefined {
-  const primitives = useContext(PrimitiveContext);
-  const binding = useContext(ConversationContext);
-  const subscribe = useCallback(
-    (listener: () => void) => binding?.store.subscribe(listener) ?? (() => undefined),
-    [binding],
-  );
-  const getSnapshot = useCallback(
-    () => binding?.store.getSnapshot(),
-    [binding],
-  );
-  const providerState = useSyncExternalStore(
-    binding === null ? subscribeToNothing : subscribe,
-    binding === null ? getNoState : getSnapshot,
-    binding === null ? getNoState : getSnapshot,
-  );
-  return explicit ?? primitives?.state ?? providerState;
-}
 
 function useResolvedPresence(
   explicit?: PresenceController,

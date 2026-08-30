@@ -39,9 +39,30 @@ export type ProviderDocumentInputCapability =
   | UnsupportedProviderDocumentInputCapability
   | SupportedProviderDocumentInputCapability;
 
+export interface UnsupportedProviderCitationProjectionCapability {
+  readonly supported: false;
+}
+
+export interface SupportedProviderCitationProjectionCapability {
+  readonly supported: true;
+}
+
+/**
+ * Declares whether an adapter can emit checked provider-neutral citation
+ * batches. An omitted declaration is treated as unsupported for compatibility
+ * with adapters authored before citation projection was added.
+ */
+export type ProviderCitationProjectionCapability =
+  | UnsupportedProviderCitationProjectionCapability
+  | SupportedProviderCitationProjectionCapability;
+
 export const UNSUPPORTED_PROVIDER_DOCUMENT_INPUT = Object.freeze({
   supported: false,
 }) satisfies UnsupportedProviderDocumentInputCapability;
+
+export const UNSUPPORTED_PROVIDER_CITATION_PROJECTION = Object.freeze({
+  supported: false,
+}) satisfies UnsupportedProviderCitationProjectionCapability;
 
 function documentCapabilityRecord(value: unknown, label: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -161,6 +182,27 @@ export function parseProviderDocumentInputCapability(
   });
 }
 
+/** Strictly validates the serializable citation-projection declaration. */
+export function parseProviderCitationProjectionCapability(
+  value: unknown,
+): ProviderCitationProjectionCapability {
+  const capability = documentCapabilityRecord(value, "citation_projection");
+  exactDocumentCapabilityKeys(
+    capability,
+    ["supported"],
+    "citation_projection",
+  );
+  if (capability.supported === false) {
+    return UNSUPPORTED_PROVIDER_CITATION_PROJECTION;
+  }
+  if (capability.supported !== true) {
+    throw new TypeError(
+      "citation_projection.supported must be a boolean literal",
+    );
+  }
+  return Object.freeze({ supported: true });
+}
+
 /** Provider-neutral bytes produced by a trusted host from an opaque content_ref. */
 export interface ResolvedProviderDocument {
   readonly media_type: DocumentMimeType;
@@ -183,6 +225,8 @@ export interface ProviderModelCapabilities {
   readonly parallel_tool_calls: boolean;
   readonly reasoning: boolean;
   readonly document_input: ProviderDocumentInputCapability;
+  /** Absence is the legacy-compatible equivalent of supported:false. */
+  readonly citation_projection?: ProviderCitationProjectionCapability;
   /** Serializable model-specific provider-context support declaration. */
   readonly provider_context: ProviderContextCapabilityDescriptor;
   readonly context_window_tokens: number | null;

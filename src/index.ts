@@ -14,3 +14,4 @@ export * from "./tools/index.js";
 export * from "./transcription.js";
 export * from "./transports/index.js";
 export * from "./usage.js";
+export * from "./web-search.js";

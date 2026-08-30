@@ -588,6 +588,7 @@ describe("AnthropicProviderAdapter", () => {
         parallel_tool_calls: false,
         reasoning: true,
         document_input: { supported: false },
+        citation_projection: { supported: false },
         provider_context: {
           supported: false,
           reason: "provider_not_supported",
@@ -602,6 +603,7 @@ describe("AnthropicProviderAdapter", () => {
     });
     expect(hostConfiguredRequest).toHaveBeenCalledOnce();
     expect(output.result.status).toBe("completed");
+    expect(output.events.some((event) => event.type === "response.citation_batch")).toBe(false);
     expectValid(output.events);
   });
 

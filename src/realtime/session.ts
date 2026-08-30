@@ -29,6 +29,7 @@ import {
   parseRealtimeVoiceBootstrapResult,
   throwIfRealtimeVoiceAborted,
 } from "./validation.js";
+import type { RealtimeVoiceServerToolBridge } from "./tool-bridge.js";
 
 function operationError(error: unknown, signal: AbortSignal): RealtimeVoiceOperationError {
   if (error instanceof RealtimeVoiceOperationError) return error;
@@ -143,7 +144,7 @@ class RealtimeVoiceClientSessionImpl implements RealtimeVoiceClientSession {
   }
 }
 
-/** Creates a credential-contained client lifecycle; `getState()` is always safe to retain. */
+/** Contains ephemeral authorization privately; `getState()` is always safe to retain. */
 export function createRealtimeVoiceClientSession(
   bootstrap: unknown,
   adapter: RealtimeVoiceClientAdapter,
@@ -282,16 +283,20 @@ export function parseRealtimeVoiceCleanupRequest(value: unknown): RealtimeVoiceC
 
 export interface RealtimeVoiceSessionAuthorityOptions {
   readonly adapter: RealtimeVoiceSessionAuthorityAdapter;
+  /** Optional trusted-server bridge terminated before provider cleanup begins. */
+  readonly toolBridge?: Pick<RealtimeVoiceServerToolBridge, "terminateSession">;
   readonly now?: () => number;
   readonly maximumTrackedSessions?: number;
 }
 
 class IdempotentRealtimeVoiceSessionAuthority implements RealtimeVoiceSessionAuthority {
   readonly #adapter: RealtimeVoiceSessionAuthorityAdapter;
+  readonly #toolBridge: Pick<RealtimeVoiceServerToolBridge, "terminateSession"> | undefined;
   readonly #now: () => number;
   readonly #maximumTrackedSessions: number;
   readonly #terminal = new Map<string, RealtimeVoiceTerminalResult>();
   readonly #hangups = new Map<string, Promise<RealtimeVoiceTerminalResult>>();
+  readonly #ended = new Set<string>();
   readonly #cleaned = new Set<string>();
   readonly #cleanups = new Map<string, Promise<RealtimeVoiceCleanupResult>>();
   readonly #idempotencySessions = new Map<string, string>();
@@ -310,7 +315,16 @@ class IdempotentRealtimeVoiceSessionAuthority implements RealtimeVoiceSessionAut
     if (!Number.isSafeInteger(maximumTrackedSessions) || maximumTrackedSessions <= 0) {
       throw new TypeError("maximumTrackedSessions must be a positive safe integer");
     }
+    if (
+      options.toolBridge !== undefined &&
+      (options.toolBridge === null ||
+        typeof options.toolBridge !== "object" ||
+        typeof options.toolBridge.terminateSession !== "function")
+    ) {
+      throw new TypeError("options.toolBridge must implement terminateSession");
+    }
     this.#adapter = options.adapter;
+    this.#toolBridge = options.toolBridge;
     this.#now = options.now ?? Date.now;
     this.#maximumTrackedSessions = maximumTrackedSessions;
   }
@@ -353,8 +367,8 @@ class IdempotentRealtimeVoiceSessionAuthority implements RealtimeVoiceSessionAut
     }
     const operation = (async () => {
       try {
+        await this.#toolBridge?.terminateSession(request.session_id);
         await this.#adapter.cleanupSession(request);
-        throwIfRealtimeVoiceAborted(request.signal);
         this.#cleaned.add(request.session_id);
         return Object.freeze({
           session_id: request.session_id,
@@ -374,8 +388,11 @@ class IdempotentRealtimeVoiceSessionAuthority implements RealtimeVoiceSessionAut
     request: RealtimeVoiceHangupRequest,
   ): Promise<RealtimeVoiceTerminalResult> {
     try {
-      await this.#adapter.endSession(request);
-      throwIfRealtimeVoiceAborted(request.signal);
+      await this.#toolBridge?.terminateSession(request.session_id);
+      if (!this.#ended.has(request.session_id)) {
+        await this.#adapter.endSession(request);
+        this.#ended.add(request.session_id);
+      }
       await this.cleanup({ session_id: request.session_id, signal: request.signal });
       const now = this.#now();
       if (!Number.isFinite(now)) throw new RealtimeVoiceOperationError("internal_failure");
@@ -400,6 +417,7 @@ class IdempotentRealtimeVoiceSessionAuthority implements RealtimeVoiceSessionAut
       const oldest = this.#terminal.keys().next().value as string | undefined;
       if (oldest === undefined) break;
       this.#terminal.delete(oldest);
+      this.#ended.delete(oldest);
       this.#cleaned.delete(oldest);
       for (const [key, sessionId] of this.#idempotencySessions) {
         if (sessionId === oldest) this.#idempotencySessions.delete(key);

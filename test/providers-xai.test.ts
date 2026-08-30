@@ -124,6 +124,7 @@ describe("XAIProviderAdapter", () => {
         parallel_tool_calls: false,
         reasoning: true,
         document_input: { supported: false },
+        citation_projection: { supported: false },
         provider_context: {
           supported: false,
           reason: "provider_not_supported",
@@ -138,6 +139,7 @@ describe("XAIProviderAdapter", () => {
     });
     expect(request).toHaveBeenCalledOnce();
     expect(output.result).toMatchObject({ status: "completed", outcome: "stop" });
+    expect(output.events.some((event) => event.type === "response.citation_batch")).toBe(false);
   });
 
   it.each([

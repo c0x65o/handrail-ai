@@ -18,7 +18,9 @@ import type {
   ProviderRequestContext,
 } from "../providers/index.js";
 import {
+  parseProviderCitationProjectionCapability,
   parseProviderDocumentInputCapability,
+  UNSUPPORTED_PROVIDER_CITATION_PROJECTION,
   UNSUPPORTED_PROVIDER_DOCUMENT_INPUT,
 } from "../providers/index.js";
 import {
@@ -276,6 +278,7 @@ function validateIncrementalEvent(
   event: StreamEvent,
   events: readonly StreamEvent[],
   context: DirectProviderTurnContext,
+  citationProjectionSupported: boolean,
 ): void {
   const index = events.length;
   if (event.sequence !== index) {
@@ -299,6 +302,52 @@ function validateIncrementalEvent(
   }
   if (events.some(terminalEvent)) {
     throw new TypeError("terminal event must be last");
+  }
+  if (event.type === "response.citation_batch") {
+    if (!citationProjectionSupported) {
+      throw new TypeError(
+        "citation batches require declared provider citation support",
+      );
+    }
+    const previousBatches = events.filter(
+      (candidate) => candidate.type === "response.citation_batch",
+    );
+    const previousTarget = previousBatches[0]?.target.message_id;
+    if (
+      previousTarget !== undefined &&
+      event.target.message_id !== previousTarget
+    ) {
+      throw new TypeError("citation target must remain stable within the stream");
+    }
+    const previousCitations = previousBatches.flatMap(
+      (batch) => batch.citations,
+    );
+    let nextOrder = previousCitations.length;
+    const citationIds = new Set(
+      previousCitations.map((citation) => citation.citation_id),
+    );
+    for (const citation of event.citations) {
+      if (citation.order !== nextOrder) {
+        throw new TypeError(`citation order must equal ${nextOrder}`);
+      }
+      if (citationIds.has(citation.citation_id)) {
+        throw new TypeError("citation identity must be unique within the stream");
+      }
+      citationIds.add(citation.citation_id);
+      nextOrder += 1;
+    }
+    const sources = new Map<string, string>();
+    for (const batch of previousBatches) {
+      for (const source of batch.sources) {
+        sources.set(source.source_id, JSON.stringify(source));
+      }
+    }
+    for (const source of event.sources) {
+      const previous = sources.get(source.source_id);
+      if (previous !== undefined && previous !== JSON.stringify(source)) {
+        throw new TypeError("citation source identity must remain stable");
+      }
+    }
   }
 }
 
@@ -416,6 +465,7 @@ async function pumpProvider(
   observation: DirectObservation,
   active: ActiveTurn,
   resolveDocumentReference: ProviderDocumentReferenceResolver | undefined,
+  citationProjectionSupported: boolean,
 ): Promise<void> {
   const events: StreamEvent[] = [];
   let heldTerminal: TerminalStreamEvent | null = null;
@@ -442,7 +492,12 @@ async function pumpProvider(
     let item = await stream.next();
     while (!item.done) {
       const event = parseStreamEvent(item.value);
-      validateIncrementalEvent(event, events, context);
+      validateIncrementalEvent(
+        event,
+        events,
+        context,
+        citationProjectionSupported,
+      );
       events.push(event);
       if (terminalEvent(event)) heldTerminal = event;
       else observation.push(event);
@@ -472,6 +527,10 @@ export function createDirectProviderTransport(
 ): DirectProviderTransport {
   const providerDocumentInput = parseProviderDocumentInputCapability(
     options.adapter.metadata.capabilities.document_input,
+  );
+  const citationProjection = parseProviderCitationProjectionCapability(
+    options.adapter.metadata.capabilities.citation_projection ??
+      UNSUPPORTED_PROVIDER_CITATION_PROJECTION,
   );
   const documentInput =
     providerDocumentInput.supported &&
@@ -613,6 +672,7 @@ export function createDirectProviderTransport(
         observation,
         active,
         options.resolveDocumentReference,
+        citationProjection.supported,
       );
 
       return {

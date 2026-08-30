@@ -812,7 +812,7 @@ describe("chat request protocol", () => {
 });
 
 describe("server stream-event protocol", () => {
-  it("round-trips all seven event discriminators", () => {
+  it("round-trips all eight event discriminators", () => {
     const events = [
       started(),
       { ...envelope("response.text.delta", 1), delta: "Order A-104 is out for delivery." },
@@ -821,6 +821,17 @@ describe("server stream-event protocol", () => {
         tool_call_id: "call_01J8Y7Q4AF",
         name: "lookup_order",
         arguments: { order_id: "A-104" },
+      },
+      {
+        ...envelope("response.citation_batch", 1),
+        target: { type: "assistant_message", message_id: "assistant_output_1" },
+        sources: [{ source_id: "source_1", type: "web", label: "Example" }],
+        citations: [{
+          citation_id: "citation_1",
+          source_id: "source_1",
+          order: 0,
+          target: { type: "assistant_message", message_id: "assistant_output_1" },
+        }],
       },
       {
         ...envelope("response.usage", 1),
@@ -841,7 +852,7 @@ describe("server stream-event protocol", () => {
 
     expect(events.map((event) => parseStreamEvent(event))).toEqual(events);
     expect(events.every((event) => isStreamEvent(event))).toBe(true);
-    expect(AI_RUNTIME_STREAM_EVENT_TYPES).toHaveLength(7);
+    expect(AI_RUNTIME_STREAM_EVENT_TYPES).toHaveLength(8);
   });
 
   it.each([

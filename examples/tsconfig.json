@@ -6,6 +6,8 @@
     "moduleResolution": "NodeNext",
     "jsx": "react-jsx",
     "strict": true,
+    "allowJs": true,
+    "checkJs": true,
     "noEmit": true,
     "isolatedModules": true,
     "noUncheckedIndexedAccess": true,
@@ -13,5 +15,5 @@
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true
   },
-  "include": ["./*.ts", "./*.tsx"]
+  "include": ["./*.ts", "./*.tsx", "./*.mjs"]
 }

@@ -1,4 +1,9 @@
 import type { ConversationToolCallRecord } from "../conversation/state.js";
+import type {
+  ConversationId,
+  ConversationToolCallId,
+  ConversationTurnId,
+} from "../conversation/events.js";
 import { CONVERSATION_CITATION_RECORDS_VERSION } from "../conversation/events.js";
 import type { CitationRecordSet } from "../citations.js";
 import {
@@ -14,6 +19,7 @@ import type {
 } from "../runtime.js";
 import type { NormalizedUsageReceipt } from "../usage.js";
 import { BoundedToolExecutor } from "./executor.js";
+import type { ApprovalExecutionResume } from "./approval-execution.js";
 
 export interface ToolLoopLimits {
   readonly maxIterations: number;
@@ -41,18 +47,41 @@ export interface ToolLoopProgress {
   readonly usageReceipts?: readonly NormalizedUsageReceipt[];
 }
 
-export interface RunToolLoopOptions<TContext = unknown, TDiscoveryContext = unknown> {
+export interface ApprovalResumeResolverInput {
+  readonly conversationId: ConversationId;
+  readonly turnId: ConversationTurnId;
+  readonly toolCallId: ConversationToolCallId;
+  readonly toolName: string;
+  readonly signal: AbortSignal;
+}
+
+export type ApprovalResumeResolver<TPermissionContext> = (
+  input: ApprovalResumeResolverInput,
+) => ApprovalExecutionResume<TPermissionContext> | undefined |
+  Promise<ApprovalExecutionResume<TPermissionContext> | undefined>;
+
+export interface RunToolLoopOptions<
+  TContext = unknown,
+  TDiscoveryContext = unknown,
+  TApprovalPermissionContext = unknown,
+> {
   readonly runtime: ConversationRuntime<ChatRequest>;
   /** The initial or approval-resume turn observation to inspect. */
   readonly initialTurn: ConversationRuntimeTurnResult | Promise<ConversationRuntimeTurnResult>;
   /** Exact request used for initialTurn. It is the immutable base for continuations. */
   readonly request: ChatRequest;
   readonly discoveredTools: readonly ToolDefinition[];
-  readonly executor: BoundedToolExecutor<TContext, TDiscoveryContext>;
+  readonly executor: BoundedToolExecutor<
+    TContext,
+    TDiscoveryContext,
+    TApprovalPermissionContext
+  >;
   readonly applicationContext: TContext;
   readonly limits?: Partial<ToolLoopLimits>;
   readonly providerCapabilities?: ToolLoopProviderCapabilities;
   readonly signal?: AbortSignal;
+  /** Trusted host lookup for exact confirmed proposal evidence on a resumed call. */
+  readonly resolveApprovalResume?: ApprovalResumeResolver<TApprovalPermissionContext>;
   readonly progress?: ToolLoopProgress;
   readonly now?: () => number;
   /** May return cumulative observations; receipt identity removes duplicates. */
@@ -178,8 +207,16 @@ function frozenProgress(
  * side-effect decision is durably recorded by ConversationRuntime before the
  * next protocol request is submitted.
  */
-export async function runToolLoop<TContext = unknown, TDiscoveryContext = unknown>(
-  options: RunToolLoopOptions<TContext, TDiscoveryContext>,
+export async function runToolLoop<
+  TContext = unknown,
+  TDiscoveryContext = unknown,
+  TApprovalPermissionContext = unknown,
+>(
+  options: RunToolLoopOptions<
+    TContext,
+    TDiscoveryContext,
+    TApprovalPermissionContext
+  >,
 ): Promise<ToolLoopResult> {
   const bounded = limits(options.limits);
   const recordEvents = options.runtime.recordToolLoopEvents;
@@ -338,6 +375,22 @@ export async function runToolLoop<TContext = unknown, TDiscoveryContext = unknow
         if (controller.signal.aborted) return;
         const call = pending[nextIndex++];
         if (call === undefined || call.name === null || call.arguments === null) return;
+        const conversationId = options.runtime.getSnapshot().conversation_id;
+        let approval: ApprovalExecutionResume<TApprovalPermissionContext> | undefined;
+        if (conversationId !== null && options.resolveApprovalResume !== undefined) {
+          try {
+            approval = await options.resolveApprovalResume({
+              conversationId,
+              turnId: call.turn_id,
+              toolCallId: call.tool_call_id,
+              toolName: call.name,
+              signal: controller.signal,
+            });
+          } catch {
+            // Resolver failures remain an approval pause and never disclose host details.
+          }
+        }
+        if (controller.signal.aborted) return;
         const outcome = await options.executor.executeDetailed({
           call: {
             tool_call_id: call.tool_call_id,
@@ -347,6 +400,13 @@ export async function runToolLoop<TContext = unknown, TDiscoveryContext = unknow
           discoveredTools: options.discoveredTools,
           applicationContext: options.applicationContext,
           signal: controller.signal,
+          ...(approval === undefined || conversationId === null
+            ? {}
+            : { approval: {
+                ...approval,
+                conversationId,
+                turnId: call.turn_id,
+              } }),
           ...(call.started_at === null
             ? { onExecutionStarted: async () => {
                 await recordEvents([{

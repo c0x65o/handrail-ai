@@ -1,4 +1,5 @@
 import {
+  CONVERSATION_CITATION_RECORDS_VERSION,
   CONVERSATION_EVENT_VERSION,
   parseConversationEvent,
   type ConversationAttachmentReference,
@@ -21,6 +22,12 @@ import {
   type ConversationTurnId,
 } from "./conversation/events.js";
 import {
+  normalizeCitationRecords,
+  type Citation,
+  type CitationRecordSet,
+  type CitationSource,
+} from "./citations.js";
+import {
   ConversationEventStoreConflictError,
   type ConversationEventCursor,
   type ConversationEventStore,
@@ -33,6 +40,7 @@ import type { ConversationState } from "./conversation/state.js";
 import type { ConversationStore } from "./conversation/store.js";
 import {
   parseStreamEvent,
+  type ResponseCitationBatchEvent,
   type StreamEvent,
   type TerminalStreamEvent,
 } from "./protocol.js";
@@ -258,11 +266,14 @@ export class ConversationRuntimeBusyError extends Error {
 }
 
 interface RuntimeMetadata {
+  readonly turnId?: ConversationTurnId;
   readonly transportTurnId?: string;
   readonly requestId?: string;
   readonly traceId?: string;
   readonly sequence?: number;
   readonly frameType?: StreamEvent["type"];
+  readonly frameFingerprint?: string;
+  readonly citationTargetFingerprint?: string;
   readonly resumeSafe?: boolean;
   readonly checkpoint?: TurnResumePoint;
 }
@@ -272,6 +283,7 @@ interface TurnProtocolState {
   requestId: string | null;
   traceId: string | null;
   safeSequence: number | null;
+  citationTargetFingerprint: string | null;
   checkpoint: TurnResumePoint;
 }
 
@@ -288,6 +300,12 @@ interface FrameState {
   readonly protocol: TurnProtocolState;
   expectedSequence: number;
   assistantMessageId: ConversationMessageId | null;
+  citationTargetFingerprint: string | null;
+  citationRecords: CitationRecordSet;
+  citationSourceFingerprints: Map<string, string>;
+  citationFingerprints: Map<string, string>;
+  pendingCitationFrames: ResponseCitationBatchEvent[];
+  nextCitationOrder: number;
   hasUnsafeFrame: boolean;
   terminal: TerminalStreamEvent | null;
   lastWasTerminal: boolean;
@@ -353,6 +371,7 @@ export async function createConversationRuntime<TRequest>(
     Map<string, NormalizedUsageReceipt>
   >();
   const durableFrameKeys = new Set<string>();
+  const durableFrameFingerprints = new Map<string, string>();
   const activeObservations = new Map<string, TurnObservation<unknown>>();
   const runningTurns = new Map<string, Promise<ConversationRuntimeTurnResult>>();
   const retryControllers = new Map<string, AbortController>();
@@ -373,6 +392,7 @@ export async function createConversationRuntime<TRequest>(
     options.eventStore,
     protocolByTurn,
     durableFrameKeys,
+    durableFrameFingerprints,
   );
 
   const assertUsable = (): void => {
@@ -451,6 +471,7 @@ export async function createConversationRuntime<TRequest>(
             event,
             protocolByTurn,
             durableFrameKeys,
+            durableFrameFingerprints,
           );
           return storedEvents;
         } catch (cause) {
@@ -468,6 +489,7 @@ export async function createConversationRuntime<TRequest>(
             store,
             protocolByTurn,
             durableFrameKeys,
+            durableFrameFingerprints,
             catchUpBatchSize,
           );
           assertUsable();
@@ -483,6 +505,23 @@ export async function createConversationRuntime<TRequest>(
   ): Promise<readonly ConversationEvent[]> => drafts.length === 0
     ? Promise.resolve([])
     : persistGenerated(() => drafts);
+
+  const persistFrameDrafts = (
+    drafts: readonly EventDraft[],
+  ): Promise<readonly ConversationEvent[]> => drafts.length === 0
+    ? Promise.resolve([])
+    : persistGenerated(() => drafts.filter((draft) => {
+        const runtime = runtimeMetadata(draft.metadata);
+        if (
+          runtime?.requestId !== undefined &&
+          runtime.sequence !== undefined &&
+          durableFrameKeys.has(frameKey(runtime.requestId, runtime.sequence))
+        ) {
+          return false;
+        }
+        return draft.payload.type !== "citation.records_linked" ||
+          !toolLoopEventAlreadyRecorded(store.getSnapshot(), draft.payload);
+      }));
 
   const persistAdmittedTurn = async (
     drafts: readonly EventDraft[],
@@ -507,6 +546,7 @@ export async function createConversationRuntime<TRequest>(
         store,
         protocolByTurn,
         durableFrameKeys,
+        durableFrameFingerprints,
         catchUpBatchSize,
       ));
     } finally {
@@ -600,11 +640,26 @@ export async function createConversationRuntime<TRequest>(
     observation: TurnObservation<unknown>,
   ): Promise<ConversationRuntimeTurnResult> => {
     const protocol = protocolState(protocolByTurn, turnId);
+    const assistantMessageId = streamedAssistantMessageId(store.getSnapshot(), turnId);
+    const durableCitations = runtimeCitationRecords(
+      store.getSnapshot(),
+      assistantMessageId,
+    );
     const frameState: FrameState = {
       turnId,
       protocol,
       expectedSequence: (protocol.safeSequence ?? -1) + 1,
-      assistantMessageId: streamedAssistantMessageId(store.getSnapshot(), turnId),
+      assistantMessageId,
+      citationTargetFingerprint: protocol.citationTargetFingerprint,
+      citationRecords: durableCitations,
+      citationSourceFingerprints: new Map(store.getSnapshot().citation_sources.map(
+        (source) => [source.source_id, stableRuntimeJson(source)],
+      )),
+      citationFingerprints: new Map(store.getSnapshot().citations.map(
+        (citation) => [citation.citation_id, stableRuntimeJson(citation)],
+      )),
+      pendingCitationFrames: [],
+      nextCitationOrder: nextCitationOrder(durableCitations.citations),
       hasUnsafeFrame: false,
       terminal: null,
       lastWasTerminal: false,
@@ -626,6 +681,7 @@ export async function createConversationRuntime<TRequest>(
             frameState,
             frame,
             durableFrameKeys,
+            durableFrameFingerprints,
             liveFrameFingerprints,
           );
           if (disposition === "duplicate") continue;
@@ -637,7 +693,7 @@ export async function createConversationRuntime<TRequest>(
             runtimeSource(),
           );
           if (drafts.length > 0) {
-            await persist(drafts);
+            await persistFrameDrafts(drafts);
             if (drafts.some((draft) => runtimeMetadata(draft.metadata)?.resumeSafe)) {
               protocol.safeSequence = frame.sequence;
             }
@@ -658,6 +714,16 @@ export async function createConversationRuntime<TRequest>(
         await captureUsageReceipt(turnId, transportResult);
       }
 
+      if (
+        frameState.failure === null &&
+        frameState.pendingCitationFrames.length > 0 &&
+        frameState.terminal?.type === "response.completed"
+      ) {
+        frameState.failure = runtimeFailure(new TypeError(
+          "Citation batches require a durable assistant text message target",
+        ));
+      }
+
       if (destroyed) throw new ConversationRuntimeDestroyedError();
       if (frameState.failure !== null) {
         return result(turnId, "interrupted", frameState.failure);
@@ -671,6 +737,7 @@ export async function createConversationRuntime<TRequest>(
           const disconnectedResult = transportResult;
           let validationFailure: unknown = null;
           await persistGenerated((durableRevision) => {
+            if (frameState.pendingCitationFrames.length > 0) return [];
             let checkpoint: TurnResumePoint | null;
             try {
               checkpoint = validatedObservationCheckpoint(
@@ -1776,6 +1843,164 @@ function streamedAssistantMessageId(
   return matches[0]?.message_id ?? null;
 }
 
+function runtimeCitationRecords(
+  state: ConversationState,
+  assistantMessageId: ConversationMessageId | null,
+): CitationRecordSet {
+  if (assistantMessageId === null) {
+    return normalizeCitationRecords({ sources: [], citations: [] });
+  }
+  const citations = state.citations.filter(
+    (citation) => citation.target.type === "assistant_message" &&
+      (citation.target.message_id as string) === (assistantMessageId as string),
+  );
+  const sourceIds = new Set(citations.map((citation) => citation.source_id));
+  return normalizeCitationRecords({
+    sources: state.citation_sources.filter((source) => sourceIds.has(source.source_id)),
+    citations,
+  });
+}
+
+function nextCitationOrder(citations: readonly Citation[]): number {
+  for (const [index, citation] of citations.entries()) {
+    if (citation.order !== index) {
+      throw new TypeError("Durable assistant citations do not have contiguous order");
+    }
+  }
+  return citations.length;
+}
+
+function stableRuntimeJson(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? "null";
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableRuntimeJson(entry)).join(",")}]`;
+  }
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object).sort().map((key) =>
+    `${JSON.stringify(key)}:${stableRuntimeJson(object[key])}`
+  ).join(",")}}`;
+}
+
+function stableRuntimeFingerprint(value: unknown): string {
+  const serialized = stableRuntimeJson(value);
+  let first = 2_166_136_261;
+  let second = 2_166_136_261 ^ serialized.length;
+  for (let index = 0; index < serialized.length; index += 1) {
+    const code = serialized.charCodeAt(index);
+    first = Math.imul(first ^ code, 16_777_619);
+    second = Math.imul(second ^ (code + index), 16_777_619);
+  }
+  return `${serialized.length.toString(36)}:${(first >>> 0).toString(16).padStart(8, "0")}${
+    (second >>> 0).toString(16).padStart(8, "0")
+  }`;
+}
+
+function frameFingerprint(frame: StreamEvent): string {
+  return stableRuntimeFingerprint(frame);
+}
+
+function providerCitationTargetFingerprint(frame: ResponseCitationBatchEvent): string {
+  return stableRuntimeFingerprint([frame.target.type, frame.target.message_id]);
+}
+
+function rememberCitationFrame(
+  state: FrameState,
+  frame: ResponseCitationBatchEvent,
+): void {
+  const targetFingerprint = providerCitationTargetFingerprint(frame);
+  if (
+    state.citationTargetFingerprint !== null &&
+    state.citationTargetFingerprint !== targetFingerprint
+  ) {
+    throw new TypeError("Citation batches must use one assistant output target");
+  }
+  const firstOrder = frame.citations[0]?.order;
+  if (firstOrder !== state.nextCitationOrder) {
+    throw new TypeError("Citation order must be contiguous across batches");
+  }
+
+  for (const source of frame.sources) {
+    const fingerprint = stableRuntimeJson(source);
+    const existing = state.citationSourceFingerprints.get(source.source_id);
+    if (existing !== undefined && existing !== fingerprint) {
+      throw new TypeError("A citation source identity conflicts with durable history");
+    }
+  }
+  for (const citation of frame.citations) {
+    if (state.citationFingerprints.has(citation.citation_id)) {
+      throw new TypeError("Citation identities must be unique across batches");
+    }
+  }
+
+  const combined = normalizeCitationRecords({
+    sources: [...state.citationRecords.sources, ...frame.sources],
+    citations: [...state.citationRecords.citations, ...frame.citations],
+  });
+  state.citationTargetFingerprint = targetFingerprint;
+  state.protocol.citationTargetFingerprint = targetFingerprint;
+  state.citationRecords = combined;
+  state.nextCitationOrder += frame.citations.length;
+  for (const source of frame.sources) {
+    state.citationSourceFingerprints.set(source.source_id, stableRuntimeJson(source));
+  }
+  for (const citation of frame.citations) {
+    state.citationFingerprints.set(citation.citation_id, stableRuntimeJson(citation));
+  }
+}
+
+function citationDraft(
+  state: FrameState,
+  frame: ResponseCitationBatchEvent,
+  source: ConversationEventSource,
+  resumeSafe: boolean,
+): EventDraft {
+  if (state.assistantMessageId === null) {
+    throw new TypeError("A citation batch has no canonical assistant message target");
+  }
+  const messageId = state.assistantMessageId;
+  return {
+    actor: { type: "assistant" },
+    source,
+    metadata: metadataFor({
+      turnId: state.turnId,
+      ...(state.protocol.transportTurnId === null
+        ? {}
+        : { transportTurnId: state.protocol.transportTurnId }),
+      requestId: frame.request_id,
+      traceId: frame.trace_id,
+      sequence: frame.sequence,
+      frameType: frame.type,
+      frameFingerprint: frameFingerprint(frame),
+      citationTargetFingerprint: providerCitationTargetFingerprint(frame),
+      resumeSafe,
+    }),
+    payload: {
+      type: "citation.records_linked",
+      citation_records_version: CONVERSATION_CITATION_RECORDS_VERSION,
+      target: { type: "assistant_message", message_id: messageId },
+      sources: frame.sources.map((sourceRecord): CitationSource => ({
+        source_id: sourceRecord.source_id,
+        type: sourceRecord.type,
+        label: sourceRecord.label,
+        ...(sourceRecord.locator === undefined
+          ? {}
+          : { locator: sourceRecord.locator }),
+      })),
+      citations: frame.citations.map((citation): Citation => ({
+        citation_id: citation.citation_id,
+        source_id: citation.source_id,
+        order: citation.order,
+        target: {
+          type: "assistant_message",
+          message_id: messageId as never,
+        },
+      })),
+    },
+  };
+}
+
 function draftsForNonterminalFrame(
   state: FrameState,
   frame: StreamEvent,
@@ -1784,6 +2009,7 @@ function draftsForNonterminalFrame(
 ): EventDraft[] {
   const metadata = (resumeSafe: boolean): ConversationEventMetadata =>
     metadataFor({
+      turnId: state.turnId,
       ...(state.protocol.transportTurnId === null
         ? {}
         : { transportTurnId: state.protocol.transportTurnId }),
@@ -1791,6 +2017,7 @@ function draftsForNonterminalFrame(
       traceId: frame.trace_id,
       sequence: frame.sequence,
       frameType: frame.type,
+      frameFingerprint: frameFingerprint(frame),
       resumeSafe,
     });
 
@@ -1809,7 +2036,7 @@ function draftsForNonterminalFrame(
       const assistantMessageId = state.assistantMessageId ??
         createId("assistant_message") as ConversationMessageId;
       state.assistantMessageId = assistantMessageId;
-      return [{
+      const textDraft: EventDraft = {
         actor: { type: "assistant" },
         source,
         metadata: metadata(!state.hasUnsafeFrame),
@@ -1819,7 +2046,11 @@ function draftsForNonterminalFrame(
           message_id: assistantMessageId,
           text: frame.delta,
         },
-      }];
+      };
+      const pendingCitations = state.pendingCitationFrames.splice(0).map(
+        (citationFrame) => citationDraft(state, citationFrame, source, false),
+      );
+      return [textDraft, ...pendingCitations];
     }
     case "response.tool_call": {
       const safe = !state.hasUnsafeFrame;
@@ -1836,12 +2067,22 @@ function draftsForNonterminalFrame(
         },
       }];
     }
+    case "response.citation_batch": {
+      rememberCitationFrame(state, frame);
+      if (state.assistantMessageId === null) {
+        state.pendingCitationFrames.push(frame);
+        return [];
+      }
+      return [citationDraft(state, frame, source, !state.hasUnsafeFrame)];
+    }
     case "response.usage":
       state.hasUnsafeFrame = true;
       return [];
     case "response.completed":
+      return [];
     case "response.cancelled":
     case "response.error":
+      state.pendingCitationFrames.length = 0;
       return [];
   }
 }
@@ -1854,6 +2095,7 @@ function draftsForTerminal(
   checkpoint?: TurnResumePoint,
 ): EventDraft[] {
   const metadata = metadataFor({
+    turnId: state.turnId,
     ...(state.protocol.transportTurnId === null
       ? {}
       : { transportTurnId: state.protocol.transportTurnId }),
@@ -1861,6 +2103,7 @@ function draftsForTerminal(
     traceId: terminal.trace_id,
     sequence: terminal.sequence,
     frameType: terminal.type,
+    frameFingerprint: frameFingerprint(terminal),
     resumeSafe: true,
     ...(checkpoint === undefined ? {} : { checkpoint }),
   });
@@ -1910,13 +2153,18 @@ function acceptFrame(
   state: FrameState,
   frame: StreamEvent,
   durableFrameKeys: ReadonlySet<string>,
+  durableFingerprints: ReadonlyMap<string, string>,
   liveFingerprints: Map<string, string>,
 ): "accepted" | "duplicate" {
   const key = frameKey(frame.request_id, frame.sequence);
-  const fingerprint = JSON.stringify(frame);
+  const fingerprint = frameFingerprint(frame);
   const existingFingerprint = liveFingerprints.get(key);
   if (existingFingerprint !== undefined && existingFingerprint !== fingerprint) {
     throw new TypeError("A replayed request_id and sequence contained conflicting data");
+  }
+  const durableFingerprint = durableFingerprints.get(key);
+  if (durableFingerprint !== undefined && durableFingerprint !== fingerprint) {
+    throw new TypeError("A durable request_id and sequence contained conflicting data");
   }
   const known = durableFrameKeys.has(key) || existingFingerprint !== undefined;
   if (frame.sequence < state.expectedSequence) {
@@ -2189,11 +2437,18 @@ function runtimeFailure(cause: unknown): ConversationRuntimeError {
 
 function metadataFor(metadata: RuntimeMetadata): ConversationEventMetadata {
   const runtime: ConversationEventMetadata = {};
+  if (metadata.turnId !== undefined) runtime.turn_id = metadata.turnId;
   if (metadata.transportTurnId !== undefined) runtime.transport_turn_id = metadata.transportTurnId;
   if (metadata.requestId !== undefined) runtime.request_id = metadata.requestId;
   if (metadata.traceId !== undefined) runtime.trace_id = metadata.traceId;
   if (metadata.sequence !== undefined) runtime.sequence = metadata.sequence;
   if (metadata.frameType !== undefined) runtime.frame_type = metadata.frameType;
+  if (metadata.frameFingerprint !== undefined) {
+    runtime.frame_fingerprint = metadata.frameFingerprint;
+  }
+  if (metadata.citationTargetFingerprint !== undefined) {
+    runtime.citation_target_fingerprint = metadata.citationTargetFingerprint;
+  }
   if (metadata.resumeSafe !== undefined) runtime.resume_safe = metadata.resumeSafe;
   if (metadata.checkpoint !== undefined) {
     runtime.checkpoint = {
@@ -2212,6 +2467,9 @@ function runtimeMetadata(metadata: ConversationEventMetadata | undefined): Runti
   const value = raw as Record<string, unknown>;
   const checkpoint = runtimeCheckpoint(value.checkpoint);
   return {
+    ...(typeof value.turn_id === "string"
+      ? { turnId: value.turn_id as ConversationTurnId }
+      : {}),
     ...(typeof value.transport_turn_id === "string"
       ? { transportTurnId: value.transport_turn_id }
       : {}),
@@ -2221,30 +2479,59 @@ function runtimeMetadata(metadata: ConversationEventMetadata | undefined): Runti
     ...(typeof value.frame_type === "string"
       ? { frameType: value.frame_type as StreamEvent["type"] }
       : {}),
+    ...(typeof value.frame_fingerprint === "string"
+      ? { frameFingerprint: value.frame_fingerprint }
+      : {}),
+    ...(typeof value.citation_target_fingerprint === "string"
+      ? { citationTargetFingerprint: value.citation_target_fingerprint }
+      : {}),
     ...(typeof value.resume_safe === "boolean" ? { resumeSafe: value.resume_safe } : {}),
     ...(checkpoint === undefined ? {} : { checkpoint }),
   };
 }
 
-function turnIdForEvent(event: ConversationEvent): ConversationTurnId | null {
-  return "turn_id" in event.payload ? event.payload.turn_id : null;
+function turnIdForEvent(
+  event: ConversationEvent,
+  metadata: RuntimeMetadata | null,
+): ConversationTurnId | null {
+  return "turn_id" in event.payload
+    ? event.payload.turn_id
+    : metadata?.turnId ?? null;
 }
 
 function rememberRuntimeMetadata(
   event: ConversationEvent,
   protocolByTurn: Map<string, TurnProtocolState>,
   durableFrameKeys: Set<string>,
+  durableFrameFingerprints: Map<string, string>,
 ): void {
   const metadata = runtimeMetadata(event.metadata);
-  const turnId = turnIdForEvent(event);
+  const turnId = turnIdForEvent(event, metadata);
   if (metadata === null || turnId === null) return;
   const protocol = protocolState(protocolByTurn, turnId);
   if (metadata.transportTurnId !== undefined) protocol.transportTurnId = metadata.transportTurnId;
   if (metadata.requestId !== undefined) protocol.requestId = metadata.requestId;
   if (metadata.traceId !== undefined) protocol.traceId = metadata.traceId;
   if (metadata.checkpoint !== undefined) protocol.checkpoint = metadata.checkpoint;
+  if (metadata.citationTargetFingerprint !== undefined) {
+    if (
+      protocol.citationTargetFingerprint !== null &&
+      protocol.citationTargetFingerprint !== metadata.citationTargetFingerprint
+    ) {
+      throw new TypeError("Durable citation metadata contains conflicting targets");
+    }
+    protocol.citationTargetFingerprint = metadata.citationTargetFingerprint;
+  }
   if (metadata.requestId !== undefined && metadata.sequence !== undefined) {
-    durableFrameKeys.add(frameKey(metadata.requestId, metadata.sequence));
+    const key = frameKey(metadata.requestId, metadata.sequence);
+    durableFrameKeys.add(key);
+    if (metadata.frameFingerprint !== undefined) {
+      const existing = durableFrameFingerprints.get(key);
+      if (existing !== undefined && existing !== metadata.frameFingerprint) {
+        throw new TypeError("Durable runtime metadata contains conflicting frames");
+      }
+      durableFrameFingerprints.set(key, metadata.frameFingerprint);
+    }
     if (metadata.resumeSafe === true) {
       protocol.safeSequence = Math.max(protocol.safeSequence ?? -1, metadata.sequence);
     }
@@ -2256,6 +2543,7 @@ async function hydrateRuntimeMetadata(
   eventStore: ConversationEventStore,
   protocolByTurn: Map<string, TurnProtocolState>,
   durableFrameKeys: Set<string>,
+  durableFrameFingerprints: Map<string, string>,
 ): Promise<void> {
   let cursor: ConversationEventCursor | null = null;
   for (;;) {
@@ -2265,7 +2553,12 @@ async function hydrateRuntimeMetadata(
       limit: 500,
     });
     for (const entry of page.entries) {
-      rememberRuntimeMetadata(entry.event, protocolByTurn, durableFrameKeys);
+      rememberRuntimeMetadata(
+        entry.event,
+        protocolByTurn,
+        durableFrameKeys,
+        durableFrameFingerprints,
+      );
       cursor = entry.cursor;
     }
     if (!page.hasMore) return;
@@ -2282,6 +2575,7 @@ async function catchUpRuntimeStore(
   store: ConversationStore,
   protocolByTurn: Map<string, TurnProtocolState>,
   durableFrameKeys: Set<string>,
+  durableFrameFingerprints: Map<string, string>,
   readBatchSize: number,
 ): Promise<void> {
   let lastSafeRevision = store.getSnapshot().revision;
@@ -2350,7 +2644,12 @@ async function catchUpRuntimeStore(
         });
       }
       for (const event of events) {
-        rememberRuntimeMetadata(event, protocolByTurn, durableFrameKeys);
+        rememberRuntimeMetadata(
+          event,
+          protocolByTurn,
+          durableFrameKeys,
+          durableFrameFingerprints,
+        );
       }
       lastSafeRevision = pageRevision;
       lastSafeCursor = pageCursor;
@@ -2411,6 +2710,7 @@ function protocolState(
     requestId: null,
     traceId: null,
     safeSequence: null,
+    citationTargetFingerprint: null,
     checkpoint: EMPTY_CHECKPOINT,
   };
   states.set(turnId, created);
