@@ -529,10 +529,7 @@ function eventChannel() {
   return { channel: { send }, send, sent };
 }
 
-function toolBridge(
-  execute: (call: unknown, operation: { readonly signal: AbortSignal }) =>
-    RealtimeVoiceServerToolOutcome | Promise<RealtimeVoiceServerToolOutcome>,
-) {
+function toolBridge(execute: RealtimeVoiceServerToolBridge["execute"]) {
   const executeMock = vi.fn(execute);
   const terminateSession = vi.fn(async () => undefined);
   return {
@@ -622,7 +619,7 @@ async function startProviderSession(
 
 describe("OpenAI trusted-server realtime event normalization", () => {
   it("projects ordered lifecycle, audio activity, barge-in, and channel termination", async () => {
-    const bridge = toolBridge(completedToolOutcome);
+    const bridge = toolBridge(async (call) => completedToolOutcome(call));
     const test = harness({ toolBridge: bridge.bridge });
     const output = eventChannel();
     await test.server.bootstrap(request(), operation());
@@ -700,7 +697,7 @@ describe("OpenAI trusted-server realtime event normalization", () => {
   });
 
   it("routes one bounded function call with exact session capability and stable upstream output", async () => {
-    const bridge = toolBridge(completedToolOutcome);
+    const bridge = toolBridge(async (call) => completedToolOutcome(call));
     const test = harness({ toolBridge: bridge.bridge });
     const output = eventChannel();
     await startProviderSession(test.server, output.channel, toolRequest());
@@ -753,7 +750,7 @@ describe("OpenAI trusted-server realtime event normalization", () => {
   });
 
   it("sends approval-required and malformed-call outcomes without sensitive details", async () => {
-    const approval = toolBridge((call) => {
+    const approval = toolBridge(async (call) => {
       const value = call as { session_id: RealtimeVoiceSessionId; call_id: string };
       return {
         version: REALTIME_VOICE_CONTRACT_VERSION,
@@ -793,7 +790,7 @@ describe("OpenAI trusted-server realtime event normalization", () => {
   });
 
   it("rejects mismatched identities and oversized accepted payloads with fixed errors", async () => {
-    const bridge = toolBridge(completedToolOutcome);
+    const bridge = toolBridge(async (call) => completedToolOutcome(call));
     const test = harness({ toolBridge: bridge.bridge });
     const output = eventChannel();
     await test.server.bootstrap(toolRequest(), operation());
@@ -933,7 +930,7 @@ describe("OpenAI trusted-server realtime event normalization", () => {
     expect(pendingBridge.terminateSession).toHaveBeenCalledWith("session-1");
     expect(output.sent).toHaveLength(0);
 
-    const failedBridge = toolBridge(completedToolOutcome);
+    const failedBridge = toolBridge(async (call) => completedToolOutcome(call));
     const failed = harness({ toolBridge: failedBridge.bridge });
     const failedOutput = eventChannel();
     await startProviderSession(failed.server, failedOutput.channel);

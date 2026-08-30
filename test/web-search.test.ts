@@ -214,15 +214,16 @@ describe("WebSearchService", () => {
   });
 
   it.each([
-    ["provider-only field", adapterResult({ provider_rank: 1 })],
-    ["oversized title", adapterResult({ title: "x".repeat(WEB_SEARCH_LIMITS.titleUtf8Bytes + 1) })],
-    ["oversized snippet", adapterResult({ snippet: "x".repeat(WEB_SEARCH_LIMITS.snippetUtf8Bytes + 1) })],
-    ["oversized URL", adapterResult({ url: `https://example.com/${"x".repeat(WEB_SEARCH_LIMITS.urlUtf8Bytes)}` })],
-    ["malformed result", { source_id: "source_1", title: "missing fields" }],
-  ])("rejects %s without exposing adapter material", async (_label, result) => {
+    ["provider-only field", adapterResult({ provider_rank: "private-provider-rank" }), "private-provider-rank"],
+    ["oversized title", adapterResult({ title: `private-title-${"x".repeat(WEB_SEARCH_LIMITS.titleUtf8Bytes)}` }), "private-title"],
+    ["oversized snippet", adapterResult({ snippet: `private-snippet-${"x".repeat(WEB_SEARCH_LIMITS.snippetUtf8Bytes)}` }), "private-snippet"],
+    ["oversized URL", adapterResult({ url: `https://example.com/private-url/${"x".repeat(WEB_SEARCH_LIMITS.urlUtf8Bytes)}` }), "private-url"],
+    ["malformed result", { source_id: "source_1", title: "private-missing-fields" }, "private-missing-fields"],
+  ])("rejects %s without exposing adapter material", async (_label, result, privateMaterial) => {
     const { service } = setup({ search: async () => ({ results: [result] }) });
     const error = await expectCode(service.search(input(), executionContext()), "invalid_response");
     const serialized = JSON.stringify(error);
+    expect(serialized).not.toContain(privateMaterial);
     expect(error).not.toHaveProperty("cause");
   });
 
