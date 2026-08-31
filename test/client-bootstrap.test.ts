@@ -49,6 +49,7 @@ describe("createHandrailAiClient", () => {
     expect(client.activity).toBeNull();
     expect(client.attachmentUpload).toBeNull();
     expect(client.presence).toBeNull();
+    expect(client.synchronization).toBeNull();
     const typedCatalog: ConversationCatalog<{ readonly actorId: string }> = client.catalog;
     const typedUpload: AttachmentUploadAdapter<Blob> | null = client.attachmentUpload;
     expect(typedCatalog).toBe(client.catalog);

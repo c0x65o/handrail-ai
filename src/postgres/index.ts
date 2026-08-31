@@ -64,6 +64,8 @@ import {
 import type { AttachmentBlobStore, AttachmentStagingMetadataStore, StagedAttachmentRecord } from "../attachments/staging.js";
 import { diagnoseAiOperation, type AiDiagnosticSink } from "../diagnostics.js";
 
+export * from "./live-pubsub.js";
+
 export const POSTGRES_PERSISTENCE_SCHEMA_VERSION = 1 as const;
 
 export interface PostgresQueryResult<TRow extends Record<string, unknown> = Record<string, unknown>> {

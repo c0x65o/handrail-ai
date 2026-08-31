@@ -255,6 +255,18 @@ Presence and typing are ephemeral signals. They are intentionally outside the
 durable log and may expire, coalesce, or disappear across disconnects. Do not
 reconstruct authoritative messages or turn state from presence records.
 
+For multi-instance Node deployments that already use PostgreSQL,
+`createPostgresLivePubSubFromPool` from `@handrail/ai/persistence/postgres`
+adapts an injected `pg`-compatible pool to both live activity and presence
+delivery. Pass the returned bridge as `pubSub` to
+`createInMemoryLiveConversationActivityDelivery` and
+`createInMemoryLivePresenceDelivery`, then call `close()` during server
+shutdown. It uses one fixed LISTEN channel with validated logical channels,
+bounded payloads, duplicate suppression in the delivery layer, and safe
+diagnostics for malformed notifications. LISTEN/NOTIFY remains a latency path:
+durable activity, snapshots, and client polling are still the convergence
+authority after dropped notifications or reconnects.
+
 ### Disconnect, resume, retry, and cancellation
 
 - `stopObserving(turnId)` interrupts only this runtime's local stream

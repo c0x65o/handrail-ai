@@ -19,6 +19,8 @@ import type { ConversationEventStore } from "../conversation/event-store.js";
 import type { ConversationClientId, ConversationDeviceId } from "../conversation/events.js";
 import { createConversationRuntime } from "../runtime.js";
 import type { AttachmentUploadAdapter } from "../attachments/types.js";
+import { createApplicationGatewaySyncAdapter } from "./synchronization.js";
+import type { ConversationSyncAdapter } from "../sync/types.js";
 
 export interface HandrailAiClientBootstrapOptions<TEvent, TRequest, TAuthorizationContext, TSynchronization = unknown>
 extends ApplicationGatewayTransportOptions<TEvent, TSynchronization> {
@@ -47,6 +49,7 @@ export interface HandrailAiClient<TEvent, TRequest, TAuthorizationContext> {
   readonly workspace: ConversationWorkspace<TRequest, TAuthorizationContext> | null;
   readonly attachmentUpload: AttachmentUploadAdapter<ApplicationGatewayAttachmentSource> | null;
   readonly presence: ApplicationGatewayPresenceClient | null;
+  readonly synchronization: ConversationSyncAdapter | null;
   buildRequest(input: { readonly content: string; readonly attachments?: readonly unknown[] }): TRequest;
   markActivityRead(conversationId: string): Promise<void>;
   dispose(): Promise<void>;
@@ -89,8 +92,10 @@ export async function createHandrailAiClient<TEvent = unknown, TRequest = unknow
   const attachmentUpload = transport.capabilities.attachmentUpload.supported
     ? transport.capabilities.attachmentUpload.capability : null;
   const presence = transport.capabilities.presence.supported ? transport.capabilities.presence.capability : null;
+  const synchronization = capabilities.synchronization === true
+    ? createApplicationGatewaySyncAdapter({ resources, ...(presence ? { presence } : {}) }) : null;
   return Object.freeze({ capabilities, transport, resources, activity, catalog, registry, workspace,
-    attachmentUpload, presence,
+    attachmentUpload, presence, synchronization,
     buildRequest(input: { readonly content: string; readonly attachments?: readonly unknown[] }) {
       if (!options.buildRequest) throw new TypeError("No application request builder is configured");
       return options.buildRequest({ content: input.content, attachments: input.attachments ?? [] });
