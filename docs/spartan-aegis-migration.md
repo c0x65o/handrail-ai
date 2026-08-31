@@ -14,7 +14,7 @@ This is a migration seam, not a rewrite of Spartan's business domain. It was der
 
 | Existing Aegis concern | Reusable handrail-ai boundary |
 | --- | --- |
-| `provider.ts` Responses loop and normalized stream | OpenAI provider entry plus `projectOpenAIResponsesTools`; retain a bounded application loop until the Responses stream adapter is selected |
+| `provider.ts` Responses loop and normalized stream | `createOpenAIResponsesProviderAdapter` plus `projectOpenAIResponsesTools`; retain Spartan's bounded multi-call policy around tool results |
 | `tool-catalog.ts` namespace projection | `createDeferredToolDiscoveryPlan`; Spartan supplies stable namespace membership |
 | `handrail-bridge.ts` MCP discovery/execution glue | `@handrail/ai/connectors/mcp` |
 | routes, protected request plumbing, cancellation, replay | `createApplicationGateway` plus `@handrail/ai/server/application-gateway` |

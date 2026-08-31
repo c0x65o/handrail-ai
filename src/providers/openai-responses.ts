@@ -1,4 +1,4 @@
-import { AI_RUNTIME_PROTOCOL_VERSION, type JsonObject, type StreamEvent } from "../protocol.js";
+import { AI_RUNTIME_PROTOCOL_VERSION, type AttachmentReference, type CancellationReason, type JsonObject, type StreamEvent } from "../protocol.js";
 import { PROVIDER_CONTEXT_NOT_SUPPORTED } from "../provider-context.js";
 import { createDeferredToolDiscoveryPlan, type ToolNamespaceDefinition } from "../tools/deferred.js";
 import type { ProviderAdapter, ProviderAdapterError, ProviderAdapterInvocation, ProviderAdapterMetadata, ProviderAdapterResult, ProviderAdapterStream, ProviderUsage } from "./index.js";
@@ -13,6 +13,7 @@ export interface OpenAIResponsesProviderOptions {
   readonly instructions?: string;
   readonly contextWindowTokens?: number | null;
   readonly maxOutputTokens?: number | null;
+  readonly resolveAttachment?: (reference: AttachmentReference) => JsonObject;
 }
 
 type RecordValue = Record<string, unknown>;
@@ -36,8 +37,13 @@ function usage(value: unknown): ProviderUsage {
   }
   const inputDetails = source.input_tokens_details && typeof source.input_tokens_details === "object" ? record(source.input_tokens_details) : {};
   const outputDetails = source.output_tokens_details && typeof source.output_tokens_details === "object" ? record(source.output_tokens_details) : {};
-  return { input_tokens: input as number, cached_input_tokens: Number(inputDetails.cached_tokens ?? 0),
-    output_tokens: output as number, reasoning_tokens: Number(outputDetails.reasoning_tokens ?? 0), total_tokens: total as number,
+  const cached = Number(inputDetails.cached_tokens ?? 0), reasoning = Number(outputDetails.reasoning_tokens ?? 0);
+  if (!Number.isSafeInteger(cached) || cached < 0 || cached > (input as number) ||
+    !Number.isSafeInteger(reasoning) || reasoning < 0 || reasoning > (output as number)) {
+    throw new TypeError("OpenAI Responses usage details are invalid");
+  }
+  return { input_tokens: input as number, cached_input_tokens: cached,
+    output_tokens: output as number, reasoning_tokens: reasoning, total_tokens: total as number,
     provider_cost: { known: false } };
 }
 
@@ -46,6 +52,11 @@ function safeFailure(error: unknown): ProviderAdapterError {
   if (status === 429) return { kind: "provider", retryable: true, code: "rate_limited", message: "The provider rate limit was reached." };
   if (status >= 500) return { kind: "provider", retryable: true, code: "upstream_unavailable", message: "The provider is temporarily unavailable." };
   return { kind: "provider", retryable: true, code: "upstream_unavailable", message: "The provider request failed." };
+}
+
+function cancellationReason(signal: AbortSignal): CancellationReason {
+  return signal.reason === "deadline_exceeded" || signal.reason === "policy_revoked" || signal.reason === "runtime_shutdown"
+    ? signal.reason : "runtime_shutdown";
 }
 
 export class OpenAIResponsesProviderAdapter implements ProviderAdapter {
@@ -75,7 +86,8 @@ export class OpenAIResponsesProviderAdapter implements ProviderAdapter {
       const request = buildOpenAIResponsesRequest({ model: this.options.model, invocation, plan,
         supportsToolSearch: this.options.supportsToolSearch ?? true,
         ...(this.options.hosted ? { hosted: this.options.hosted } : {}),
-        ...(this.options.instructions ? { instructions: this.options.instructions } : {}) });
+        ...(this.options.instructions ? { instructions: this.options.instructions } : {}),
+        ...(this.options.resolveAttachment ? { resolveAttachment: this.options.resolveAttachment } : {}) });
       const source = await this.options.request(request, { signal: invocation.signal });
       let finalUsage: ProviderUsage | null = null;
       let completed = false;
@@ -105,8 +117,9 @@ export class OpenAIResponsesProviderAdapter implements ProviderAdapter {
       return { status: "completed", outcome: "stop", usage: finalUsage } satisfies ProviderAdapterResult;
     } catch (error) {
       if (invocation.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) {
-        yield { ...envelope(invocation, "response.cancelled", sequence), type: "response.cancelled", reason: "runtime_shutdown" };
-        return { status: "cancelled", reason: "runtime_shutdown", usage: null };
+        const reason = cancellationReason(invocation.signal);
+        yield { ...envelope(invocation, "response.cancelled", sequence), type: "response.cancelled", reason };
+        return { status: "cancelled", reason, usage: null };
       }
       const normalized = safeFailure(error);
       yield { ...envelope(invocation, "response.error", sequence), type: "response.error",

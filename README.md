@@ -23,7 +23,7 @@ Node.js 20 or newer is required for package tooling and trusted-server use.
 | `@handrail/ai/server/trusted-server` | Framework-neutral request protection contracts | Trusted server only |
 | `@handrail/ai/connectors/mcp` | Injected-client MCP tool-plugin/discovery adapter | Optional connector boundary |
 | `@handrail/ai/persistence/postgres` | Injected-client reference Postgres persistence | Optional database boundary |
-| `@handrail/ai/providers/openai` | OpenAI provider adapter | Trusted server only |
+| `@handrail/ai/providers/openai` | OpenAI Chat Completions and Responses adapters, including hosted/deferred tool projection | Trusted server only |
 | `@handrail/ai/providers/openai/transcription` | OpenAI transcription capability | Trusted server only |
 | `@handrail/ai/providers/openai/realtime` | OpenAI realtime bootstrap, event normalization, and session authority | Trusted server only |
 | `@handrail/ai/providers/anthropic` | Anthropic provider adapter | Trusted server only |
