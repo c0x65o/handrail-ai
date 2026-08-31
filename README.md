@@ -163,7 +163,7 @@ See [`docs/wire-protocol.md`](./docs/wire-protocol.md) for the language-neutral
 contract and `flutter/handrail_ai_client` for the tested Dart implementation.
 See [`docs/platform-contracts.md`](./docs/platform-contracts.md) for security,
 compatibility, package boundaries, and production persistence guidance. The
-read-only Spartan Aegis mapping is in
+writable server-authoritative Spartan Aegis qualification mapping is in
 [`docs/spartan-aegis-migration.md`](./docs/spartan-aegis-migration.md).
 The Mills tool-runtime and rollback-safe adoption path is in
 [`docs/mills-family-migration.md`](./docs/mills-family-migration.md).

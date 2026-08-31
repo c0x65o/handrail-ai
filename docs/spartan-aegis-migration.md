@@ -76,7 +76,7 @@ rollback implementation. It stages attachment bytes in the expiring Postgres
 blob store, exposes persisted activity with live SSE plus polling fallback,
 publishes automatic assistant presence, and uses
 `createRequestScopedMcpSession` inside the existing per-message Handrail bridge.
-The `0.1.70` qualification artifact also composes
+The packaged qualification release also composes
 `createPostgresLivePubSubFromPool` from Spartan's existing `pg` pool, so live
 launcher activity and typing/presence fan out across application instances.
 The bridge is explicitly closed before the pool during shutdown; authoritative
@@ -120,4 +120,4 @@ business-side-effect authority until reconciliation reports are converged.
 
 Do not remove `provider.ts`, current Aegis routes, or old persistence during these steps. Cut reads over independently after the matching reconciliation report is converged. Binary attachment authorization/resolution, Zod schemas, company/actor construction, system instructions, proposal confirmation side effects, retention, and rollout flags remain Spartan-owned boundaries.
 
-Git dependencies require the package `prepare` script because public exports point at generated `dist` files. Production should pin an immutable tag or package integrity. Spartan's qualification seam pins the locally generated `0.1.70` artifact; the prior `0.1.68` artifact and legacy transport remain available for rollback. A temporary vendored tarball is acceptable for cross-repository qualification when its source revision, package version, and lockfile integrity are reviewed together. This artifact contains the Responses grounding/reasoning request options documented above, although removal of the legacy provider/persistence path remains independently gated by reconciliation and parity evidence.
+Git dependencies require the package `prepare` script because public exports point at generated `dist` files. Production should pin an immutable tag or package integrity. Spartan's qualification seam pins one reviewed artifact while retaining its preceding artifact and the legacy transport for rollback. A temporary vendored tarball is acceptable for cross-repository qualification when its source revision, package version, and lockfile integrity are reviewed together. This artifact contains the Responses grounding/reasoning request options documented above, although removal of the legacy provider/persistence path remains independently gated by reconciliation and parity evidence.
