@@ -6,6 +6,7 @@ import {
   type ConversationRevision,
 } from "./events.js";
 import { normalizeCitationRecords } from "../citations.js";
+import { jsonValuesEqual } from "../json-equality.js";
 import type { ConversationApprovalProposalRecord, ConversationState } from "./state.js";
 
 export function isConversationState(
@@ -165,8 +166,8 @@ function hasValidCitationProjection(
     return false;
   }
   if (
-    JSON.stringify(normalized.sources) !== JSON.stringify(sources) ||
-    JSON.stringify(normalized.citations) !== JSON.stringify(citations)
+    !jsonValuesEqual(normalized.sources, sources) ||
+    !jsonValuesEqual(normalized.citations, citations)
   ) return false;
 
   for (const citation of normalized.citations) {
@@ -372,7 +373,7 @@ function isToolResult(value: unknown, toolCallId: string): boolean {
   try {
     const records = normalizeCitationRecords(value.citation_records);
     return records.citations.length > 0 &&
-      JSON.stringify(records) === JSON.stringify(value.citation_records) &&
+      jsonValuesEqual(records, value.citation_records) &&
       records.citations.every((citation) =>
         citation.target.type === "tool_result" &&
         citation.target.tool_call_id === toolCallId);

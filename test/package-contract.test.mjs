@@ -11,6 +11,10 @@ const packageJson = JSON.parse(
   readFileSync(path.join(packageRoot, "package.json"), "utf8"),
 );
 
+test("git installs build the declared dist exports", () => {
+  assert.equal(packageJson.scripts.prepare, "npm run build");
+});
+
 test("declares the React subpath as an optional peer boundary", () => {
   assert.deepEqual(packageJson.exports["./react"], {
     types: "./dist/react/index.d.ts",
@@ -41,7 +45,7 @@ test("declares request protection as an explicit trusted-server boundary", () =>
 test("isolates the new client, UI, gateway, MCP, and Postgres boundaries", () => {
   for (const subpath of [
     "./client", "./react/headless", "./react/styled", "./server/application-gateway",
-    "./connectors/mcp", "./persistence/postgres",
+    "./connectors/mcp", "./adapters/spartan-aegis", "./persistence/postgres",
   ]) {
     assert.ok(packageJson.exports[subpath], `missing explicit export ${subpath}`);
   }
@@ -49,6 +53,16 @@ test("isolates the new client, UI, gateway, MCP, and Postgres boundaries", () =>
     assert.equal(packageJson.dependencies[dependency], undefined);
     assert.equal(packageJson.peerDependencies[dependency], undefined);
   }
+});
+
+test("ships the supported Spartan Aegis adapter as an isolated server boundary", async () => {
+  const adapter = await import(pathToFileURL(
+    path.join(packageRoot, packageJson.exports["./adapters/spartan-aegis"].import),
+  ).href);
+  assert.equal(adapter.SPARTAN_AEGIS_ADAPTER_VERSION, "handrail.spartan-aegis.v1");
+  assert.equal(typeof adapter.createSpartanAegisPlugin, "function");
+  assert.equal(adapter.SPARTAN_AEGIS_TOOL_LOOP_LIMITS.maxTotalToolCalls, 75);
+  assert.equal(adapter.SPARTAN_AEGIS_MAXIMUM_INPUT_MESSAGES, 30);
 });
 
 test("keeps the React Native headless entry free of DOM and react-dom dependencies", () => {

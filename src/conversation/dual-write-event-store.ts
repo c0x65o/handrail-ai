@@ -4,6 +4,7 @@ import type {
   ConversationEventCheckpointStore, ConversationEventStore, ReadConversationEventsInput, ReadConversationEventsResult,
   WriteConversationEventCheckpointResult,
 } from "./event-store.js";
+import { jsonValuesEqual } from "../json-equality.js";
 
 export interface DualWriteConversationEventStoreOptions {
   readonly primary: ConversationEventStore;
@@ -46,7 +47,7 @@ export class DualWriteConversationEventStore implements ConversationEventStore {
     const shared = Math.min(primary.length, shadow.length);
     for (let index = 0; index < shared; index += 1) {
       const left = primary[index]!.event, right = shadow[index]!.event;
-      if (JSON.stringify(left) !== JSON.stringify(right)) return Object.freeze({ status: "divergent" as const,
+      if (!jsonValuesEqual(left, right)) return Object.freeze({ status: "divergent" as const,
         revision: left.revision, primaryEventId: left.event_id, shadowEventId: right.event_id });
     }
     if (shadow.length > primary.length) {

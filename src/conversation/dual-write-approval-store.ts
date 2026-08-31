@@ -3,6 +3,7 @@ import type {
   ListApprovalProposalGroupInput, TransitionApprovalProposalInput,
 } from "./approval-proposal-store.js";
 import type { ConversationApprovalProposalRecord } from "./state.js";
+import { jsonValuesEqual } from "../json-equality.js";
 
 export interface DualWriteApprovalProposalStoreOptions<TPermissionContext> {
   readonly primary: ApprovalProposalStore<TPermissionContext>;
@@ -40,6 +41,6 @@ export class DualWriteApprovalProposalStore<TPermissionContext> implements Appro
     if (!primary && !shadow) return Object.freeze({ status: "converged" });
     if (!primary) return Object.freeze({ status: "missing_primary" });
     if (!shadow) return Object.freeze({ status: "missing_shadow" });
-    return Object.freeze({ status: JSON.stringify(primary) === JSON.stringify(shadow) ? "converged" : "divergent" });
+    return Object.freeze({ status: jsonValuesEqual(primary, shadow) ? "converged" : "divergent" });
   }
 }

@@ -89,7 +89,16 @@ export interface ApplicationGatewayResourceHandlers<TContext> {
 }
 
 export interface ApplicationGatewayOptions<TEvent, TRequest, TContext extends ApplicationGatewayAuthorizationContext> {
-  readonly transport: ConversationTransport<TEvent, TRequest>;
+  /** Process-global transport for applications whose transport is not identity scoped. */
+  readonly transport?: ConversationTransport<TEvent, TRequest>;
+  /**
+   * Resolves a request-scoped transport from the server-authoritative identity.
+   * Multi-tenant applications should use this instead of accepting identity in
+   * TRequest. Exactly one of transport and transportFor must be configured.
+   */
+  readonly transportFor?: (
+    context: TContext,
+  ) => ConversationTransport<TEvent, TRequest> | Promise<ConversationTransport<TEvent, TRequest>>;
   readonly authorize: ApplicationGatewayRequestAuthorizer<TContext>["authorize"];
   /** Converts a durable event into the exact resume point acknowledged by clients. */
   readonly checkpointForEvent: (event: TEvent) => TurnResumePoint;
@@ -220,11 +229,15 @@ function sse<TEvent>(
 export function createApplicationGateway<TEvent, TRequest, TContext extends ApplicationGatewayAuthorizationContext>(
   options: ApplicationGatewayOptions<TEvent, TRequest, TContext>,
 ): ApplicationGateway {
+  if ((options.transport === undefined) === (options.transportFor === undefined)) {
+    throw new TypeError("Exactly one application gateway transport source must be configured");
+  }
   const maximumBytes = options.maximumRequestBytes ?? 1_048_576;
-  const cancel = options.transport.capabilities.authoritativeCancellation;
-  const capabilities: ApplicationGatewayCapabilities = Object.freeze({
+  const resolveTransport = async (context: TContext) =>
+    options.transport ?? await options.transportFor!(context);
+  const capabilitiesFor = (transport: ConversationTransport<TEvent, TRequest>): ApplicationGatewayCapabilities => Object.freeze({
     protocolVersion: APPLICATION_GATEWAY_PROTOCOL_VERSION,
-    authoritativeCancellation: cancel.supported,
+    authoritativeCancellation: transport.capabilities.authoritativeCancellation.supported,
     attachments: options.capabilities?.attachments ?? false,
     presence: options.capabilities?.presence ?? false,
     synchronization: options.capabilities?.synchronization ?? false,
@@ -254,7 +267,9 @@ export function createApplicationGateway<TEvent, TRequest, TContext extends Appl
           return new Response(null, { status: 405, headers: { allow: action === "capabilities" ? "GET" : "POST" } });
         }
         const authorizationContext = await options.authorize(request, action);
-        if (action === "capabilities") return json({ ok: true, value: capabilities });
+        if (action === "capabilities") {
+          return json({ ok: true, value: capabilitiesFor(await resolveTransport(authorizationContext)) });
+        }
         if (action === "attachments" || action === "presence" || action === "synchronization") {
           const handler = options.handlers?.[action];
           return handler ? handler(request, authorizationContext) : new Response(null, { status: 501 });
@@ -291,20 +306,45 @@ export function createApplicationGateway<TEvent, TRequest, TContext extends Appl
           return json({ ok: true, value: await options.titleGeneration.generate(input, authorizationContext, request.signal) });
         }
         if (action === "start") {
+          const transport = await resolveTransport(authorizationContext);
           const input = await body<StartTurnInput<TRequest>>(request, maximumBytes);
-          const result = await options.transport.startTurn(input);
-          if (!result.ok) return failure(result.error);
+          emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: "start", phase: "started",
+            conversationId: input.conversationId, turnId: input.conversationTurnId });
+          const result = await transport.startTurn(input);
+          if (!result.ok) {
+            emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: "start", phase: "failed",
+              conversationId: input.conversationId, turnId: input.conversationTurnId,
+              code: result.error.code, retryable: result.error.retryable });
+            return failure(result.error);
+          }
+          emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: "start", phase: "succeeded",
+            conversationId: result.value.conversationId, turnId: result.value.turnId });
           return sse(result.value.observation, options.checkpointForEvent, {
             type: "started", conversationId: result.value.conversationId,
             turnId: result.value.turnId, mutationId: result.value.mutationId,
           });
         }
         if (action === "resume") {
-          const result = await options.transport.resumeTurn(await body<ResumeTurnInput>(request, maximumBytes));
+          const transport = await resolveTransport(authorizationContext);
+          const input = await body<ResumeTurnInput>(request, maximumBytes);
+          emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: "resume", phase: "started",
+            conversationId: input.conversationId, turnId: input.turnId });
+          const result = await transport.resumeTurn(input);
+          emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: "resume",
+            phase: result.ok ? "succeeded" : "failed", conversationId: input.conversationId, turnId: input.turnId,
+            ...(!result.ok ? { code: result.error.code, retryable: result.error.retryable } : {}) });
           return result.ok ? sse(result.value, options.checkpointForEvent) : failure(result.error);
         }
+        const transport = await resolveTransport(authorizationContext);
+        const cancel = transport.capabilities.authoritativeCancellation;
         if (!cancel.supported) return new Response(null, { status: 501 });
-        const result = await cancel.capability.cancelTurn(await body<CancelTurnInput>(request, maximumBytes));
+        const input = await body<CancelTurnInput>(request, maximumBytes);
+        emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: "cancel", phase: "started",
+          conversationId: input.conversationId, turnId: input.turnId });
+        const result = await cancel.capability.cancelTurn(input);
+        emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: "cancel",
+          phase: result.ok ? "succeeded" : "failed", conversationId: input.conversationId, turnId: input.turnId,
+          ...(!result.ok ? { code: result.error.code, retryable: result.error.retryable } : {}) });
         return result.ok ? json(result) : failure(result.error);
       } catch (error) {
         emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: diagnosticAction,

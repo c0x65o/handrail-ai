@@ -7,6 +7,7 @@ describe("MCP connector adapter", () => {
     const callTool = vi.fn(async () => ({ ok: true } as const));
     const adapter = createMcpConnectorAdapter({
       connectorId: "erp", namespace: "aegis", authorize,
+      discover: ({ context }) => context.actor === "owner",
       executionContext: (context: { applicationContext: { actor: string } }) => context.applicationContext,
       client: {
         async listTools() { return { tools: [{ name: "get_asset", description: "Get an asset", inputSchema: { type: "object", additionalProperties: false } }] }; },
@@ -17,6 +18,8 @@ describe("MCP connector adapter", () => {
     const values = [];
     for await (const registration of registrations) values.push(registration);
     expect(values[0]?.definition.name).toBe("aegis.get_asset");
+    expect(values[0]?.discover?.({ actor: "owner" })).toBe(true);
+    expect(values[0]?.discover?.({ actor: "viewer" })).toBe(false);
     const result = await values[0]!.executor({}, {
       applicationContext: { actor: "owner" }, definition: values[0]!.definition,
       signal: new AbortController().signal, toolCallId: "call-123",
@@ -29,10 +32,29 @@ describe("MCP connector adapter", () => {
   it("does not disclose a catalog when discovery is denied", async () => {
     const listTools = vi.fn();
     const adapter = createMcpConnectorAdapter({
-      connectorId: "private", authorize: async () => "deny" as const, executionContext: (context) => context.applicationContext,
+      connectorId: "private", authorize: async () => "deny" as const,
+      discover: () => false, executionContext: (context) => context.applicationContext,
       client: { listTools, async callTool() { return null; } },
     });
     expect(await adapter.registrations({})).toEqual([]);
     expect(listTools).not.toHaveBeenCalled();
+  });
+
+  it("filters every installed MCP tool for each discovery actor", async () => {
+    const adapter = createMcpConnectorAdapter({
+      connectorId: "tenant-tools",
+      authorize: async () => "allow" as const,
+      discover: ({ context }) => context.companyId === "company-a",
+      executionContext: (context: { applicationContext: { companyId: string } }) => context.applicationContext,
+      client: {
+        async listTools() { return { tools: [{ name: "private_ledger", inputSchema: { type: "object" } }] }; },
+        async callTool() { return null; },
+      },
+    });
+    const registrations = await adapter.registrations({ companyId: "install" });
+    const values = [];
+    for await (const registration of registrations) values.push(registration);
+    expect(values[0]?.discover?.({ companyId: "company-a" })).toBe(true);
+    expect(values[0]?.discover?.({ companyId: "company-b" })).toBe(false);
   });
 });

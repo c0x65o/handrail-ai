@@ -45,6 +45,11 @@ import { isConversationApprovalReason, isConversationApprovalReviewedArguments,
   isLegalConversationApprovalProposalTransition } from "../conversation/events.js";
 import type { ConversationApprovalProposalRecord, ConversationEventAttribution } from "../conversation/state.js";
 import { isConversationApprovalProposalRecord } from "../conversation/state-validation.js";
+import type {
+  OpenAIResponsesContinuationRecord,
+  OpenAIResponsesContinuationStore,
+} from "../providers/openai-responses.js";
+import { jsonValuesEqual } from "../json-equality.js";
 
 export const POSTGRES_PERSISTENCE_SCHEMA_VERSION = 1 as const;
 
@@ -73,7 +78,7 @@ export const handrailPostgresSchemaV1 = Object.freeze([
   `CREATE INDEX IF NOT EXISTS handrail_ai_approvals_group ON handrail_ai_approvals (tenant_id, scope_id, group_id, updated_at, proposal_id)`,
 ] as const);
 
-export type PostgresDocumentKind = "checkpoint" | "catalog" | "approval" | "turn_state" | "sync_state";
+export type PostgresDocumentKind = "checkpoint" | "catalog" | "approval" | "turn_state" | "sync_state" | "openai_continuation" | "attachment";
 
 export interface PostgresVersionedDocument<T = unknown> {
   readonly tenantId: string;
@@ -107,6 +112,9 @@ function version(value: number | null, field: string): number | null {
 }
 
 function jsonClone<T>(value: T): T { return JSON.parse(JSON.stringify(value)) as T; }
+function advisoryLockKey(...parts: readonly string[]): string {
+  return parts.map((part) => `${new TextEncoder().encode(part).byteLength}:${part}`).join("|");
+}
 
 /**
  * Reference Postgres persistence used to build existing high-level store
@@ -123,7 +131,7 @@ export class PostgresAiPersistence {
     const tenant = id(input.tenantId, "tenantId"), conversation = id(input.conversationId, "conversationId");
     const expected = version(input.expectedRevision, "expectedRevision");
     return this.client.transaction(async (tx) => {
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`${tenant}\0${conversation}`]);
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [advisoryLockKey(tenant, conversation)]);
       const latest = await tx.query<{ revision: string }>("SELECT revision::text AS revision FROM handrail_ai_events WHERE tenant_id=$1 AND conversation_id=$2 ORDER BY revision DESC LIMIT 1", [tenant, conversation]);
       const actual = latest.rows[0] ? Number(latest.rows[0].revision) : null;
       if (actual !== expected) throw new PostgresPersistenceConflictError();
@@ -192,7 +200,7 @@ export class PostgresAiPersistence {
     const tenant = id(input.tenantId, "tenantId"), scope = id(input.scopeId, "scopeId"), record = id(input.recordId, "recordId");
     const expected = version(input.expectedVersion, "expectedVersion");
     return this.client.transaction(async (tx) => {
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`${tenant}\0${input.kind}\0${scope}\0${record}`]);
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [advisoryLockKey(tenant, input.kind, scope, record)]);
       const current = await tx.query<{ version: string }>("SELECT version::text AS version FROM handrail_ai_documents WHERE tenant_id=$1 AND kind=$2 AND scope_id=$3 AND record_id=$4", [tenant, input.kind, scope, record]);
       const actual = current.rows[0] ? Number(current.rows[0].version) : null;
       if (actual !== expected) throw new PostgresPersistenceConflictError();
@@ -212,7 +220,7 @@ export class PostgresAiPersistence {
   async getOrExecuteTool<T>(tenantId: string, toolCallId: string, execute: () => Promise<T>): Promise<T> {
     const tenant = id(tenantId, "tenantId"), call = id(toolCallId, "toolCallId");
     return this.client.transaction(async (tx) => {
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`${tenant}\0tool\0${call}`]);
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [advisoryLockKey(tenant, "tool", call)]);
       const existing = await tx.query<{ result: T }>("SELECT result FROM handrail_ai_tool_ledger WHERE tenant_id=$1 AND tool_call_id=$2", [tenant, call]);
       if (existing.rows[0]) return jsonClone(existing.rows[0].result);
       const result = await execute();
@@ -234,7 +242,7 @@ export class PostgresAiPersistence {
     const tenant = id(input.tenantId, "tenantId"), domain = id(input.domain, "domain"), scope = id(input.scopeId, "scopeId");
     const key = id(input.idempotencyKey, "idempotencyKey"), fingerprint = id(input.fingerprint, "fingerprint");
     return this.client.transaction(async (tx) => {
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`${tenant}\0idempotency\0${domain}\0${scope}\0${key}`]);
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [advisoryLockKey(tenant, "idempotency", domain, scope, key)]);
       const existing = await tx.query<{ fingerprint: string; result: T }>(
         "SELECT fingerprint,result FROM handrail_ai_idempotency WHERE tenant_id=$1 AND domain=$2 AND scope_id=$3 AND idempotency_key=$4",
         [tenant, domain, scope, key],
@@ -260,6 +268,64 @@ export class PostgresAiPersistence {
   }
 }
 
+export interface PostgresOpenAIResponsesContinuationStoreOptions {
+  readonly persistence: PostgresAiPersistence;
+  readonly tenantId: string;
+  /** Separates provider/model/application continuation domains for one tenant. */
+  readonly scopeId: string;
+}
+
+function openAIContinuationRecord(value: OpenAIResponsesContinuationRecord): OpenAIResponsesContinuationRecord {
+  const record = jsonClone(value);
+  if (typeof record.requestId !== "string" || record.requestId.length === 0 || record.requestId.length > 256 ||
+    !Array.isArray(record.inputItems) || record.inputItems.length > 256 ||
+    new TextEncoder().encode(JSON.stringify(record.inputItems)).byteLength > 2 * 1024 * 1024) {
+    throw new TypeError("OpenAI Responses continuation record is invalid");
+  }
+  return Object.freeze({ requestId: record.requestId, inputItems: Object.freeze(record.inputItems) });
+}
+
+/** Durable tenant-scoped retention for OpenAI Responses store:false continuations. */
+export class PostgresOpenAIResponsesContinuationStore implements OpenAIResponsesContinuationStore {
+  readonly persistence: PostgresAiPersistence;
+  readonly tenantId: string;
+  readonly scopeId: string;
+
+  constructor(options: PostgresOpenAIResponsesContinuationStoreOptions) {
+    this.persistence = options.persistence;
+    this.tenantId = id(options.tenantId, "tenantId");
+    this.scopeId = id(options.scopeId, "scopeId");
+  }
+
+  async load(requestId: string): Promise<OpenAIResponsesContinuationRecord | null> {
+    const document = await this.persistence.getDocument<OpenAIResponsesContinuationRecord>(
+      this.tenantId, "openai_continuation", this.scopeId, id(requestId, "requestId"),
+    );
+    return document ? openAIContinuationRecord(document.value) : null;
+  }
+
+  async save(value: OpenAIResponsesContinuationRecord): Promise<void> {
+    const record = openAIContinuationRecord(value);
+    const existing = await this.persistence.getDocument<OpenAIResponsesContinuationRecord>(
+      this.tenantId, "openai_continuation", this.scopeId, record.requestId,
+    );
+    if (existing) {
+      if (jsonValuesEqual(openAIContinuationRecord(existing.value), record)) return;
+      throw new PostgresPersistenceConflictError();
+    }
+    try {
+      await this.persistence.compareAndSetDocument({ tenantId: this.tenantId,
+        kind: "openai_continuation", scopeId: this.scopeId, recordId: record.requestId,
+        expectedVersion: null, value: record });
+    } catch (error) {
+      if (!(error instanceof PostgresPersistenceConflictError)) throw error;
+      const winner = await this.load(record.requestId);
+      if (winner && jsonValuesEqual(winner, record)) return;
+      throw error;
+    }
+  }
+}
+
 /** Durable high-level replay store scoped to one already-authorized tenant. */
 export class PostgresManagedRuntimeTurnStateStore implements ManagedRuntimeTurnStateStore {
   constructor(readonly persistence: PostgresAiPersistence, readonly tenantId: string) {
@@ -276,7 +342,7 @@ export class PostgresManagedRuntimeTurnStateStore implements ManagedRuntimeTurnS
     const existing = await this.persistence.readTurnState<ManagedRuntimeTurnStateRecord>(this.tenantId, record.conversationId, record.turnId);
     if (existing) {
       const stored = parseManagedRuntimeTurnStateRecord(existing.value);
-      if (JSON.stringify(stored) === JSON.stringify(record)) return stored;
+      if (jsonValuesEqual(stored, record)) return stored;
       throw new ManagedRuntimeTurnStateStoreConflictError("The replay identity conflicts with durable state.", {
         code: "replay_identity_conflict", conversationId: record.conversationId, turnId: record.turnId,
       });
@@ -287,7 +353,7 @@ export class PostgresManagedRuntimeTurnStateStore implements ManagedRuntimeTurnS
     } catch (error) {
       if (!(error instanceof PostgresPersistenceConflictError)) throw error;
       const winner = await this.load(record.conversationId, record.turnId);
-      if (winner && JSON.stringify(winner) === JSON.stringify(record)) return winner;
+      if (winner && jsonValuesEqual(winner, record)) return winner;
       throw new ManagedRuntimeTurnStateStoreConflictError("The replay identity conflicts with durable state.", {
         code: "replay_identity_conflict", conversationId: record.conversationId, turnId: record.turnId,
       });
@@ -375,7 +441,7 @@ export class PostgresConversationEventStore implements ConversationEventStore {
       return this.appendConflict("invalid_append", input, null, null);
     }
     try { return await this.persistence.client.transaction(async (tx) => {
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`${this.tenantId}\0${input.conversationId}`]);
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [advisoryLockKey(this.tenantId, input.conversationId)]);
       const identifiers = events.flatMap((event) => [event.event_id, ...(event.mutation_id ? [event.mutation_id] : [])]);
       const duplicates = await tx.query<{ payload: ConversationEvent }>(
         "SELECT payload FROM handrail_ai_events WHERE tenant_id=$1 AND (event_id=ANY($2::text[]) OR mutation_id=ANY($2::text[]))",
@@ -383,7 +449,7 @@ export class PostgresConversationEventStore implements ConversationEventStore {
       );
       if (duplicates.rows.length > 0) {
         const durable = duplicates.rows.map((row) => parseConversationEvent(row.payload));
-        const complete = events.every((event) => durable.some((candidate) => JSON.stringify(candidate) === JSON.stringify(event)));
+        const complete = events.every((event) => durable.some((candidate) => jsonValuesEqual(candidate, event)));
         if (complete && durable.length === events.length) {
           const latest = await this.latest(tx, input.conversationId);
           return Object.freeze({ status: "idempotent" as const, entries: Object.freeze(events.map(storedEvent)), latestRevision: latest! });
@@ -445,7 +511,7 @@ export class PostgresConversationEventStore implements ConversationEventStore {
 
   private async writeCheckpoint(checkpoint: ConversationEventCheckpoint): Promise<WriteConversationEventCheckpointResult> {
     const current = await this.persistence.readCheckpoint<ConversationEventCheckpoint>(this.tenantId, checkpoint.conversationId);
-    if (current && JSON.stringify(current.value) === JSON.stringify(checkpoint)) return { status: "idempotent", checkpoint: jsonClone(checkpoint) };
+    if (current && jsonValuesEqual(current.value, checkpoint)) return { status: "idempotent", checkpoint: jsonClone(checkpoint) };
     if (current && current.value.revision >= checkpoint.revision) throw new ConversationEventStoreConflictError(
       "The checkpoint conflicts with durable state.", { code: "checkpoint_conflict", conversationId: checkpoint.conversationId,
         expectedRevision: checkpoint.revision, actualRevision: current.value.revision, identifier: null });

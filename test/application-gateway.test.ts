@@ -68,6 +68,51 @@ describe("application-owned gateway transport", () => {
     expect(create).toHaveBeenLastCalledWith(expect.objectContaining({ authorizationContext: expect.objectContaining({ companyId: "company-authoritative" }) }));
   });
 
+  it("binds turn transports to the authoritative actor instead of request identity", async () => {
+    const resolved: string[] = [];
+    const startedFor: Array<{ companyId: string; request: unknown }> = [];
+    const gateway = createApplicationGateway<Event, { prompt: string; companyId?: string }, {
+      principalId: string;
+      companyId: string;
+    }>({
+      transportFor: async (context) => {
+        resolved.push(`${context.companyId}:${context.principalId}`);
+        return {
+          capabilities: {
+            authoritativeCancellation: { supported: false },
+            documentInput: { supported: false }, attachmentUpload: { supported: false },
+            presence: { supported: false }, synchronization: { supported: false },
+          },
+          async startTurn(input) {
+            startedFor.push({ companyId: context.companyId, request: input.request });
+            return { ok: true as const, value: {
+              conversationId: input.conversationId, turnId: "server-turn", mutationId: input.mutationId,
+              observation: observation([]),
+            } };
+          },
+          async resumeTurn() { return { ok: true as const, value: observation([]) }; },
+        };
+      },
+      authorize: async () => ({ principalId: "user-1", companyId: "company-authoritative" }),
+      checkpointForEvent: point,
+    });
+    const response = await gateway.handle(new Request("https://app.test/ai/turns/start", {
+      method: "POST",
+      body: JSON.stringify({
+        conversationId: "conversation-1", conversationTurnId: "client-turn",
+        mutationId: "mutation-1", idempotencyKey: "start-1",
+        request: { prompt: "hello", companyId: "company-attacker" },
+      }),
+    }));
+
+    expect(response.status).toBe(200);
+    expect(resolved).toEqual(["company-authoritative:user-1"]);
+    expect(startedFor).toEqual([{
+      companyId: "company-authoritative",
+      request: { prompt: "hello", companyId: "company-attacker" },
+    }]);
+  });
+
   it("adapts gateway conversation resources directly to the picker catalog contract", async () => {
     const capabilities = {
       rename: { supported: true as const }, clear: { supported: true as const },
@@ -124,6 +169,7 @@ describe("application-owned gateway transport", () => {
       },
       checkpointForEvent: point,
       capabilities: { attachments: { maximumFiles: 3, maximumBytesPerFile: 1000, acceptedMediaTypes: ["image/png"], uploadUrl: "/uploads" }, presence: true, synchronization: true },
+      diagnostics: (event) => diagnostics.push(event),
     });
     const fetch = (input: string | URL | Request, init?: RequestInit) => {
       const request = new Request(input, init);

@@ -36,6 +36,15 @@ export interface McpConnectorAdapterOptions<TContext, TAdapterContext = TContext
   readonly connectorId: string;
   readonly client: McpConnectorClient;
   readonly authorize: (request: McpAuthorizationRequest<TContext | TAdapterContext>) => "allow" | "deny" | Promise<"allow" | "deny">;
+  /**
+   * Synchronous, per-caller catalog policy. ToolRegistry discovery is
+   * intentionally synchronous, so an install-time authorization decision must
+   * never be reused as authority to disclose a tool to another actor.
+   */
+  readonly discover: (request: {
+    readonly toolName: string;
+    readonly context: TContext;
+  }) => boolean;
   readonly executionContext: (context: ApplicationToolExecutorContext<TContext>) => TContext;
   readonly namespace?: string;
   readonly tags?: readonly string[];
@@ -87,6 +96,10 @@ export function createMcpConnectorAdapter<TContext, TAdapterContext = TContext>(
         return {
           definition: { name, description: tool.description?.trim() || `MCP tool ${remoteName}`, input_schema: tool.inputSchema },
           executor,
+          discover: (applicationContext) => options.discover({
+            toolName: remoteName,
+            context: applicationContext,
+          }),
           ...(options.tags ? { tags: options.tags } : {}),
           ...(options.capabilities ? { capabilities: options.capabilities } : {}),
         };

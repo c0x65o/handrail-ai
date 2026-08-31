@@ -5,6 +5,7 @@ import {
   type CitationRecordSet,
   type CitationSource,
 } from "./citations.js";
+import { jsonValuesEqual } from "./json-equality.js";
 
 export const AI_RUNTIME_PROTOCOL_VERSION = "handrail.ai-runtime.v1" as const;
 
@@ -930,7 +931,7 @@ function validateToolResult(value: unknown, path: string): asserts value is Appl
     if (records.citations.length === 0) {
       fail(`${path}.citation_records.citations`, "must contain at least one citation link");
     }
-    if (JSON.stringify(records) !== JSON.stringify(object.citation_records)) {
+    if (!jsonValuesEqual(records, object.citation_records)) {
       fail(
         `${path}.citation_records`,
         "must already be normalized and identity-deduplicated",
@@ -1162,8 +1163,8 @@ function validateCitationBatch(
     fail(`${path}.citations`, "must contain at least one citation link");
   }
   if (
-    JSON.stringify(records.sources) !== JSON.stringify(object.sources) ||
-    JSON.stringify(records.citations) !== JSON.stringify(object.citations)
+    !jsonValuesEqual(records.sources, object.sources) ||
+    !jsonValuesEqual(records.citations, object.citations)
   ) {
     fail(
       path,

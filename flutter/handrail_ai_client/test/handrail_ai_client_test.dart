@@ -130,6 +130,22 @@ void main() {
       expect(workspace.snapshot.unreadCount, 1);
       workspace.select('first');
       expect(workspace.snapshot.unreadCount, 0);
+      workspace.replaceRemoteActivity([
+        const HandrailConversationActivityRecord(
+          conversationId: 'remote-running',
+          status: HandrailTurnStatus.running,
+          unread: false,
+        ),
+        const HandrailConversationActivityRecord(
+          conversationId: 'remote-done',
+          status: HandrailTurnStatus.completed,
+          unread: true,
+        ),
+      ]);
+      expect(workspace.snapshot.runningCount, 2);
+      expect(workspace.snapshot.unreadCount, 1);
+      workspace.markRemoteRead('remote-done');
+      expect(workspace.snapshot.unreadCount, 0);
       await workspace.dispose();
     },
   );

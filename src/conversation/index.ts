@@ -1,4 +1,5 @@
 export * from "./approval-coordinator.js";
+export * from "./activity.js";
 export * from "./approval-proposal-store.js";
 export * from "./catalog.js";
 export * from "./dual-write-event-store.js";

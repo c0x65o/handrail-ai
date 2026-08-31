@@ -238,6 +238,28 @@ describe("durable conversation event contract", () => {
     }
   });
 
+  it("accepts normalized citation JSON after a jsonb-style object-key reorder", () => {
+    const fixture = event({
+      citations: [{
+        target: { message_id: "msg_02", type: "assistant_message" },
+        order: 0,
+        source_id: "source_01",
+        citation_id: "citation_01",
+      }],
+      sources: [{
+        locator: "https://example.com/orders/A-104",
+        label: "Order status",
+        type: "web",
+        source_id: "source_01",
+      }],
+      target: { message_id: "msg_02", type: "assistant_message" },
+      citation_records_version: CONVERSATION_CITATION_RECORDS_VERSION,
+      type: "citation.records_linked",
+    });
+
+    expect(parseConversationEvent(fixture)).toBe(fixture);
+  });
+
   it("round-trips legacy and typed image metadata plus typed PDF metadata", () => {
     const attachments = [
       {

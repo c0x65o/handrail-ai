@@ -1,6 +1,6 @@
 {
   "name": "@handrail/ai",
-  "version": "0.1.52",
+  "version": "0.1.54",
   "description": "Provider-neutral TypeScript primitives and runtime tooling for building AI applications with Handrail.",
   "license": "UNLICENSED",
   "type": "module",
@@ -62,6 +62,11 @@
       "import": "./dist/mcp/index.js",
       "default": "./dist/mcp/index.js"
     },
+    "./adapters/spartan-aegis": {
+      "types": "./dist/adapters/spartan-aegis.d.ts",
+      "import": "./dist/adapters/spartan-aegis.js",
+      "default": "./dist/adapters/spartan-aegis.js"
+    },
     "./persistence/postgres": {
       "types": "./dist/postgres/index.d.ts",
       "import": "./dist/postgres/index.js",
@@ -113,6 +118,7 @@
   },
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json",
+    "prepare": "npm run build",
     "check:examples": "npm run build && node scripts/check-readme-examples.mjs",
     "check:protected-web-search-example": "npm run build && node scripts/check-protected-web-search-example.mjs",
     "check:package-contract": "npm run build && node --test test/package-contract.test.mjs",

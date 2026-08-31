@@ -1,6 +1,6 @@
 # Spartan Aegis integration reference
 
-This is a migration seam, not a rewrite of Spartan's business domain. It was derived from the current Aegis implementation in `src/server/aegis` and `src/client/features/aegis-assistant`; the Spartan repository is not modified by this package.
+This is a migration seam, not a rewrite of Spartan's business domain. It was derived from the current Aegis implementation in `src/server/aegis` and `src/client/features/aegis-assistant`. Spartan may consume the adapter directly or through a pinned integration artifact while the release is being qualified.
 
 ## Keep domain ownership in Spartan
 
@@ -63,3 +63,5 @@ The checked [`examples/spartan-aegis-adapter.ts`](../examples/spartan-aegis-adap
 Required parity tests cover every role's discovered tools, denied cross-company access, proposal-only actions, idempotent confirmation, configured tool-call budget, hosted web citations, attachment limits, archive/restore/new threads, stream reconnect, cancellation, and multi-device convergence.
 
 Do not remove `provider.ts`, current Aegis routes, or old persistence during these steps. Cut reads over independently after the matching reconciliation report is converged. Binary attachment authorization/resolution, Zod schemas, company/actor construction, system instructions, proposal confirmation side effects, retention, and rollout flags remain Spartan-owned boundaries.
+
+Git dependencies require the package `prepare` script because public exports point at generated `dist` files. Production should pin an immutable tag or package integrity. A temporary vendored tarball is acceptable for pre-release cross-repository qualification when its source version and lockfile integrity are reviewed together.

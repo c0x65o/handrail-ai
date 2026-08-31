@@ -12,6 +12,7 @@ import {
   type CitationRecordSet,
   type CitationSource,
 } from "../citations.js";
+import { jsonValuesEqual } from "../json-equality.js";
 
 export const CONVERSATION_EVENT_VERSION = 1 as const;
 export const CONVERSATION_CITATION_RECORDS_VERSION = 1 as const;
@@ -1390,8 +1391,8 @@ function validatePayload(
         fail(`${path}.citations`, "must contain at least one citation link");
       }
       if (
-        JSON.stringify(records.sources) !== JSON.stringify(object.sources) ||
-        JSON.stringify(records.citations) !== JSON.stringify(object.citations)
+        !jsonValuesEqual(records.sources, object.sources) ||
+        !jsonValuesEqual(records.citations, object.citations)
       ) {
         fail(
           path,
@@ -1671,7 +1672,7 @@ function validatePayload(
         if (records.citations.length === 0) {
           fail(`${path}.citation_records.citations`, "must contain at least one citation link");
         }
-        if (JSON.stringify(records) !== JSON.stringify(object.citation_records)) {
+        if (!jsonValuesEqual(records, object.citation_records)) {
           fail(
             `${path}.citation_records`,
             "must already be normalized and identity-deduplicated",

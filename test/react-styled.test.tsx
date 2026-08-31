@@ -49,9 +49,11 @@ describe("styled React preset", () => {
   it("includes unopened server activity in launcher status", () => {
     const empty = { selectedConversationId: null, runningCount: 0, errorCount: 0,
       unreadCount: 0, threads: [] } as never;
+    const activitySnapshot = [{ conversationId: "remote",
+      turnStatus: "running" as const, unread: false }];
     const { container } = render(<StyledChatLauncher workspace={{ getSnapshot: () => empty,
-      subscribe: () => () => undefined }} activity={{ getSnapshot: () => [{ conversationId: "remote",
-        turnStatus: "running", unread: false }], subscribe: () => () => undefined }}/>);
+      subscribe: () => () => undefined }} activity={{ getSnapshot: () => activitySnapshot,
+        subscribe: () => () => undefined }}/>);
     const trigger = container.querySelector<HTMLButtonElement>(".hr-chat__launcher-trigger")!;
     expect(trigger.dataset.turnStatus).toBe("busy");
     expect(trigger.textContent).toContain("Running");

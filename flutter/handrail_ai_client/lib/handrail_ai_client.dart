@@ -125,6 +125,19 @@ class HandrailConversationWorkspaceEntry {
   const HandrailConversationWorkspaceEntry(this.state, {this.unread = false});
 }
 
+class HandrailConversationActivityRecord {
+  final String conversationId;
+  final HandrailTurnStatus status;
+  final bool unread;
+  final DateTime? updatedAt;
+  const HandrailConversationActivityRecord({
+    required this.conversationId,
+    required this.status,
+    required this.unread,
+    this.updatedAt,
+  });
+}
+
 class HandrailConversationWorkspaceSnapshot {
   final String? selectedConversationId;
   final List<HandrailConversationWorkspaceEntry> conversations;
@@ -143,6 +156,7 @@ class HandrailConversationWorkspaceSnapshot {
 /// Tracks independent background turns so changing chats never stops a stream.
 class HandrailConversationWorkspace {
   final Map<String, HandrailConversationWorkspaceEntry> _entries = {};
+  final Map<String, HandrailConversationActivityRecord> _remoteActivity = {};
   final StreamController<HandrailConversationWorkspaceSnapshot> _changes =
       StreamController<HandrailConversationWorkspaceSnapshot>.broadcast(
         sync: true,
@@ -207,24 +221,68 @@ class HandrailConversationWorkspace {
     _publish();
   }
 
+  /// Replaces the server-backed index used for unopened or remotely running chats.
+  void replaceRemoteActivity(
+    Iterable<HandrailConversationActivityRecord> records,
+  ) {
+    _remoteActivity.clear();
+    for (final record in records) {
+      if (record.conversationId.isEmpty || record.conversationId.length > 256)
+        throw ArgumentError.value(record.conversationId, 'conversationId');
+      if (_remoteActivity.containsKey(record.conversationId))
+        throw ArgumentError('Duplicate remote conversation activity');
+      _remoteActivity[record.conversationId] = record;
+    }
+    _publish();
+  }
+
+  void markRemoteRead(String conversationId) {
+    final current = _remoteActivity[conversationId];
+    if (current == null || !current.unread) return;
+    _remoteActivity[conversationId] = HandrailConversationActivityRecord(
+      conversationId: current.conversationId,
+      status: current.status,
+      unread: false,
+      updatedAt: current.updatedAt,
+    );
+    _publish();
+  }
+
   HandrailConversationWorkspaceSnapshot _snapshot() {
     final values = List<HandrailConversationWorkspaceEntry>.unmodifiable(
       _entries.values,
     );
+    final unopened = _remoteActivity.values.where(
+      (record) => !_entries.containsKey(record.conversationId),
+    );
     return HandrailConversationWorkspaceSnapshot(
       selectedConversationId: _selectedConversationId,
       conversations: values,
-      runningCount: values
-          .where(
-            (entry) =>
-                entry.state.status == HandrailTurnStatus.running ||
-                entry.state.status == HandrailTurnStatus.waitingForTool,
-          )
-          .length,
-      errorCount: values
-          .where((entry) => entry.state.status == HandrailTurnStatus.failed)
-          .length,
-      unreadCount: values.where((entry) => entry.unread).length,
+      runningCount:
+          values
+              .where(
+                (entry) =>
+                    entry.state.status == HandrailTurnStatus.running ||
+                    entry.state.status == HandrailTurnStatus.waitingForTool,
+              )
+              .length +
+          unopened
+              .where(
+                (record) =>
+                    record.status == HandrailTurnStatus.running ||
+                    record.status == HandrailTurnStatus.waitingForTool,
+              )
+              .length,
+      errorCount:
+          values
+              .where((entry) => entry.state.status == HandrailTurnStatus.failed)
+              .length +
+          unopened
+              .where((record) => record.status == HandrailTurnStatus.failed)
+              .length,
+      unreadCount:
+          values.where((entry) => entry.unread).length +
+          unopened.where((record) => record.unread).length,
     );
   }
 

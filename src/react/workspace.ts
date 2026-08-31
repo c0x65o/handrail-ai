@@ -1,5 +1,7 @@
 import { useCallback, useSyncExternalStore } from "react";
 import type { ConversationWorkspaceSnapshot } from "../conversation/workspace.js";
+import type { ConversationActivityReadable, ConversationActivityRecord } from "../conversation/activity.js";
+export type { ConversationActivityReadable, ConversationActivityRecord } from "../conversation/activity.js";
 import type {
   ChatLauncherConnectionStatus,
   ChatLauncherRootProps,
@@ -13,18 +15,6 @@ const EMPTY_ACTIVITY_SNAPSHOT: readonly ConversationActivityRecord[] = Object.fr
 
 export interface ConversationWorkspaceReadable {
   getSnapshot(): ConversationWorkspaceSnapshot;
-  subscribe(listener: () => void): () => void;
-}
-
-export interface ConversationActivityRecord {
-  readonly conversationId: string;
-  readonly turnStatus: "idle" | "running" | "completed" | "error";
-  readonly unread: boolean;
-}
-
-/** Optional server-backed index for unopened or remotely running conversations. */
-export interface ConversationActivityReadable {
-  getSnapshot(): readonly ConversationActivityRecord[];
   subscribe(listener: () => void): () => void;
 }
 
