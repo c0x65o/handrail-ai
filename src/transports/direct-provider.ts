@@ -472,6 +472,7 @@ async function pumpProvider(
 
   try {
     const stream = adapter.invoke({
+      continuation_of: input.request.continuation_of,
       messages: input.request.messages,
       tools: input.request.tools,
       tool_results: input.request.tool_results,

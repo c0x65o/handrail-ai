@@ -248,6 +248,8 @@ export interface ProviderRequestContext {
 }
 
 export interface ProviderAdapterInvocation {
+  /** Provider-neutral identity of the immediately preceding tool-call response. */
+  readonly continuation_of?: string | null;
   readonly messages: readonly ChatMessage[];
   readonly tools: readonly ToolDefinition[];
   readonly tool_results: readonly ApplicationToolResult[];

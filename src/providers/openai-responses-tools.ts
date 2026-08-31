@@ -61,6 +61,8 @@ export interface BuildOpenAIResponsesRequestOptions {
   readonly supportsToolSearch: boolean;
   readonly hosted?: OpenAIResponsesHostedToolsOptions;
   readonly instructions?: string;
+  /** Trusted, bounded provider-native items retained for a store:false continuation. */
+  readonly continuationItems?: readonly JsonObject[];
   /** Trusted host projection for opaque image/document references. */
   readonly resolveAttachment?: (reference: AttachmentReference) => JsonObject;
 }
@@ -113,11 +115,14 @@ export function buildOpenAIResponsesRequest(options: BuildOpenAIResponsesRequest
       return options.resolveAttachment(part.attachment);
     }),
   }));
+  input.push(...(options.continuationItems ?? []));
   for (const result of options.invocation.tool_results) {
+    const onlyText = result.content.length === 1 && result.content[0]?.type === "text"
+      ? result.content[0].text
+      : undefined;
     input.push({
       type: "function_call_output", call_id: result.tool_call_id,
-      output: JSON.stringify(result.content.length === 1 && result.content[0]?.type === "text"
-        ? result.content[0].text : result.content),
+      output: onlyText ?? JSON.stringify(result.content),
     });
   }
   return Object.freeze({
