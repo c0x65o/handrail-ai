@@ -1,6 +1,7 @@
 import type { JsonObject, JsonSchemaObject, JsonValue } from "../protocol.js";
 import type { ApplicationToolExecutor, ApplicationToolExecutorContext } from "../tools/executor.js";
 import type { ToolDiscoveryAdapter, ToolRegistration } from "../tools/registry.js";
+import { diagnoseAiOperation, type AiDiagnosticSink } from "../diagnostics.js";
 
 export const MCP_CONNECTOR_ADAPTER_VERSION = "handrail.mcp-connector.v1" as const;
 
@@ -39,6 +40,7 @@ export interface McpConnectorAdapterOptions<TContext, TAdapterContext = TContext
   readonly namespace?: string;
   readonly tags?: readonly string[];
   readonly capabilities?: readonly string[];
+  readonly diagnostics?: AiDiagnosticSink;
 }
 
 function identifier(value: string, field: string): string {
@@ -64,7 +66,8 @@ export function createMcpConnectorAdapter<TContext, TAdapterContext = TContext>(
     connectorId,
     async registrations(context: TAdapterContext) {
       if (await options.authorize({ operation: "discover", context }) !== "allow") return [];
-      const listed = await options.client.listTools({});
+      const listed = await diagnoseAiOperation(options.diagnostics,
+        { domain: "mcp", operation: "list_tools" }, () => options.client.listTools({}));
       const names = new Set<string>();
       return Object.freeze(listed.tools.map((tool): ToolRegistration<ApplicationToolExecutor<TContext>, TContext> => {
         const remoteName = identifier(tool.name, "MCP tool name");
@@ -76,7 +79,10 @@ export function createMcpConnectorAdapter<TContext, TAdapterContext = TContext>(
           if (await options.authorize({ operation: "execute", toolName: remoteName, context: applicationContext, arguments: arguments_, toolCallId: execution.toolCallId }) !== "allow") {
             throw new TypeError("MCP tool execution is not authorized");
           }
-          return options.client.callTool({ name: remoteName, arguments: arguments_, idempotencyKey: execution.toolCallId, signal: execution.signal });
+          return diagnoseAiOperation(options.diagnostics,
+            { domain: "mcp", operation: "call_tool", toolName: remoteName },
+            () => options.client.callTool({ name: remoteName, arguments: arguments_,
+              idempotencyKey: execution.toolCallId, signal: execution.signal }));
         };
         return {
           definition: { name, description: tool.description?.trim() || `MCP tool ${remoteName}`, input_schema: tool.inputSchema },

@@ -5,6 +5,9 @@ import type { LivePresenceEnvelope } from "../presence/live-delivery.js";
 import type { PresenceRecord } from "../presence/types.js";
 import {
   ConversationCatalogError,
+  type ConversationCatalogAuthorizationAction,
+  type ConversationCatalogCapabilities,
+  type ConversationCatalogErrorCode,
   type ArchiveConversationInput, type ClearConversationInput, type ConversationCatalog, type CreateConversationInput,
   type GetConversationInput, type ListConversationsInput, type PermanentlyDeleteConversationInput,
   type RenameConversationInput, type RestoreConversationInput, type ArchiveConversationResult,
@@ -19,6 +22,7 @@ import {
 } from "../conversation/approval-proposal-store.js";
 import type { ConversationApprovalProposalRecord } from "../conversation/state.js";
 import type { DocumentInputCapabilityDescriptor } from "../providers/index.js";
+import { emitAiDiagnostic, type AiDiagnosticSink } from "../diagnostics.js";
 import type { AppendMutationsInput, AppendMutationsResult, PullSnapshotInput, PullSnapshotResult,
   ReadSinceInput, ReadSinceResult } from "../sync/types.js";
 import type {
@@ -51,7 +55,8 @@ export interface ApplicationGatewayCapabilities {
   readonly presence: boolean;
   readonly synchronization: boolean;
   readonly resources?: {
-    readonly conversations: boolean;
+    /** Detailed lifecycle capabilities are returned by v1 servers when available. */
+    readonly conversations: boolean | ConversationCatalogCapabilities;
     readonly approvals: boolean;
     readonly titleGeneration: boolean;
   };
@@ -94,6 +99,7 @@ export interface ApplicationGatewayOptions<TEvent, TRequest, TContext extends Ap
   readonly approvals?: ApprovalProposalStore<TContext>;
   readonly titleGeneration?: ApplicationGatewayTitleGeneration<TContext>;
   readonly handlers?: ApplicationGatewayResourceHandlers<TContext>;
+  readonly diagnostics?: AiDiagnosticSink;
 }
 
 export interface ApplicationGateway {
@@ -127,6 +133,20 @@ function failure(error: TransportError): Response {
   return json({ ok: false, error }, transportStatus(error));
 }
 
+type ApplicationGatewayResourceDomain = "conversation_catalog" | "approval_proposals";
+
+interface ApplicationGatewayResourceFailure {
+  readonly domain: ApplicationGatewayResourceDomain;
+  readonly code: string;
+}
+
+function resourceFailure(
+  error: TransportError,
+  resourceError: ApplicationGatewayResourceFailure,
+): Response {
+  return json({ ok: false, error, resourceError }, transportStatus(error));
+}
+
 function publicFailure(error: unknown): Response {
   if (error instanceof Response) return error;
   if (error instanceof ConversationCatalogError) {
@@ -134,14 +154,20 @@ function publicFailure(error: unknown): Response {
       : error.code === "not_found" ? "not_found"
       : error.code === "forbidden" ? "forbidden"
       : error.code === "unavailable" || error.code === "unsupported" ? "unavailable" : "conflict";
-    return failure({ code, message: error.message, retryable: error.retryable });
+    return resourceFailure(
+      { code, message: error.message, retryable: error.retryable },
+      { domain: "conversation_catalog", code: error.code },
+    );
   }
   if (error instanceof ApprovalProposalStoreError) {
     const code: TransportError["code"] = error.code === "invalid_input" ? "invalid_request"
       : error.code === "not_found" ? "not_found"
       : error.code === "permission_denied" ? "forbidden"
       : error.code === "unavailable" || error.code === "capacity_exceeded" ? "unavailable" : "conflict";
-    return failure({ code, message: error.message, retryable: error.retryable });
+    return resourceFailure(
+      { code, message: error.message, retryable: error.retryable },
+      { domain: "approval_proposals", code: error.code },
+    );
   }
   return json({ ok: false, error: { code: "forbidden", message: "The request is not authorized.", retryable: false } }, 403);
 }
@@ -203,11 +229,12 @@ export function createApplicationGateway<TEvent, TRequest, TContext extends Appl
     presence: options.capabilities?.presence ?? false,
     synchronization: options.capabilities?.synchronization ?? false,
     ...(options.capabilities?.documentInput === undefined ? {} : { documentInput: options.capabilities.documentInput }),
-    resources: Object.freeze({ conversations: options.conversations !== undefined,
+    resources: Object.freeze({ conversations: options.conversations?.capabilities ?? false,
       approvals: options.approvals !== undefined, titleGeneration: options.titleGeneration !== undefined }),
   });
   return Object.freeze({
     async handle(request: Request): Promise<Response> {
+      let diagnosticAction: ApplicationGatewayAction | "route" = "route";
       try {
         const pathname = new URL(request.url).pathname.replace(/\/+$/, "");
         const action: ApplicationGatewayAction | null = pathname.endsWith("/capabilities") ? "capabilities"
@@ -221,6 +248,7 @@ export function createApplicationGateway<TEvent, TRequest, TContext extends Appl
           : pathname.endsWith("/synchronization") ? "synchronization"
           : pathname.endsWith("/titles/generate") ? "title_generation" : null;
         if (action === null) return new Response(null, { status: 404 });
+        diagnosticAction = action;
         if ((action === "capabilities" && request.method !== "GET") ||
           (action !== "capabilities" && action !== "presence" && action !== "attachments" && request.method !== "POST")) {
           return new Response(null, { status: 405, headers: { allow: action === "capabilities" ? "GET" : "POST" } });
@@ -278,7 +306,11 @@ export function createApplicationGateway<TEvent, TRequest, TContext extends Appl
         if (!cancel.supported) return new Response(null, { status: 501 });
         const result = await cancel.capability.cancelTurn(await body<CancelTurnInput>(request, maximumBytes));
         return result.ok ? json(result) : failure(result.error);
-      } catch (error) { return publicFailure(error); }
+      } catch (error) {
+        emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: diagnosticAction,
+          phase: "failed", code: error instanceof Error ? error.name : "unknown", cause: error });
+        return publicFailure(error);
+      }
     },
   });
 }
@@ -292,6 +324,7 @@ export interface ApplicationGatewayTransportOptions<TEvent, TSynchronization = u
   readonly capabilities?: ApplicationGatewayCapabilities;
   /** Application-specific durable sync adapter, enabled only when the server also negotiates it. */
   readonly synchronization?: TSynchronization;
+  readonly diagnostics?: AiDiagnosticSink;
 }
 
 export type ApplicationGatewayAttachmentSource = Blob;
@@ -398,9 +431,117 @@ export interface ApplicationGatewayResourceClient {
   appendMutations(input: AppendMutationsInput): Promise<AppendMutationsResult>;
 }
 
+export class ApplicationGatewayResourceError extends Error {
+  readonly transportCode: TransportError["code"];
+  readonly retryable: boolean;
+  readonly resourceDomain: ApplicationGatewayResourceDomain | undefined;
+  readonly resourceCode: string | undefined;
+
+  constructor(input: {
+    readonly message: string;
+    readonly transportCode: TransportError["code"];
+    readonly retryable: boolean;
+    readonly resourceError?: ApplicationGatewayResourceFailure;
+  }) {
+    super(input.message);
+    this.name = "ApplicationGatewayResourceError";
+    this.transportCode = input.transportCode;
+    this.retryable = input.retryable;
+    this.resourceDomain = input.resourceError?.domain;
+    this.resourceCode = input.resourceError?.code;
+  }
+}
+
+function fallbackCatalogCapabilities(): ConversationCatalogCapabilities {
+  const unsupported = Object.freeze({ supported: false as const, reason: "not_implemented" as const });
+  return Object.freeze({
+    rename: unsupported,
+    clear: unsupported,
+    archive: unsupported,
+    restore: unsupported,
+    permanentDelete: unsupported,
+  });
+}
+
+function catalogErrorCode(
+  error: unknown,
+): ConversationCatalogErrorCode {
+  if (error instanceof ApplicationGatewayResourceError) {
+    const resourceCode = error.resourceDomain === "conversation_catalog"
+      ? error.resourceCode
+      : undefined;
+    if (resourceCode === "invalid_input" || resourceCode === "not_found" ||
+      resourceCode === "version_conflict" || resourceCode === "idempotency_conflict" ||
+      resourceCode === "forbidden" || resourceCode === "unsupported" ||
+      resourceCode === "unavailable") return resourceCode;
+    if (error.transportCode === "not_found") return "not_found";
+    if (error.transportCode === "forbidden" || error.transportCode === "unauthenticated") {
+      return "forbidden";
+    }
+    if (error.transportCode === "conflict") return "version_conflict";
+    if (error.transportCode === "invalid_request") return "invalid_input";
+  }
+  return "unavailable";
+}
+
+function catalogOperation<T>(
+  operation: ConversationCatalogAuthorizationAction,
+  execute: () => Promise<T>,
+): Promise<T> {
+  return execute().catch((error: unknown) => {
+    if (error instanceof ConversationCatalogError) throw error;
+    throw new ConversationCatalogError(catalogErrorCode(error), operation);
+  });
+}
+
+function withoutAuthorization<T extends { readonly authorizationContext: unknown }>(
+  input: T,
+): Omit<T, "authorizationContext"> {
+  const request: Record<string, unknown> = { ...input };
+  Reflect.deleteProperty(request, "authorizationContext");
+  return request as Omit<T, "authorizationContext">;
+}
+
+/**
+ * Adapts the protected gateway resource client to the exact ConversationCatalog
+ * contract consumed by useConversationPicker and ConversationRuntimeRegistry.
+ * The authorization context is intentionally ignored: the gateway derives it
+ * from the protected request and never trusts a client-supplied identity.
+ */
+export function createApplicationGatewayConversationCatalog(
+  client: ApplicationGatewayResourceClient,
+  capabilities?: ApplicationGatewayCapabilities,
+): ConversationCatalog<unknown> {
+  const negotiated = capabilities?.resources?.conversations;
+  const catalogCapabilities = negotiated && typeof negotiated === "object"
+    ? negotiated
+    : fallbackCatalogCapabilities();
+  return Object.freeze({
+    capabilities: catalogCapabilities,
+    list: (input: ListConversationsInput<unknown>) => catalogOperation("list",
+      () => client.listConversations(withoutAuthorization(input))),
+    create: (input: CreateConversationInput<unknown>) => catalogOperation("create",
+      () => client.createConversation(withoutAuthorization(input))),
+    get: (input: GetConversationInput<unknown>) => catalogOperation("get",
+      () => client.getConversation(withoutAuthorization(input))),
+    rename: (input: RenameConversationInput<unknown>) => catalogOperation("rename",
+      () => client.renameConversation(withoutAuthorization(input))),
+    clear: (input: ClearConversationInput<unknown>) => catalogOperation("clear",
+      () => client.clearConversation(withoutAuthorization(input))),
+    archive: (input: ArchiveConversationInput<unknown>) => catalogOperation("archive",
+      () => client.archiveConversation(withoutAuthorization(input))),
+    restore: (input: RestoreConversationInput<unknown>) => catalogOperation("restore",
+      () => client.restoreConversation(withoutAuthorization(input))),
+    permanentlyDelete: (input: PermanentlyDeleteConversationInput<unknown>) => catalogOperation(
+      "permanent_delete",
+      () => client.permanentlyDeleteConversation(withoutAuthorization(input)),
+    ),
+  });
+}
+
 /** Typed, cross-platform resource client paired with the application gateway. */
 export function createApplicationGatewayResourceClient(
-  options: Pick<ApplicationGatewayTransportOptions<unknown>, "baseUrl" | "fetch" | "protectedRequest">,
+  options: Pick<ApplicationGatewayTransportOptions<unknown>, "baseUrl" | "fetch" | "protectedRequest" | "diagnostics">,
 ): ApplicationGatewayResourceClient {
   const fetcher = options.fetch ?? globalThis.fetch;
   const base = options.baseUrl.replace(/\/+$/, "");
@@ -408,8 +549,24 @@ export function createApplicationGatewayResourceClient(
     const url = `${base}${path}`;
     const initial: RequestInit = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) };
     const response = await fetcher(url, await options.protectedRequest?.({ url, ...initial }) ?? initial);
-    const result = await response.json() as { readonly ok?: boolean; readonly value?: T; readonly error?: { readonly message?: string } };
-    if (!response.ok || !result.ok) throw new TypeError(result.error?.message ?? "Application gateway request failed");
+    const result = await response.json() as {
+      readonly ok?: boolean;
+      readonly value?: T;
+      readonly error?: Partial<TransportError>;
+      readonly resourceError?: ApplicationGatewayResourceFailure;
+    };
+    if (!response.ok || !result.ok) {
+      const resourceError = new ApplicationGatewayResourceError({
+      message: result.error?.message ?? "Application gateway request failed",
+      transportCode: result.error?.code ?? "unavailable",
+      retryable: result.error?.retryable ?? response.status >= 500,
+      ...(result.resourceError === undefined ? {} : { resourceError: result.resourceError }),
+      });
+      emitAiDiagnostic(options.diagnostics, { domain: result.resourceError?.domain === "approval_proposals" ? "approval" : "gateway",
+        operation: path, phase: "failed", code: resourceError.resourceCode ?? resourceError.transportCode,
+        retryable: resourceError.retryable, cause: resourceError });
+      throw resourceError;
+    }
     return result.value as T;
   };
   const client: ApplicationGatewayResourceClient = {

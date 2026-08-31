@@ -19,6 +19,7 @@ import type {
 } from "./approval-execution.js";
 import { ToolRegistry, type ToolRegistration } from "./registry.js";
 import type { ToolDiscoveryQuery } from "./registry.js";
+import { emitAiDiagnostic, type AiDiagnosticSink } from "../diagnostics.js";
 
 export interface ApplicationToolCall {
   readonly tool_call_id: string;
@@ -158,6 +159,7 @@ export interface BoundedToolExecutorOptions<
   readonly ledger?: ToolExecutionLedger;
   readonly approvalCoordinator?: ApprovalExecutionCoordinator<TApprovalPermissionContext>;
   readonly limits?: Partial<BoundedToolExecutorLimits>;
+  readonly diagnostics?: AiDiagnosticSink;
 }
 
 class ExecutionCancelled extends Error {}
@@ -625,6 +627,7 @@ export class BoundedToolExecutor<
     | undefined;
   readonly #limits: Readonly<BoundedToolExecutorLimits>;
   readonly #limiter: ConcurrencyLimiter;
+  readonly #diagnostics: AiDiagnosticSink | undefined;
   readonly #operations = new Map<string, Promise<BoundedToolExecutionOutcome>>();
 
   constructor(
@@ -639,6 +642,7 @@ export class BoundedToolExecutor<
     this.#ledger = options.ledger ?? new InMemoryToolExecutionLedger();
     this.#approvalCoordinator = options.approvalCoordinator;
     this.#limits = resolvedLimits(options.limits);
+    this.#diagnostics = options.diagnostics;
     this.#limiter = new ConcurrencyLimiter(this.#limits.maxConcurrency);
   }
 
@@ -757,6 +761,10 @@ export class BoundedToolExecutor<
           definition: registration.definition,
           signal: controller.signal,
         });
+        emitAiDiagnostic(this.#diagnostics, { domain: "approval", operation: "claim",
+          phase: claim.outcome === "claimed" || claim.outcome === "reuse" ? "succeeded" :
+            claim.outcome === "cancelled" ? "cancelled" : "failed", toolName: name,
+          code: claim.outcome, retryable: claim.outcome === "unavailable" });
         if (claim.outcome === "approval_required") {
           return Object.freeze({ status: "external_approval_required", toolCallId, name });
         }
@@ -855,6 +863,8 @@ export class BoundedToolExecutor<
         let failureReason: ApprovalExecutionFailureReason | undefined;
         let executionStartRecorded = request.onExecutionStarted === undefined;
         try {
+          emitAiDiagnostic(this.#diagnostics, { domain: "tool", operation: "execute",
+            phase: "started", toolName: name });
           await request.onExecutionStarted?.();
           executionStartRecorded = true;
           const release = await this.#limiter.acquire(signal);
@@ -874,7 +884,12 @@ export class BoundedToolExecutor<
             normalized.content,
             normalized.citationRecords,
           );
+          emitAiDiagnostic(this.#diagnostics, { domain: "tool", operation: "execute",
+            phase: "succeeded", toolName: name });
         } catch (error: unknown) {
+          emitAiDiagnostic(this.#diagnostics, { domain: "tool", operation: "execute",
+            phase: signal.aborted ? "cancelled" : "failed", toolName: name,
+            retryable: timedOut(), cause: error });
           if (error instanceof ExecutionCancelled) {
             failureReason = timedOut() ? "execution_timed_out" : "execution_cancelled";
             executionResult = errorResult(
@@ -909,6 +924,9 @@ export class BoundedToolExecutor<
             ...(failureReason === undefined ? {} : { failureReason }),
             signal,
           });
+          emitAiDiagnostic(this.#diagnostics, { domain: "approval", operation: "settle",
+            phase: settled.outcome === "recorded" ? "succeeded" : "failed", toolName: name,
+            code: settled.outcome, retryable: settled.outcome === "unavailable" });
           if (settled.outcome !== "recorded") {
             return errorResult(
               toolCallId,

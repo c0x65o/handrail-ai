@@ -10,12 +10,29 @@ export {
   type ConversationStoreRuntimeProviderProps,
 } from "./context.js";
 export {
+  CopyMessageButton,
+  conversationMessageText,
+  type CopyMessageButtonProps,
+  type MessageClipboard,
+  type MessageCopyStatus,
+} from "./message-actions.js";
+export {
+  useConversationLauncherBinding,
+  useConversationWorkspaceSnapshot,
+  type ConversationLauncherBinding,
+  type ConversationWorkspaceReadable,
+} from "./workspace.js";
+export {
   useConversationActions,
   useConversationSelector,
   useConversationSnapshot,
   useConversationStore,
   type ConversationActions,
 } from "./hooks.js";
+export {
+  createApplicationGatewayApprovalReviewAdapter,
+  type ApplicationGatewayApprovalReviewAdapter,
+} from "./application-gateway.js";
 export {
   useConversationComposer,
   type ConversationComposerAttachment,
@@ -179,6 +196,7 @@ export {
   type ApprovalReviewController,
   type ApprovalReviewDecisionCode,
   type ApprovalReviewDecisionHandler,
+  type ApprovalReviewTransitionHandler,
   type ApprovalReviewDecisionIdentity,
   type ApprovalReviewDecisionIdentityFactory,
   type ApprovalReviewDecisionIdentityRequest,

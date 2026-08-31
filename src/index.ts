@@ -1,6 +1,7 @@
 export * from "./attachments/index.js";
 export * from "./citations.js";
 export * from "./conversation/index.js";
+export * from "./diagnostics.js";
 export * from "./presence/index.js";
 export * from "./provider-context-checkpoint-store.js";
 export * from "./provider-context.js";

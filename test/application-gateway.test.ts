@@ -3,6 +3,7 @@ import {
   ApprovalProposalStoreError,
   ConversationCatalogError,
   createApplicationGateway,
+  createApplicationGatewayConversationCatalog,
   createApplicationGatewayTransport,
   createApplicationGatewayResourceClient,
   negotiateApplicationGatewayCapabilities,
@@ -52,6 +53,39 @@ describe("application-owned gateway transport", () => {
         authorizationContext: { companyId: "company-attacker" } }) }));
     expect(malicious.status).toBe(200);
     expect(create).toHaveBeenLastCalledWith(expect.objectContaining({ authorizationContext: expect.objectContaining({ companyId: "company-authoritative" }) }));
+  });
+
+  it("adapts gateway conversation resources directly to the picker catalog contract", async () => {
+    const capabilities = {
+      rename: { supported: true as const }, clear: { supported: true as const },
+      archive: { supported: true as const }, restore: { supported: true as const },
+      permanentDelete: { supported: false as const, reason: "policy_disabled" as const },
+    };
+    const listConversations = vi.fn(async () => ({
+      items: [], nextCursor: null, hasMore: false,
+      order: { field: "updated_at" as const, direction: "desc" as const },
+    }));
+    const catalog = createApplicationGatewayConversationCatalog({
+      listConversations,
+      createConversation: vi.fn(), getConversation: vi.fn(), renameConversation: vi.fn(),
+      clearConversation: vi.fn(), archiveConversation: vi.fn(), restoreConversation: vi.fn(),
+      permanentlyDeleteConversation: vi.fn(), createApproval: vi.fn(), getApproval: vi.fn(),
+      listApprovalGroup: vi.fn(), transitionApproval: vi.fn(), generateTitle: vi.fn(),
+      pullSnapshot: vi.fn(), readSince: vi.fn(), appendMutations: vi.fn(),
+    }, {
+      protocolVersion: "handrail.application-gateway.v1", authoritativeCancellation: false,
+      attachments: false, presence: false, synchronization: false,
+      resources: { conversations: capabilities, approvals: false, titleGeneration: false },
+    });
+
+    expect(catalog.capabilities).toEqual(capabilities);
+    await expect(catalog.list({
+      authorizationContext: { untrusted: true }, lifecycle: "active", pageSize: 20,
+      order: { field: "updated_at", direction: "desc" },
+    })).resolves.toMatchObject({ items: [] });
+    expect(listConversations).toHaveBeenCalledWith(expect.not.objectContaining({
+      authorizationContext: expect.anything(),
+    }));
   });
 
   it("negotiates capabilities, streams events, resumes, and cancels authoritatively", async () => {
@@ -146,7 +180,8 @@ describe("application-owned gateway transport", () => {
       method: "POST", body: "{}",
     }));
     expect(conversation.status).toBe(409);
-    await expect(conversation.json()).resolves.toMatchObject({ ok: false, error: { code: "conflict", retryable: false } });
+    await expect(conversation.json()).resolves.toMatchObject({ ok: false, error: { code: "conflict", retryable: false },
+      resourceError: { domain: "conversation_catalog", code: "idempotency_conflict" } });
     const approval = await gateway.handle(new Request("https://app.test/ai/approvals/transition", {
       method: "POST", body: "{}",
     }));

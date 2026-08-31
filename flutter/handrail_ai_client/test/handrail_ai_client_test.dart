@@ -71,4 +71,17 @@ void main() {
     expect(frames.first.id, 'cursor-1');
     client.close();
   });
+
+  test('terminal frames preserve cancelled, failed, and disconnected outcomes', () {
+    HandrailTurnStatus reduce(String status) =>
+        const HandrailConversationState(conversationId: 'c1')
+            .apply(HandrailStreamFrame('terminal', null, {
+          'type': 'terminal',
+          'result': {'status': status}
+        })).status;
+    expect(reduce('completed'), HandrailTurnStatus.completed);
+    expect(reduce('cancelled'), HandrailTurnStatus.cancelled);
+    expect(reduce('failed'), HandrailTurnStatus.failed);
+    expect(reduce('disconnected'), HandrailTurnStatus.failed);
+  });
 }

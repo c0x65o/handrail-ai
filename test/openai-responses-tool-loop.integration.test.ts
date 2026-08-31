@@ -145,11 +145,11 @@ describe("OpenAI Responses direct runtime integration", () => {
     });
   });
 
-  it("durably rejects an OpenAI batch that exceeds Spartan's four-call budget before execution", async () => {
+  it("durably rejects an OpenAI batch that exceeds Spartan's eight-call budget before execution", async () => {
     const adapter = createOpenAIResponsesProviderAdapter({
       model: "gpt-test",
       request: async function* () {
-        for (let index = 1; index <= 5; index += 1) {
+        for (let index = 1; index <= 9; index += 1) {
           yield {
             type: "response.function_call_arguments.done",
             call_id: `call_invoice_${index}`,
@@ -217,13 +217,13 @@ describe("OpenAI Responses direct runtime integration", () => {
       discoveredTools,
       executor,
       applicationContext: undefined,
-      limits: { maxTotalToolCalls: 4 },
+      limits: { maxTotalToolCalls: 8 },
     });
 
-    expect(result).toMatchObject({ status: "budget_exhausted", budget: "total_tool_calls", limit: 4 });
+    expect(result).toMatchObject({ status: "budget_exhausted", budget: "total_tool_calls", limit: 8 });
     expect(execute).not.toHaveBeenCalled();
     expect(runtime.getSnapshot().tool_loop_budget_exhaustions).toEqual([
-      expect.objectContaining({ budget: "total_tool_calls", limit: 4 }),
+      expect.objectContaining({ budget: "total_tool_calls", limit: 8 }),
     ]);
   });
 });

@@ -75,6 +75,10 @@ export type ApprovalReviewDecisionHandler<TPermissionContext> = (
   input: DecideApprovalInput<TPermissionContext>,
 ) => Promise<ApprovalDecisionResult>;
 
+export type ApprovalReviewTransitionHandler<TPermissionContext> = (
+  input: DecideApprovalInput<TPermissionContext>,
+) => Promise<ConversationApprovalProposalRecord>;
+
 export type ApprovalReviewDecisionCode =
   | "idle"
   | "busy"
@@ -113,10 +117,12 @@ export interface ApprovalReviewGroupModel {
 export interface UseApprovalReviewOptions<TPermissionContext> {
   readonly attribution: ConversationEventAttribution;
   readonly conversationId: ConversationId;
-  /** Pass an ApprovalCoordinator directly, or inject decisionHandler instead. */
+  /** Pass exactly one coordinator, decision handler, or gateway transition handler. */
   readonly coordinator?: Pick<ApprovalCoordinator<TPermissionContext>, "decide">;
   readonly createDecisionIdentity: ApprovalReviewDecisionIdentityFactory;
   readonly decisionHandler?: ApprovalReviewDecisionHandler<TPermissionContext>;
+  /** Uses the protected proposal-store transition contract exposed by an application gateway. */
+  readonly transitionHandler?: ApprovalReviewTransitionHandler<TPermissionContext>;
   /** Persisted rows used during SSR and before the first host refresh. */
   readonly initialProposals?: readonly ConversationApprovalProposalRecord[];
   readonly loadProposals: ApprovalReviewProposalLoader<TPermissionContext>;
@@ -268,8 +274,10 @@ function currentTimestamp(now: (() => ConversationTimestamp) | undefined): numbe
 export function useApprovalReview<TPermissionContext>(
   options: UseApprovalReviewOptions<TPermissionContext>,
 ): ApprovalReviewController {
-  if ((options.coordinator === undefined) === (options.decisionHandler === undefined)) {
-    throw new TypeError("Provide exactly one approval coordinator or decision handler.");
+  const decisionSourceCount = Number(options.coordinator !== undefined) +
+    Number(options.decisionHandler !== undefined) + Number(options.transitionHandler !== undefined);
+  if (decisionSourceCount !== 1) {
+    throw new TypeError("Provide exactly one approval coordinator, decision handler, or transition handler.");
   }
   const initial = useMemo(
     () => normalizedProposals(options.initialProposals ?? []),
@@ -478,10 +486,7 @@ export function useApprovalReview<TPermissionContext>(
     publishStates(Object.freeze({ ...statesRef.current, [key]: busy }));
     let result: ApprovalReviewDecisionState;
     try {
-      const handler = requestOptions.decisionHandler ??
-        requestOptions.coordinator?.decide.bind(requestOptions.coordinator);
-      if (handler === undefined) throw new TypeError("Decision handler is unavailable.");
-      result = safeResult(await handler(Object.freeze({
+      const decisionInput = Object.freeze({
         permissionContext: requestOptions.permissionContext,
         conversationId: requestOptions.conversationId,
         proposalId: proposal.proposal_id,
@@ -491,7 +496,20 @@ export function useApprovalReview<TPermissionContext>(
         idempotencyKey: identity.idempotencyKey,
         idempotencyFingerprint: identity.idempotencyFingerprint,
         signal: controller.signal,
-      })));
+      });
+      if (requestOptions.transitionHandler !== undefined) {
+        const transitioned = await requestOptions.transitionHandler(decisionInput);
+        result = transitioned.status === (decision === "confirm" ? "confirmed" : "rejected")
+          ? Object.freeze({ code: "accepted", decision: transitioned.status, retryable: false })
+          : transitioned.status === "pending"
+            ? Object.freeze({ code: "persistence_failure", retryable: true })
+            : Object.freeze({ code: "already_decided", currentStatus: transitioned.status, retryable: false });
+      } else {
+        const handler = requestOptions.decisionHandler ??
+          requestOptions.coordinator?.decide.bind(requestOptions.coordinator);
+        if (handler === undefined) throw new TypeError("Decision handler is unavailable.");
+        result = safeResult(await handler(decisionInput));
+      }
     } catch {
       result = controller.signal.aborted
         ? Object.freeze({ code: "cancelled", retryable: true })

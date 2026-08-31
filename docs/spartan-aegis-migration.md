@@ -8,13 +8,13 @@ This is a migration seam, not a rewrite of Spartan's business domain. It was der
 - Keep Zod action descriptors, validation, actor summaries, and side effects in `actions.ts` and the domain action modules.
 - Keep the rule that action tools create proposals rather than performing an unconfirmed mutation. Map descriptors to `createToolPlugin({ registrations, policy, approvals, presentations })`; `summarizeForActor` becomes the safe approval summary.
 - Keep repository authorization and company scoping before tool discovery and again before execution. Pass only the resulting actor-authorized definitions into `createDeferredToolDiscoveryPlan`.
-- Keep Aegis-specific system instructions, tool-call budget (currently four), transcript bound (currently 30), output bound, and source semantics as application policy.
+- Keep Aegis-specific system instructions, tool-call budget (currently eight), transcript bound (currently 30), output bound, and source semantics as application policy. The authoritative source is Spartan `src/server/aegis/provider.ts` (`MAX_TOOL_CALLS = 8`, audited 2026-08-30).
 
 ## Move generic machinery to handrail-ai
 
 | Existing Aegis concern | Reusable handrail-ai boundary |
 | --- | --- |
-| `provider.ts` Responses loop and normalized stream | `createOpenAIResponsesProviderAdapter` plus `runToolLoop({ limits: { maxTotalToolCalls: 4 } })`; configure `maximumInputMessages: 30` |
+| `provider.ts` Responses loop and normalized stream | `createOpenAIResponsesProviderAdapter` plus `runToolLoop({ limits: { maxTotalToolCalls: 8 } })`; configure `maximumInputMessages: 30` |
 | `tool-catalog.ts` namespace projection | `createDeferredToolDiscoveryPlan`; Spartan supplies stable namespace membership |
 | `handrail-bridge.ts` MCP discovery/execution glue | `@handrail/ai/connectors/mcp` |
 | routes, protected request plumbing, cancellation, replay | `createApplicationGateway` plus `@handrail/ai/server/application-gateway` |
@@ -40,7 +40,7 @@ const application = await createAiApplication({
   connectors: [optionalHandrailMcpConnector],
   installContext: undefined,
   policy: enforceCompanyAndActionPolicy,
-  toolLoopLimits: { maxTotalToolCalls: 4 },
+  toolLoopLimits: { maxTotalToolCalls: 8 },
 });
 ```
 
@@ -58,6 +58,8 @@ The existing provider sends `web_search`, deferred `namespace` function tools, a
 4. Migrate the client to the headless runtime, then the styled preset or a Spartan-owned UI. Keep old routes during rollback.
 5. Cut persistence reads over after event/revision, proposal, attachment, and catalog reconciliation. Remove duplicated generic code only after parity tests.
 
-Required parity tests cover every role's discovered tools, denied cross-company access, proposal-only actions, idempotent confirmation, four-call budget, hosted web citations, attachment limits, archive/restore/new threads, stream reconnect, cancellation, and multi-device convergence.
+The checked [`examples/spartan-aegis-adapter.ts`](../examples/spartan-aegis-adapter.ts) accepts Spartan's existing `AEGIS_TOOL_DEFINITIONS`, `AegisToolExecutor.run`, and `AEGIS_ACTION_REGISTRY` structural contracts. It keeps action execution behind external approval and uses the authoritative eight-call budget.
+
+Required parity tests cover every role's discovered tools, denied cross-company access, proposal-only actions, idempotent confirmation, eight-call budget, hosted web citations, attachment limits, archive/restore/new threads, stream reconnect, cancellation, and multi-device convergence.
 
 Do not remove `provider.ts`, current Aegis routes, or old persistence during these steps. Cut reads over independently after the matching reconciliation report is converged. Binary attachment authorization/resolution, Zod schemas, company/actor construction, system instructions, proposal confirmation side effects, retention, and rollout flags remain Spartan-owned boundaries.

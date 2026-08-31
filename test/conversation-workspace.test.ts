@@ -1,0 +1,50 @@
+import { describe, expect, it, vi } from "vitest";
+import {
+  ConversationWorkspace,
+  createInitialConversationState,
+  type ConversationId,
+  type ConversationRuntime,
+  type ConversationRuntimeRegistry,
+  type ConversationState,
+} from "../src/index.js";
+
+function fakeRuntime(conversationId: string) {
+  let state = createInitialConversationState(conversationId as ConversationId);
+  const listeners = new Set<() => void>();
+  const runtime = {
+    store: {
+      getSnapshot: () => state,
+      subscribe: (listener: () => void) => { listeners.add(listener); return () => listeners.delete(listener); },
+    },
+  } as unknown as ConversationRuntime<unknown>;
+  return {
+    runtime,
+    update(next: ConversationState) { state = next; for (const listener of listeners) listener(); },
+  };
+}
+
+describe("ConversationWorkspace", () => {
+  it("retains concurrent runtimes and marks background terminal turns unread", async () => {
+    const first = fakeRuntime("first");
+    const second = fakeRuntime("second");
+    const release = vi.fn(async () => true);
+    const registry = {
+      open: vi.fn(async ({ conversationId }: { conversationId: string }) =>
+        conversationId === "first" ? first.runtime : second.runtime),
+      release, clear: vi.fn(), archive: vi.fn(), restore: vi.fn(), permanentlyDelete: vi.fn(),
+      dispose: vi.fn(async () => undefined),
+    } as unknown as ConversationRuntimeRegistry<unknown, { userId: string }>;
+    const workspace = new ConversationWorkspace(registry);
+    await workspace.open({ authorizationContext: { userId: "u1" }, conversationId: "first" as ConversationId });
+    first.update({ ...first.runtime.store.getSnapshot(), active_turn_id: "turn-1" as never,
+      turns: [{ turn_id: "turn-1", status: "running" } as never] });
+    await workspace.open({ authorizationContext: { userId: "u1" }, conversationId: "second" as ConversationId });
+    expect(release).not.toHaveBeenCalled();
+    expect(workspace.getSnapshot()).toMatchObject({ selectedConversationId: "second", runningCount: 1 });
+    first.update({ ...first.runtime.store.getSnapshot(), active_turn_id: null,
+      turns: [{ turn_id: "turn-1", status: "completed" } as never] });
+    expect(workspace.getSnapshot()).toMatchObject({ runningCount: 0, unreadCount: 1 });
+    workspace.select("first" as ConversationId);
+    expect(workspace.getSnapshot().unreadCount).toBe(0);
+  });
+});

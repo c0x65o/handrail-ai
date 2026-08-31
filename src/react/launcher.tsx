@@ -28,7 +28,7 @@ export type ChatLauncherConnectionStatus =
   | "connected"
   | "disconnected"
   | "error";
-export type ChatLauncherTurnStatus = "idle" | "busy" | "error";
+export type ChatLauncherTurnStatus = "idle" | "busy" | "completed" | "error";
 
 export interface ChatLauncherState {
   busy: boolean;

@@ -92,8 +92,17 @@ class HandrailConversationState {
       nextAttachments.add(Map.unmodifiable(payload));
     if (type == 'response.cancelled') nextStatus = HandrailTurnStatus.cancelled;
     if (type == 'response.error') nextStatus = HandrailTurnStatus.failed;
-    if (type == 'response.completed' || frame.type == 'terminal')
-      nextStatus = HandrailTurnStatus.completed;
+    if (type == 'response.completed') nextStatus = HandrailTurnStatus.completed;
+    if (frame.type == 'terminal') {
+      final terminal = frame.data['result'] is Map
+          ? Map<String, Object?>.from(frame.data['result'] as Map)
+          : frame.data;
+      final terminalStatus = terminal['status'];
+      if (terminalStatus == 'completed') nextStatus = HandrailTurnStatus.completed;
+      if (terminalStatus == 'cancelled') nextStatus = HandrailTurnStatus.cancelled;
+      if (terminalStatus == 'failed' || terminalStatus == 'disconnected')
+        nextStatus = HandrailTurnStatus.failed;
+    }
     return HandrailConversationState(
         conversationId: conversationId,
         text: nextText,
@@ -103,6 +112,17 @@ class HandrailConversationState {
         citations: List.unmodifiable(nextCitations),
         attachments: List.unmodifiable(nextAttachments));
   }
+}
+
+class HandrailGatewayException implements Exception {
+  final String code;
+  final String message;
+  final bool retryable;
+  final int? statusCode;
+  const HandrailGatewayException(this.code, this.message,
+      {this.retryable = false, this.statusCode});
+  @override
+  String toString() => 'HandrailGatewayException($code): $message';
 }
 
 class HandrailStreamFrame {
@@ -249,10 +269,10 @@ class HandrailAiClient {
     request.headers.addAll(await _headers());
     final response = await _http.send(request);
     if (response.statusCode < 200 || response.statusCode >= 300)
-      throw http.ClientException(
-        'Handrail gateway request failed (${response.statusCode})',
-        request.url,
-      );
+      throw HandrailGatewayException('stream_request_failed',
+        'Handrail gateway stream request failed.',
+        retryable: response.statusCode >= 500 || response.statusCode == 429,
+        statusCode: response.statusCode);
     String? eventType, eventId;
     final data = <String>[];
     await for (final line in response.stream
@@ -285,10 +305,26 @@ class HandrailAiClient {
   }
 
   Map<String, Object?> _success(http.Response response) {
-    final body = Map<String, Object?>.from(jsonDecode(response.body) as Map);
+    Map<String, Object?> body;
+    try {
+      body = Map<String, Object?>.from(jsonDecode(response.body) as Map);
+    } catch (_) {
+      throw HandrailGatewayException('invalid_response',
+        'Handrail gateway returned an invalid response.',
+        retryable: response.statusCode >= 500, statusCode: response.statusCode);
+    }
     if (response.statusCode < 200 ||
         response.statusCode >= 300 ||
-        body['ok'] != true) throw StateError('Handrail gateway request failed');
+        body['ok'] != true) {
+      final error = body['error'] is Map
+          ? Map<String, Object?>.from(body['error'] as Map) : const <String, Object?>{};
+      throw HandrailGatewayException(
+        error['code'] as String? ?? 'request_failed',
+        error['message'] as String? ?? 'Handrail gateway request failed.',
+        retryable: error['retryable'] == true,
+        statusCode: response.statusCode,
+      );
+    }
     return body;
   }
 

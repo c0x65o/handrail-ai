@@ -1,6 +1,8 @@
 /** Cross-platform client entry point: no React, Node, database, or provider dependencies. */
 export {
   APPLICATION_GATEWAY_PROTOCOL_VERSION,
+  ApplicationGatewayResourceError,
+  createApplicationGatewayConversationCatalog,
   createApplicationGatewayTransport,
   createApplicationGatewayResourceClient,
   negotiateApplicationGatewayCapabilities,
@@ -32,6 +34,23 @@ export {
 export type { PresenceRecord } from "../presence/types.js";
 export type { AttachmentReference, ApplicationToolResult, StreamEvent } from "../protocol.js";
 export type { CitationSource } from "../citations.js";
+export {
+  ConversationWorkspace,
+  type ConversationWorkspaceOpenInput,
+  type ConversationWorkspaceSnapshot,
+  type ConversationWorkspaceThreadSnapshot,
+  type ConversationWorkspaceTurnStatus,
+} from "../conversation/workspace.js";
+export {
+  createRetryDiagnosticHooks,
+  diagnoseAiOperation,
+  emitAiDiagnostic,
+  publicAiDiagnostic,
+  type AiDiagnosticDomain,
+  type AiDiagnosticEvent,
+  type AiDiagnosticPhase,
+  type AiDiagnosticSink,
+} from "../diagnostics.js";
 export {
   createConversationRuntime,
   type ConversationRuntime,
