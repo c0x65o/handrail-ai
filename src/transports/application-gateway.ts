@@ -4,6 +4,19 @@ import type { AttachmentUploadAdapter } from "../attachments/types.js";
 import type { LivePresenceEnvelope } from "../presence/live-delivery.js";
 import type { PresenceRecord } from "../presence/types.js";
 import type {
+  ArchiveConversationInput, ClearConversationInput, ConversationCatalog, CreateConversationInput,
+  GetConversationInput, ListConversationsInput, PermanentlyDeleteConversationInput,
+  RenameConversationInput, RestoreConversationInput, ArchiveConversationResult,
+  ClearConversationResult, CreateConversationResult, GetConversationResult,
+  ListConversationsResult, PermanentlyDeleteConversationResult,
+  RenameConversationResult, RestoreConversationResult,
+} from "../conversation/catalog.js";
+import type {
+  ApprovalProposalStore, CreateApprovalProposalInput, GetApprovalProposalInput,
+  ListApprovalProposalGroupInput, TransitionApprovalProposalInput,
+} from "../conversation/approval-proposal-store.js";
+import type { ConversationApprovalProposalRecord } from "../conversation/state.js";
+import type {
   AuthoritativeCancelTurnResult,
   CancelTurnInput,
   ConversationTransport,
@@ -31,6 +44,11 @@ export interface ApplicationGatewayCapabilities {
   };
   readonly presence: boolean;
   readonly synchronization: boolean;
+  readonly resources?: {
+    readonly conversations: boolean;
+    readonly approvals: boolean;
+    readonly titleGeneration: boolean;
+  };
 }
 
 export interface ApplicationGatewayEventEnvelope<TEvent> {
@@ -43,7 +61,20 @@ export interface ApplicationGatewayAuthorizationContext {
 }
 
 export interface ApplicationGatewayRequestAuthorizer<TContext extends ApplicationGatewayAuthorizationContext> {
-  authorize(request: Request, action: "capabilities" | "start" | "resume" | "cancel"): Promise<TContext>;
+  authorize(request: Request, action: ApplicationGatewayAction): Promise<TContext>;
+}
+
+export type ApplicationGatewayAction = "capabilities" | "start" | "resume" | "cancel" |
+  "conversations" | "approvals" | "attachments" | "presence" | "synchronization" | "title_generation";
+
+export interface ApplicationGatewayTitleGeneration<TContext> {
+  generate(input: { readonly conversationId: string; readonly idempotencyKey: string }, context: TContext, signal: AbortSignal): Promise<string>;
+}
+
+export interface ApplicationGatewayResourceHandlers<TContext> {
+  readonly attachments?: (request: Request, context: TContext) => Response | Promise<Response>;
+  readonly presence?: (request: Request, context: TContext) => Response | Promise<Response>;
+  readonly synchronization?: (request: Request, context: TContext) => Response | Promise<Response>;
 }
 
 export interface ApplicationGatewayOptions<TEvent, TRequest, TContext extends ApplicationGatewayAuthorizationContext> {
@@ -53,6 +84,10 @@ export interface ApplicationGatewayOptions<TEvent, TRequest, TContext extends Ap
   readonly checkpointForEvent: (event: TEvent) => TurnResumePoint;
   readonly capabilities?: Partial<Omit<ApplicationGatewayCapabilities, "protocolVersion" | "authoritativeCancellation">>;
   readonly maximumRequestBytes?: number;
+  readonly conversations?: ConversationCatalog<TContext>;
+  readonly approvals?: ApprovalProposalStore<TContext>;
+  readonly titleGeneration?: ApplicationGatewayTitleGeneration<TContext>;
+  readonly handlers?: ApplicationGatewayResourceHandlers<TContext>;
 }
 
 export interface ApplicationGateway {
@@ -147,21 +182,65 @@ export function createApplicationGateway<TEvent, TRequest, TContext extends Appl
     attachments: options.capabilities?.attachments ?? false,
     presence: options.capabilities?.presence ?? false,
     synchronization: options.capabilities?.synchronization ?? false,
+    resources: Object.freeze({ conversations: options.conversations !== undefined,
+      approvals: options.approvals !== undefined, titleGeneration: options.titleGeneration !== undefined }),
   });
   return Object.freeze({
     async handle(request: Request): Promise<Response> {
       try {
         const pathname = new URL(request.url).pathname.replace(/\/+$/, "");
-        const action = pathname.endsWith("/capabilities") ? "capabilities"
+        const action: ApplicationGatewayAction | null = pathname.endsWith("/capabilities") ? "capabilities"
           : pathname.endsWith("/turns/start") ? "start"
           : pathname.endsWith("/turns/resume") ? "resume"
-          : pathname.endsWith("/turns/cancel") ? "cancel" : null;
+          : pathname.endsWith("/turns/cancel") ? "cancel"
+          : pathname.includes("/conversations/") ? "conversations"
+          : pathname.includes("/approvals/") ? "approvals"
+          : pathname.endsWith("/attachments") ? "attachments"
+          : pathname.endsWith("/presence") ? "presence"
+          : pathname.endsWith("/synchronization") ? "synchronization"
+          : pathname.endsWith("/titles/generate") ? "title_generation" : null;
         if (action === null) return new Response(null, { status: 404 });
-        if ((action === "capabilities" && request.method !== "GET") || (action !== "capabilities" && request.method !== "POST")) {
+        if ((action === "capabilities" && request.method !== "GET") ||
+          (action !== "capabilities" && action !== "presence" && action !== "attachments" && request.method !== "POST")) {
           return new Response(null, { status: 405, headers: { allow: action === "capabilities" ? "GET" : "POST" } });
         }
-        await options.authorize(request, action);
+        const authorizationContext = await options.authorize(request, action);
         if (action === "capabilities") return json({ ok: true, value: capabilities });
+        if (action === "attachments" || action === "presence" || action === "synchronization") {
+          const handler = options.handlers?.[action];
+          return handler ? handler(request, authorizationContext) : new Response(null, { status: 501 });
+        }
+        if (action === "conversations") {
+          if (!options.conversations) return new Response(null, { status: 501 });
+          const input = await body<Record<string, unknown>>(request, maximumBytes);
+          const operation = pathname.slice(pathname.lastIndexOf("/") + 1);
+          const value = operation === "list" ? await options.conversations.list({ ...input, authorizationContext } as unknown as ListConversationsInput<TContext>)
+            : operation === "create" ? await options.conversations.create({ ...input, authorizationContext } as unknown as CreateConversationInput<TContext>)
+            : operation === "get" ? await options.conversations.get({ ...input, authorizationContext } as unknown as GetConversationInput<TContext>)
+            : operation === "rename" ? await options.conversations.rename({ ...input, authorizationContext } as unknown as RenameConversationInput<TContext>)
+            : operation === "clear" ? await options.conversations.clear({ ...input, authorizationContext } as unknown as ClearConversationInput<TContext>)
+            : operation === "archive" ? await options.conversations.archive({ ...input, authorizationContext } as unknown as ArchiveConversationInput<TContext>)
+            : operation === "restore" ? await options.conversations.restore({ ...input, authorizationContext } as unknown as RestoreConversationInput<TContext>)
+            : operation === "permanent-delete" ? await options.conversations.permanentlyDelete({ ...input, authorizationContext } as unknown as PermanentlyDeleteConversationInput<TContext>)
+            : null;
+          return value === null ? new Response(null, { status: 404 }) : json({ ok: true, value });
+        }
+        if (action === "approvals") {
+          if (!options.approvals) return new Response(null, { status: 501 });
+          const input = await body<Record<string, unknown>>(request, maximumBytes);
+          const operation = pathname.slice(pathname.lastIndexOf("/") + 1);
+          const value = operation === "create" ? await options.approvals.create({ ...input, permissionContext: authorizationContext } as unknown as CreateApprovalProposalInput<TContext>)
+            : operation === "get" ? await options.approvals.get({ ...input, permissionContext: authorizationContext } as unknown as GetApprovalProposalInput<TContext>)
+            : operation === "list-group" ? await options.approvals.listGroup({ ...input, permissionContext: authorizationContext } as unknown as ListApprovalProposalGroupInput<TContext>)
+            : operation === "transition" ? await options.approvals.transition({ ...input, permissionContext: authorizationContext } as unknown as TransitionApprovalProposalInput<TContext>)
+            : null;
+          return value === null && operation !== "get" ? new Response(null, { status: 404 }) : json({ ok: true, value });
+        }
+        if (action === "title_generation") {
+          if (!options.titleGeneration) return new Response(null, { status: 501 });
+          const input = await body<{ conversationId: string; idempotencyKey: string }>(request, maximumBytes);
+          return json({ ok: true, value: await options.titleGeneration.generate(input, authorizationContext, request.signal) });
+        }
         if (action === "start") {
           const input = await body<StartTurnInput<TRequest>>(request, maximumBytes);
           const result = await options.transport.startTurn(input);
@@ -275,6 +354,56 @@ export async function negotiateApplicationGatewayCapabilities(
     throw new TypeError("Application gateway returned an incompatible protocol version");
   }
   return Object.freeze(result.value);
+}
+
+type WithoutAuthorization<T> = Omit<T, "authorizationContext" | "permissionContext">;
+
+export interface ApplicationGatewayResourceClient {
+  listConversations(input: WithoutAuthorization<ListConversationsInput<unknown>>): Promise<ListConversationsResult>;
+  createConversation(input: WithoutAuthorization<CreateConversationInput<unknown>>): Promise<CreateConversationResult>;
+  getConversation(input: WithoutAuthorization<GetConversationInput<unknown>>): Promise<GetConversationResult>;
+  renameConversation(input: WithoutAuthorization<RenameConversationInput<unknown>>): Promise<RenameConversationResult>;
+  clearConversation(input: WithoutAuthorization<ClearConversationInput<unknown>>): Promise<ClearConversationResult>;
+  archiveConversation(input: WithoutAuthorization<ArchiveConversationInput<unknown>>): Promise<ArchiveConversationResult>;
+  restoreConversation(input: WithoutAuthorization<RestoreConversationInput<unknown>>): Promise<RestoreConversationResult>;
+  permanentlyDeleteConversation(input: WithoutAuthorization<PermanentlyDeleteConversationInput<unknown>>): Promise<PermanentlyDeleteConversationResult>;
+  createApproval(input: WithoutAuthorization<CreateApprovalProposalInput<unknown>>): Promise<ConversationApprovalProposalRecord>;
+  getApproval(input: WithoutAuthorization<GetApprovalProposalInput<unknown>>): Promise<ConversationApprovalProposalRecord | null>;
+  listApprovalGroup(input: WithoutAuthorization<ListApprovalProposalGroupInput<unknown>>): Promise<readonly ConversationApprovalProposalRecord[]>;
+  transitionApproval(input: WithoutAuthorization<TransitionApprovalProposalInput<unknown>>): Promise<ConversationApprovalProposalRecord>;
+  generateTitle(input: { readonly conversationId: string; readonly idempotencyKey: string }): Promise<string>;
+}
+
+/** Typed, cross-platform resource client paired with the application gateway. */
+export function createApplicationGatewayResourceClient(
+  options: Pick<ApplicationGatewayTransportOptions<unknown>, "baseUrl" | "fetch" | "protectedRequest">,
+): ApplicationGatewayResourceClient {
+  const fetcher = options.fetch ?? globalThis.fetch;
+  const base = options.baseUrl.replace(/\/+$/, "");
+  const invoke = async <T>(path: string, input: unknown): Promise<T> => {
+    const url = `${base}${path}`;
+    const initial: RequestInit = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) };
+    const response = await fetcher(url, await options.protectedRequest?.({ url, ...initial }) ?? initial);
+    const result = await response.json() as { readonly ok?: boolean; readonly value?: T; readonly error?: { readonly message?: string } };
+    if (!response.ok || !result.ok) throw new TypeError(result.error?.message ?? "Application gateway request failed");
+    return result.value as T;
+  };
+  const client: ApplicationGatewayResourceClient = {
+    listConversations: (input) => invoke<ListConversationsResult>("/conversations/list", input),
+    createConversation: (input) => invoke<CreateConversationResult>("/conversations/create", input),
+    getConversation: (input) => invoke<GetConversationResult>("/conversations/get", input),
+    renameConversation: (input) => invoke<RenameConversationResult>("/conversations/rename", input),
+    clearConversation: (input) => invoke<ClearConversationResult>("/conversations/clear", input),
+    archiveConversation: (input) => invoke<ArchiveConversationResult>("/conversations/archive", input),
+    restoreConversation: (input) => invoke<RestoreConversationResult>("/conversations/restore", input),
+    permanentlyDeleteConversation: (input) => invoke<PermanentlyDeleteConversationResult>("/conversations/permanent-delete", input),
+    createApproval: (input) => invoke<ConversationApprovalProposalRecord>("/approvals/create", input),
+    getApproval: (input) => invoke<ConversationApprovalProposalRecord | null>("/approvals/get", input),
+    listApprovalGroup: (input) => invoke<readonly ConversationApprovalProposalRecord[]>("/approvals/list-group", input),
+    transitionApproval: (input) => invoke<ConversationApprovalProposalRecord>("/approvals/transition", input),
+    generateTitle: (input) => invoke<string>("/titles/generate", input),
+  };
+  return Object.freeze(client);
 }
 
 async function readGatewayStream<TEvent>(

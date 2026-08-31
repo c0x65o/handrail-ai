@@ -2,7 +2,9 @@ import { type CSSProperties, type ReactNode } from "react";
 import type { ConversationState, ConversationToolResultRecord } from "../conversation/state.js";
 import type { PresenceController } from "../presence/controller.js";
 import type { ToolResultRenderer } from "../react/primitives.js";
-import type { ConversationComposerResult } from "../react/use-conversation-composer.js";
+import { ConversationProvider } from "../react/context.js";
+import { useConversationComposer, type ConversationComposerResult, type UseConversationComposerOptions } from "../react/use-conversation-composer.js";
+import type { ConversationRuntime } from "../runtime.js";
 import {
   AttachmentList, ChatRoot, Composer, ErrorList, FileInput, Form, LiveRegion,
   Retry, Stop, StreamStatus, Submit, Textarea, Transcript, TypingIndicator,
@@ -17,6 +19,37 @@ export type StyledChatLayout = "launcher" | "dialog" | "drawer" | "page";
 
 export interface ToolResultRendererRegistry {
   readonly [rendererKey: string]: (result: ConversationToolResultRecord) => ReactNode;
+}
+
+export interface ToolRendererPlugin {
+  readonly pluginId: string;
+  readonly version: string;
+  readonly renderers: ToolResultRendererRegistry;
+  readonly toolRendererKeys?: Readonly<Record<string, string>>;
+}
+
+export function installToolRendererPlugins(plugins: readonly ToolRendererPlugin[]): {
+  readonly renderers: ToolResultRendererRegistry;
+  readonly toolRendererKeys: Readonly<Record<string, string>>;
+} {
+  const renderers: Record<string, ToolResultRendererRegistry[string]> = {};
+  const toolRendererKeys: Record<string, string> = {};
+  const identities = new Set<string>();
+  for (const plugin of plugins) {
+    const identity = `${plugin.pluginId}@${plugin.version}`;
+    if (identities.has(identity)) throw new TypeError(`Duplicate renderer plugin "${identity}"`);
+    identities.add(identity);
+    for (const [key, renderer] of Object.entries(plugin.renderers)) {
+      if (renderers[key]) throw new TypeError(`Duplicate renderer key "${key}"`);
+      renderers[key] = renderer;
+    }
+    for (const [toolName, key] of Object.entries(plugin.toolRendererKeys ?? {})) {
+      if (!renderers[key] && !plugin.renderers[key]) throw new TypeError(`Renderer plugin maps "${toolName}" to an unknown key`);
+      if (toolRendererKeys[toolName]) throw new TypeError(`Duplicate renderer mapping for "${toolName}"`);
+      toolRendererKeys[toolName] = key;
+    }
+  }
+  return Object.freeze({ renderers: Object.freeze(renderers), toolRendererKeys: Object.freeze(toolRendererKeys) });
 }
 
 export interface StyledChatPresetProps {
@@ -35,6 +68,14 @@ export interface StyledChatPresetProps {
   readonly className?: string;
   readonly style?: CSSProperties;
   readonly labels?: Partial<{ attach: string; send: string; stop: string; retry: string; placeholder: string }>;
+}
+
+export interface HandrailChatProps<TRequest> extends Omit<StyledChatPresetProps,
+  "composer" | "state" | "presence" | "toolRendererKeys" | "toolResultRenderers"> {
+  readonly runtime: ConversationRuntime<TRequest>;
+  readonly composer: UseConversationComposerOptions<TRequest>;
+  readonly presence?: PresenceController;
+  readonly rendererPlugins?: readonly ToolRendererPlugin[];
 }
 
 const DEFAULT_LABELS = { attach: "Attach", send: "Send", stop: "Stop", retry: "Retry", placeholder: "Message…" };
@@ -83,6 +124,19 @@ export function StyledChatPreset(props: StyledChatPresetProps): ReactNode {
     </Composer>
     {props.footer}
   </ChatRoot>;
+}
+
+function BoundHandrailChat<TRequest>(props: HandrailChatProps<TRequest>): ReactNode {
+  const composer = useConversationComposer(props.composer);
+  const installed = installToolRendererPlugins(props.rendererPlugins ?? []);
+  const { runtime: _runtime, rendererPlugins: _plugins, composer: _composer, presence: _presence, ...preset } = props;
+  return <StyledChatPreset {...preset} composer={composer} {...(props.presence ? { presence: props.presence } : {})}
+    toolRendererKeys={installed.toolRendererKeys} toolResultRenderers={installed.renderers}/>;
+}
+
+/** One-component optional UI; pass a headless runtime to retain full host control. */
+export function HandrailChat<TRequest>(props: HandrailChatProps<TRequest>): ReactNode {
+  return <ConversationProvider runtime={props.runtime}><BoundHandrailChat {...props}/></ConversationProvider>;
 }
 
 export function StyledChatLauncher(props: StyledChatPresetProps & { readonly trigger?: ReactNode }): ReactNode {

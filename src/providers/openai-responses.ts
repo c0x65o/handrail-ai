@@ -37,6 +37,8 @@ export interface OpenAIResponsesProviderOptions {
   readonly instructions?: string;
   readonly contextWindowTokens?: number | null;
   readonly maxOutputTokens?: number | null;
+  /** Optional host transcript policy; Spartan configures this to 30. */
+  readonly maximumInputMessages?: number;
   readonly resolveAttachment?: (reference: AttachmentReference) => JsonObject;
   /** Explicit PDF limits; document input remains unsupported when omitted. */
   readonly document_input?: DocumentInputCapabilityDescriptor;
@@ -267,6 +269,10 @@ export class OpenAIResponsesProviderAdapter implements ProviderAdapter {
   readonly #documentInput: ProviderDocumentInputCapability;
   constructor(readonly options: OpenAIResponsesProviderOptions) {
     if (!options.model.trim()) throw new TypeError("model must not be empty");
+    if (options.maximumInputMessages !== undefined && (!Number.isSafeInteger(options.maximumInputMessages) ||
+      options.maximumInputMessages < 1 || options.maximumInputMessages > 1_000)) {
+      throw new TypeError("maximumInputMessages must be an integer between 1 and 1000");
+    }
     this.#documentInput = options.document_input === undefined
       ? parseProviderDocumentInputCapability({ supported: false })
       : parseProviderDocumentInputCapability({ supported: true, capability: options.document_input });
@@ -312,7 +318,10 @@ export class OpenAIResponsesProviderAdapter implements ProviderAdapter {
     let sequence = 0;
     yield { ...envelope(invocation, "response.started", sequence++), type: "response.started", attribution: invocation.context.attribution };
     try {
-      const allowed = new Set(invocation.tools.map((tool) => tool.name));
+      const effectiveInvocation: ProviderAdapterInvocation = optionsMaximumMessages(this.options) === null
+        ? invocation
+        : { ...invocation, messages: invocation.messages.slice(-optionsMaximumMessages(this.options)!) };
+      const allowed = new Set(effectiveInvocation.tools.map((tool) => tool.name));
       const namespaces = (this.options.namespaces ?? []).map((namespace) => ({ ...namespace,
         toolNames: namespace.toolNames.filter((name) => allowed.has(name)) })).filter((namespace) => namespace.toolNames.length > 0);
       const plan = createDeferredToolDiscoveryPlan({ tools: invocation.tools, namespaces });
@@ -320,14 +329,14 @@ export class OpenAIResponsesProviderAdapter implements ProviderAdapter {
       const loadedParent = invocation.continuation_of ? await this.#continuations.load(invocation.continuation_of) : null;
       const parent = loadedParent === null ? null : immutableContinuationRecord(loadedParent);
       if (invocation.tool_results.length > 0 && parent === null) throw new OpenAIResponsesPreflightError();
-      const resolved = await this.resolvedAttachments(invocation);
+      const resolved = await this.resolvedAttachments(effectiveInvocation);
       const resolveAttachment = (reference: AttachmentReference): JsonObject => {
         const document = resolved.get(reference.content_ref);
         if (document) return document;
         if (!this.options.resolveAttachment) throw new OpenAIResponsesPreflightError();
         return this.options.resolveAttachment(reference);
       };
-      const request = buildOpenAIResponsesRequest({ model: this.options.model, invocation, plan,
+      const request = buildOpenAIResponsesRequest({ model: this.options.model, invocation: effectiveInvocation, plan,
         supportsToolSearch: this.options.supportsToolSearch ?? true,
         continuationItems: parent?.inputItems ?? [],
         ...(this.options.hosted ? { hosted: this.options.hosted } : {}),
@@ -396,6 +405,10 @@ export class OpenAIResponsesProviderAdapter implements ProviderAdapter {
       return { status: "failed", error: normalized, usage: null };
     }
   }
+}
+
+function optionsMaximumMessages(options: OpenAIResponsesProviderOptions): number | null {
+  return options.maximumInputMessages ?? null;
 }
 
 export function createOpenAIResponsesProviderAdapter(options: OpenAIResponsesProviderOptions): OpenAIResponsesProviderAdapter {

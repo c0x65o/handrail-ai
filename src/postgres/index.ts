@@ -165,4 +165,108 @@ export class PostgresAiPersistence {
       return jsonClone(result);
     });
   }
+
+  async getToolResult<T>(tenantId: string, toolCallId: string): Promise<T | null> {
+    const result = await this.client.query<{ result: T }>(
+      "SELECT result FROM handrail_ai_tool_ledger WHERE tenant_id=$1 AND tool_call_id=$2",
+      [id(tenantId, "tenantId"), id(toolCallId, "toolCallId")],
+    );
+    return result.rows[0] ? jsonClone(result.rows[0].result) : null;
+  }
 }
+
+/** Durable high-level replay store scoped to one already-authorized tenant. */
+export class PostgresManagedRuntimeTurnStateStore implements ManagedRuntimeTurnStateStore {
+  constructor(readonly persistence: PostgresAiPersistence, readonly tenantId: string) {
+    id(tenantId, "tenantId");
+  }
+
+  async load(conversationId: string, turnId: string): Promise<ManagedRuntimeTurnStateRecord | null> {
+    const document = await this.persistence.readTurnState<ManagedRuntimeTurnStateRecord>(this.tenantId, conversationId, turnId);
+    return document ? parseManagedRuntimeTurnStateRecord(document.value) : null;
+  }
+
+  async save(value: ManagedRuntimeTurnStateRecord): Promise<ManagedRuntimeTurnStateRecord> {
+    const record = parseManagedRuntimeTurnStateRecord(value);
+    const existing = await this.persistence.readTurnState<ManagedRuntimeTurnStateRecord>(this.tenantId, record.conversationId, record.turnId);
+    if (existing) {
+      const stored = parseManagedRuntimeTurnStateRecord(existing.value);
+      if (JSON.stringify(stored) === JSON.stringify(record)) return stored;
+      throw new ManagedRuntimeTurnStateStoreConflictError("The replay identity conflicts with durable state.", {
+        code: "replay_identity_conflict", conversationId: record.conversationId, turnId: record.turnId,
+      });
+    }
+    try {
+      const saved = await this.persistence.writeTurnState(this.tenantId, record.conversationId, record.turnId, null, record);
+      return parseManagedRuntimeTurnStateRecord(saved.value);
+    } catch (error) {
+      if (!(error instanceof PostgresPersistenceConflictError)) throw error;
+      const winner = await this.load(record.conversationId, record.turnId);
+      if (winner && JSON.stringify(winner) === JSON.stringify(record)) return winner;
+      throw new ManagedRuntimeTurnStateStoreConflictError("The replay identity conflicts with durable state.", {
+        code: "replay_identity_conflict", conversationId: record.conversationId, turnId: record.turnId,
+      });
+    }
+  }
+}
+
+/** Atomic Postgres implementation of the cross-device sync baseline contract. */
+export class PostgresConversationSyncStateStore implements ConversationSyncStateStore {
+  constructor(readonly persistence: PostgresAiPersistence, readonly tenantId: string) {
+    id(tenantId, "tenantId");
+  }
+
+  async load(conversationId: ConversationId): Promise<ConversationSyncStateRecord | null> {
+    const document = await this.persistence.readSyncState<ConversationSyncStateRecord>(this.tenantId, conversationId, "latest");
+    if (!document) return null;
+    const record = jsonClone(document.value);
+    if (record.schemaVersion !== CONVERSATION_SYNC_STATE_SCHEMA_VERSION || record.conversationId !== conversationId ||
+      record.generation !== document.version) throw new TypeError("Postgres sync state is invalid");
+    return record;
+  }
+
+  async save(input: SaveConversationSyncStateInput): Promise<ConversationSyncStateRecord> {
+    const generation = (input.expectedGeneration ?? 0) + 1;
+    const record: ConversationSyncStateRecord = jsonClone({ ...input.record, generation });
+    try {
+      const saved = await this.persistence.writeSyncState(
+        this.tenantId, record.conversationId, "latest", input.expectedGeneration, record,
+      );
+      return jsonClone(saved.value);
+    } catch (error) {
+      if (!(error instanceof PostgresPersistenceConflictError)) throw error;
+      const actual = await this.persistence.readSyncState<ConversationSyncStateRecord>(this.tenantId, record.conversationId, "latest");
+      throw new ConversationSyncStateStoreConflictError("The sync generation conflicts with durable state.", {
+        code: "generation_conflict", conversationId: record.conversationId,
+        expectedGeneration: input.expectedGeneration, actualGeneration: actual?.version ?? null,
+      });
+    }
+  }
+}
+
+/** Postgres-backed exactly-once result ledger for bounded tool execution. */
+export class PostgresToolExecutionLedger implements ToolExecutionLedger {
+  constructor(readonly persistence: PostgresAiPersistence, readonly tenantId: string) {
+    id(tenantId, "tenantId");
+  }
+
+  getOrCreate(toolCallId: string, execute: () => Promise<ApplicationToolResult>): Promise<ApplicationToolResult> {
+    return this.persistence.getOrExecuteTool(this.tenantId, toolCallId, execute);
+  }
+}
+import {
+  ManagedRuntimeTurnStateStoreConflictError,
+  parseManagedRuntimeTurnStateRecord,
+  type ManagedRuntimeTurnStateRecord,
+  type ManagedRuntimeTurnStateStore,
+} from "../transports/managed-runtime-state.js";
+import {
+  CONVERSATION_SYNC_STATE_SCHEMA_VERSION,
+  ConversationSyncStateStoreConflictError,
+  type ConversationSyncStateRecord,
+  type ConversationSyncStateStore,
+  type SaveConversationSyncStateInput,
+} from "../sync/persistence.js";
+import type { ConversationId } from "../conversation/events.js";
+import type { ApplicationToolResult } from "../protocol.js";
+import type { ToolExecutionLedger } from "../tools/executor.js";

@@ -2,10 +2,12 @@
 export {
   APPLICATION_GATEWAY_PROTOCOL_VERSION,
   createApplicationGatewayTransport,
+  createApplicationGatewayResourceClient,
   negotiateApplicationGatewayCapabilities,
   type ApplicationGatewayCapabilities,
   type ApplicationGatewayEventEnvelope,
   type ApplicationGatewayTransportOptions,
+  type ApplicationGatewayResourceClient,
 } from "../transports/application-gateway.js";
 export type {
   AuthoritativeCancelTurnResult,

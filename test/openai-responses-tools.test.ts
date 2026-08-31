@@ -48,7 +48,8 @@ describe("OpenAI Responses deferred tool projection", () => {
   it("runs the Responses streaming provider path", async () => {
     let nativeRequest: unknown;
     const adapter = createOpenAIResponsesProviderAdapter({
-      model: "gpt-example", namespaces: [{ name: "aegis", description: "ERP", toolNames: ["aegis_tool_0"] }],
+      model: "gpt-example", maximumInputMessages: 30,
+      namespaces: [{ name: "aegis", description: "ERP", toolNames: ["aegis_tool_0"] }],
       request: async function* (request) {
         nativeRequest = request;
         yield { type: "response.output_text.delta", delta: "Checking " };
@@ -57,7 +58,8 @@ describe("OpenAI Responses deferred tool projection", () => {
       },
     });
     const stream = adapter.invoke({
-      messages: [{ role: "user", content: [{ type: "text", text: "Check" }] }], tools: definitions.slice(0, 1), tool_results: [],
+      messages: Array.from({ length: 31 }, (_, index) => ({ role: "user" as const,
+        content: [{ type: "text" as const, text: `Check ${index}` }] })), tools: definitions.slice(0, 1), tool_results: [],
       generation: { max_output_tokens: 1000, temperature: 0 }, signal: new AbortController().signal,
       context: { request_id: "r", trace_id: "t", attribution: {
         organization: { id: "o", source: "server_derived", trust: "authoritative" }, project: { id: "p", source: "server_derived", trust: "authoritative" }, service_environment: { id: "e", source: "server_derived", trust: "authoritative" },
@@ -70,6 +72,8 @@ describe("OpenAI Responses deferred tool projection", () => {
     expect(events.map((event) => event.type)).toEqual(["response.started", "response.text.delta", "response.tool_call", "response.usage", "response.completed"]);
     expect(terminal).toMatchObject({ status: "completed", outcome: "tool_calls", usage: { cached_input_tokens: 2 } });
     expect(nativeRequest).toMatchObject({ store: false, tools: expect.arrayContaining([expect.objectContaining({ type: "tool_search" })]) });
+    expect((nativeRequest as { input: unknown[] }).input).toHaveLength(30);
+    expect((nativeRequest as { input: { content: { text: string }[] }[] }).input[0]?.content[0]?.text).toBe("Check 1");
   });
 
   it("retains bounded store:false output across a tool continuation and projects hosted citations", async () => {

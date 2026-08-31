@@ -12,16 +12,18 @@ void main() {
       httpClient: MockClient((request) async {
         expect(request.headers['authorization'], 'Bearer app');
         if (request.url.path.endsWith('/capabilities')) {
-          return http.Response(jsonEncode({
-            'ok': true,
-            'value': {
-              'protocolVersion': applicationGatewayProtocolVersion,
-              'authoritativeCancellation': true,
-              'attachments': false,
-              'presence': true,
-              'synchronization': true,
-            },
-          }), 200);
+          return http.Response(
+              jsonEncode({
+                'ok': true,
+                'value': {
+                  'protocolVersion': applicationGatewayProtocolVersion,
+                  'authoritativeCancellation': true,
+                  'attachments': false,
+                  'presence': true,
+                  'synchronization': true,
+                },
+              }),
+              200);
         }
         return http.Response(
           'event: event\nid: cursor-1\ndata: {"type":"event","event":{"type":"response.text.delta","delta":"Hi"},"checkpoint":{"lastAppliedCursor":"cursor-1"}}\n\n'
