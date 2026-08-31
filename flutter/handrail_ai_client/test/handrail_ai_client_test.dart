@@ -5,6 +5,38 @@ import 'package:http/testing.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test('reduces typed cross-platform turn state and calls thread resources',
+      () async {
+    final client = HandrailAiClient(
+      baseUri: Uri.parse('https://app.example/api/ai'),
+      httpClient: MockClient((request) async {
+        expect(request.url.path, endsWith('/conversations/create'));
+        return http.Response(
+            jsonEncode({
+              'ok': true,
+              'value': {
+                'operation': 'create',
+                'status': 'created',
+                'descriptor': {'conversationId': 'c1'}
+              }
+            }),
+            200);
+      }),
+    );
+    expect(await client.createConversation({'idempotencyKey': 'create-1'}),
+        containsPair('value', isA<Map>()));
+    final running = const HandrailConversationState(conversationId: 'c1')
+        .apply(const HandrailStreamFrame('event', null, {
+          'event': {'type': 'response.started'}
+        }))
+        .apply(const HandrailStreamFrame('event', null, {
+          'event': {'type': 'response.text.delta', 'delta': 'Hello'}
+        }));
+    expect(running.status, HandrailTurnStatus.running);
+    expect(running.text, 'Hello');
+    client.close();
+  });
+
   test('negotiates capabilities and parses SSE frames', () async {
     final client = HandrailAiClient(
       baseUri: Uri.parse('https://app.example/api/ai'),
