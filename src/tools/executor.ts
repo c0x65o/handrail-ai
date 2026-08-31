@@ -720,6 +720,15 @@ export class BoundedToolExecutor<
         registration === undefined ||
         !request.discoveredTools.includes(registration.definition)
       ) {
+        emitAiDiagnostic(this.#diagnostics, {
+          domain: "validation",
+          operation: "tool_disclosure",
+          phase: "failed",
+          toolName: name,
+          toolCallId,
+          code: "tool_unavailable",
+          retryable: false,
+        });
         return { status: "completed", result: errorResult(
           toolCallId,
           name,
@@ -742,6 +751,8 @@ export class BoundedToolExecutor<
         controller.signal,
       );
       if (decision?.outcome === "deny") {
+        emitAiDiagnostic(this.#diagnostics, { domain: "policy", operation: "tool_authorization",
+          phase: "failed", toolName: name, toolCallId, code: "policy_denied", retryable: false });
         return { status: "completed", result: errorResult(
           toolCallId,
           name,
@@ -764,7 +775,7 @@ export class BoundedToolExecutor<
         emitAiDiagnostic(this.#diagnostics, { domain: "approval", operation: "claim",
           phase: claim.outcome === "claimed" || claim.outcome === "reuse" ? "succeeded" :
             claim.outcome === "cancelled" ? "cancelled" : "failed", toolName: name,
-          code: claim.outcome, retryable: claim.outcome === "unavailable" });
+          toolCallId, code: claim.outcome, retryable: claim.outcome === "unavailable" });
         if (claim.outcome === "approval_required") {
           return Object.freeze({ status: "external_approval_required", toolCallId, name });
         }
@@ -837,6 +848,11 @@ export class BoundedToolExecutor<
       } else if (phase === "policy") {
         message = "Tool authorization could not be completed.";
       }
+      emitAiDiagnostic(this.#diagnostics, { domain: phase === "arguments" ? "validation" : phase === "policy" ? "policy" :
+        phase === "approval" ? "approval" : "tool", operation: "pre_execution", phase: "failed",
+        toolName: name, toolCallId, code: controller.signal.aborted ? timedOut ? "timeout" : "cancelled" :
+          phase === "arguments" ? "invalid_arguments" : phase === "policy" ? "policy_failed" : `${phase}_failed`,
+        retryable: timedOut || phase === "approval", cause: error });
       return Object.freeze({
         status: "completed",
         result: errorResult(toolCallId, name, message),
@@ -859,12 +875,13 @@ export class BoundedToolExecutor<
   ): Promise<ApplicationToolResult> {
     return raceWithSignal(
       this.#ledger.getOrCreate(toolCallId, async () => {
+        const diagnosticStartedAt = Date.now();
         let executionResult: ApplicationToolResult;
         let failureReason: ApprovalExecutionFailureReason | undefined;
         let executionStartRecorded = request.onExecutionStarted === undefined;
         try {
           emitAiDiagnostic(this.#diagnostics, { domain: "tool", operation: "execute",
-            phase: "started", toolName: name });
+            phase: "started", toolName: name, toolCallId });
           await request.onExecutionStarted?.();
           executionStartRecorded = true;
           const release = await this.#limiter.acquire(signal);
@@ -885,11 +902,11 @@ export class BoundedToolExecutor<
             normalized.citationRecords,
           );
           emitAiDiagnostic(this.#diagnostics, { domain: "tool", operation: "execute",
-            phase: "succeeded", toolName: name });
+            phase: "succeeded", toolName: name, toolCallId, durationMs: Date.now() - diagnosticStartedAt });
         } catch (error: unknown) {
           emitAiDiagnostic(this.#diagnostics, { domain: "tool", operation: "execute",
             phase: signal.aborted ? "cancelled" : "failed", toolName: name,
-            retryable: timedOut(), cause: error });
+            toolCallId, retryable: timedOut(), durationMs: Date.now() - diagnosticStartedAt, cause: error });
           if (error instanceof ExecutionCancelled) {
             failureReason = timedOut() ? "execution_timed_out" : "execution_cancelled";
             executionResult = errorResult(

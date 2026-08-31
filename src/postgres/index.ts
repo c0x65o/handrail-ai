@@ -62,6 +62,7 @@ import {
   type DurableConversationActivityStore,
 } from "../conversation/activity.js";
 import type { AttachmentBlobStore, AttachmentStagingMetadataStore, StagedAttachmentRecord } from "../attachments/staging.js";
+import { diagnoseAiOperation, type AiDiagnosticSink } from "../diagnostics.js";
 
 export const POSTGRES_PERSISTENCE_SCHEMA_VERSION = 1 as const;
 
@@ -74,6 +75,31 @@ export interface PostgresQueryResult<TRow extends Record<string, unknown> = Reco
 export interface PostgresSqlClient {
   query<TRow extends Record<string, unknown> = Record<string, unknown>>(text: string, values?: readonly unknown[]): Promise<PostgresQueryResult<TRow>>;
   transaction<T>(operation: (client: PostgresSqlClient) => Promise<T>): Promise<T>;
+}
+
+/**
+ * Payload-blind diagnostics wrapper. It intentionally records neither SQL nor
+ * parameter values, because both can contain prompts, tool data, and secrets.
+ */
+export function createDiagnosedPostgresSqlClient(
+  client: PostgresSqlClient,
+  diagnostics?: AiDiagnosticSink,
+): PostgresSqlClient {
+  const wrap = (current: PostgresSqlClient): PostgresSqlClient => Object.freeze({
+    query: <TRow extends Record<string, unknown> = Record<string, unknown>>(
+      text: string,
+      values?: readonly unknown[],
+    ) => diagnoseAiOperation(diagnostics, {
+      domain: "persistence",
+      operation: "postgres_query",
+    }, () => current.query<TRow>(text, values)),
+    transaction: <T>(operation: (transaction: PostgresSqlClient) => Promise<T>) =>
+      diagnoseAiOperation(diagnostics, {
+        domain: "persistence",
+        operation: "postgres_transaction",
+      }, () => current.transaction((transaction) => operation(wrap(transaction)))),
+  });
+  return wrap(client);
 }
 
 export const handrailPostgresSchemaV1 = Object.freeze([

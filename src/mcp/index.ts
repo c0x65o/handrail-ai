@@ -118,10 +118,22 @@ export async function createRequestScopedMcpSession<TContext>(
         if (await options.authorize({ operation: "execute", toolName: remoteName, context,
           arguments: input.arguments, toolCallId: input.toolCallId }) !== "allow") throw new TypeError("MCP tool execution is not authorized");
         if (input.signal?.aborted) throw input.signal.reason;
-        return diagnoseAiOperation(options.diagnostics,
-          { domain: "mcp", operation: "scoped_call_tool", toolName: remoteName, requestId: connectorId },
-          () => client!.callTool({ name: remoteName, arguments: input.arguments,
-            idempotencyKey: identifier(input.toolCallId, "toolCallId"), signal: input.signal ?? controller.signal }));
+        const callController = new AbortController();
+        const abortFromSession = () => callController.abort(controller.signal.reason);
+        const abortFromCall = () => callController.abort(input.signal?.reason);
+        controller.signal.addEventListener("abort", abortFromSession, { once: true });
+        input.signal?.addEventListener("abort", abortFromCall, { once: true });
+        if (controller.signal.aborted) abortFromSession();
+        try {
+          return await diagnoseAiOperation(options.diagnostics,
+            { domain: "mcp", operation: "scoped_call_tool", toolName: remoteName,
+              toolCallId: input.toolCallId, requestId: connectorId },
+            () => client!.callTool({ name: remoteName, arguments: input.arguments,
+              idempotencyKey: identifier(input.toolCallId, "toolCallId"), signal: callController.signal }));
+        } finally {
+          controller.signal.removeEventListener("abort", abortFromSession);
+          input.signal?.removeEventListener("abort", abortFromCall);
+        }
       }, close });
   } catch (error) { await close(); throw error; }
 }
@@ -158,7 +170,7 @@ export function createMcpConnectorAdapter<TContext, TAdapterContext = TContext>(
             throw new TypeError("MCP tool execution is not authorized");
           }
           return diagnoseAiOperation(options.diagnostics,
-            { domain: "mcp", operation: "call_tool", toolName: remoteName },
+            { domain: "mcp", operation: "call_tool", toolName: remoteName, toolCallId: execution.toolCallId },
             () => options.client.callTool({ name: remoteName, arguments: arguments_,
               idempotencyKey: execution.toolCallId, signal: execution.signal }));
         };

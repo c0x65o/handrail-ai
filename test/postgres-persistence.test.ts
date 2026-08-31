@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { PostgresAiPersistence, PostgresOpenAIResponsesContinuationStore, PostgresPersistenceConflictError, handrailPostgresSchemaV1, type PostgresSqlClient } from "../src/postgres/index.js";
+import { createDiagnosedPostgresSqlClient, PostgresAiPersistence, PostgresOpenAIResponsesContinuationStore, PostgresPersistenceConflictError, handrailPostgresSchemaV1, type PostgresSqlClient } from "../src/postgres/index.js";
 
 describe("Postgres reference persistence", () => {
   it("uses tenant-scoped transactions and contiguous event revisions", async () => {
@@ -36,6 +36,25 @@ describe("Postgres reference persistence", () => {
   it("ships an idempotent schema for every durable domain", () => {
     expect(handrailPostgresSchemaV1.every((sql) => sql.includes("IF NOT EXISTS"))).toBe(true);
     expect(handrailPostgresSchemaV1.join(" ")).toContain("handrail_ai_tool_ledger");
+  });
+
+  it("diagnoses persistence without exposing SQL or parameter payloads", async () => {
+    const diagnostics: import("../src/index.js").AiDiagnosticEvent[] = [];
+    const secret = "private prompt and credential";
+    const failure = new Error("database unavailable");
+    const client: PostgresSqlClient = {
+      query: vi.fn(async () => { throw failure; }) as unknown as PostgresSqlClient["query"],
+      transaction: async (operation) => operation(client),
+    };
+    const diagnosed = createDiagnosedPostgresSqlClient(client, (event) => diagnostics.push(event));
+    await expect(diagnosed.query("SELECT secret FROM private WHERE value=$1", [secret]))
+      .rejects.toBe(failure);
+    expect(diagnostics).toEqual([
+      expect.objectContaining({ domain: "persistence", operation: "postgres_query", phase: "started" }),
+      expect.objectContaining({ domain: "persistence", operation: "postgres_query", phase: "failed", cause: failure }),
+    ]);
+    expect(JSON.stringify(diagnostics)).not.toContain(secret);
+    expect(JSON.stringify(diagnostics)).not.toContain("SELECT secret");
   });
 
   it("durably retains idempotent OpenAI store:false continuation items", async () => {

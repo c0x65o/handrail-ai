@@ -13,6 +13,7 @@ export interface AiDiagnosticEvent {
   readonly conversationId?: string;
   readonly turnId?: string;
   readonly toolName?: string;
+  readonly toolCallId?: string;
   readonly requestId?: string;
   readonly traceId?: string;
   readonly providerId?: string;

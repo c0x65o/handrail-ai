@@ -1,6 +1,6 @@
 # Platform contracts and package boundaries
 
-The stable contract versions introduced by this platform layer are `handrail.tool-plugin.v1`, `handrail.ai-application.v1`, `handrail.deferred-tools.v1`, `handrail.mcp-connector.v1`, `handrail.application-gateway.v1`, `handrail.live-presence.v1`, and Postgres schema version 1. Patch releases may add optional fields and event kinds. Breaking field meaning, removal, or wire changes require a new version string/export and a migration window.
+The stable contract versions introduced by this platform layer are `handrail.tool-plugin.v1`, `handrail.ai-application.v1`, `handrail.deferred-tools.v1`, `handrail.mcp-connector.v1`, `handrail.application-gateway.v1`, `handrail.live-presence.v1`, `handrail.live-conversation-activity.v1`, and Postgres schema version 1. Patch releases may add optional fields and event kinds. Breaking field meaning, removal, or wire changes require a new version string/export and a migration window.
 
 ## Boundaries
 

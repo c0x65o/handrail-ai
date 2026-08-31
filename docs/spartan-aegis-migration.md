@@ -62,6 +62,17 @@ The checked [`examples/spartan-aegis-adapter.ts`](../examples/spartan-aegis-adap
 
 Required parity tests cover every role's discovered tools, denied cross-company access, proposal-only actions, idempotent confirmation, configured tool-call budget, hosted web citations, attachment limits, archive/restore/new threads, stream reconnect, cancellation, and multi-device convergence.
 
+The current Spartan qualification consumer routes new gateway turns through
+`createApplicationTurnTransport` and `createDurableApplicationTransport` with
+the Postgres turn store, while retaining the former transport as an explicit
+rollback implementation. It stages attachment bytes in the expiring Postgres
+blob store, exposes persisted activity with live SSE plus polling fallback,
+publishes automatic assistant presence, and uses
+`createRequestScopedMcpSession` inside the existing per-message Handrail bridge.
+Spartan's service remains authoritative for its Zod validation, actor/company
+scope, role-filtered tools, system prompt, proposals, confirmation side effects,
+hosted search/citations, and legacy records.
+
 Do not remove `provider.ts`, current Aegis routes, or old persistence during these steps. Cut reads over independently after the matching reconciliation report is converged. Binary attachment authorization/resolution, Zod schemas, company/actor construction, system instructions, proposal confirmation side effects, retention, and rollout flags remain Spartan-owned boundaries.
 
-Git dependencies require the package `prepare` script because public exports point at generated `dist` files. Production should pin an immutable tag or package integrity. Spartan's qualification seam currently pins `0.1.55-integration.0`; the previous `0.1.53-integration.0` tarball and legacy-only runtime flag remain available for rollback. A temporary vendored tarball is acceptable for pre-release cross-repository qualification when its source version and lockfile integrity are reviewed together.
+Git dependencies require the package `prepare` script because public exports point at generated `dist` files. Production should pin an immutable tag or package integrity. Spartan's qualification seam currently pins `0.1.56`; the prior vendored artifact and legacy transport remain available for rollback. A temporary vendored tarball is acceptable for pre-release cross-repository qualification when its source version and lockfile integrity are reviewed together.

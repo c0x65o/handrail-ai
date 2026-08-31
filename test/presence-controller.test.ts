@@ -384,6 +384,27 @@ describe("createPresenceController", () => {
     expect(adapter.publications.at(-1)?.record.typing).toBe(false);
   });
 
+  it("diagnoses publication failures without including presence payloads", async () => {
+    const diagnostics: import("../src/index.js").AiDiagnosticEvent[] = [];
+    const adapter = new FakePresenceAdapter();
+    adapter.failNext("throw", "reject");
+    const controller = createController(adapter, {
+      diagnostics: (event) => diagnostics.push(event),
+    });
+
+    controller.connect();
+    vi.advanceTimersByTime(1_000);
+    await flushAsyncWork();
+
+    expect(diagnostics).toHaveLength(2);
+    expect(diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ domain: "presence", operation: "publish",
+        phase: "failed", conversationId: "conversation-a", code: "publish_failed" }),
+    ]));
+    expect(JSON.stringify(diagnostics)).not.toContain("participant-local");
+    expect(JSON.stringify(diagnostics)).not.toContain("session-local");
+  });
+
   it("cancels injected timers/subscriptions and becomes inert after destroy", async () => {
     const adapter = new FakePresenceAdapter();
     const setTimer = vi.fn((callback: () => void, delay: number) =>

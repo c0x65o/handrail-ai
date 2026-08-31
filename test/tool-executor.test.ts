@@ -10,6 +10,7 @@ import {
   type ApplicationToolExecutor,
   type ApplicationToolPolicy,
   type ApplicationToolResult,
+  type AiDiagnosticEvent,
   type BoundedToolExecutorLimits,
   type ToolDefinition,
 } from "../src/index.js";
@@ -66,6 +67,7 @@ function setup(
     limits?: Partial<BoundedToolExecutorLimits>;
     ledger?: InMemoryToolExecutionLedger;
     name?: string;
+    diagnostics?: (event: AiDiagnosticEvent) => void;
   } = {},
 ) {
   const tool = definition(options.name);
@@ -81,6 +83,7 @@ function setup(
     policy,
     ...(options.limits === undefined ? {} : { limits: options.limits }),
     ...(options.ledger === undefined ? {} : { ledger: options.ledger }),
+    ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
   });
   const discoveredTools = registry.discover({ context: undefined });
   const execute = (
@@ -315,6 +318,39 @@ describe("BoundedToolExecutor", () => {
       { type: "text", text: "Tool execution was denied by application policy." },
     ]);
     assertProtocolResult(output, tool);
+  });
+
+  it("diagnoses disclosure, validation, and policy failures without arguments", async () => {
+    const diagnostics: AiDiagnosticEvent[] = [];
+    const applicationExecutor = vi.fn<ApplicationToolExecutor<TestContext>>(async () => "unused");
+    const policy = vi.fn<ApplicationToolPolicy<TestContext>>(() => ({ outcome: "deny" }));
+    const { bounded, discoveredTools, tool } = setup(applicationExecutor, {
+      policy,
+      diagnostics: (event) => diagnostics.push(event),
+    });
+
+    await bounded.execute({
+      call: { tool_call_id: "call_hidden", name: tool.name, arguments: { query: "secret prompt" } },
+      discoveredTools: [],
+      applicationContext: context,
+    });
+    await bounded.execute({
+      call: { tool_call_id: "call_invalid", name: tool.name, arguments: { query: 42 } },
+      discoveredTools,
+      applicationContext: context,
+    });
+    await bounded.execute({
+      call: { tool_call_id: "call_denied_safe", name: tool.name, arguments: { query: "secret prompt" } },
+      discoveredTools,
+      applicationContext: context,
+    });
+
+    expect(diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ domain: "validation", code: "tool_unavailable", toolCallId: "call_hidden" }),
+      expect.objectContaining({ domain: "validation", code: "invalid_arguments", toolCallId: "call_invalid" }),
+      expect.objectContaining({ domain: "policy", code: "policy_denied", toolCallId: "call_denied_safe" }),
+    ]));
+    expect(JSON.stringify(diagnostics)).not.toContain("secret prompt");
   });
 
   it("pauses external-approval-required calls without invoking the tool", async () => {

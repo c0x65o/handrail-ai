@@ -79,4 +79,25 @@ describe("MCP connector adapter", () => {
       authorize: async () => "deny" as const }, {})).rejects.toThrow("not authorized");
     expect(connect).not.toHaveBeenCalled();
   });
+
+  it("retains the session timeout when a caller also supplies a signal", async () => {
+    const callTool = vi.fn((_input: { readonly signal: AbortSignal }) =>
+      new Promise<never>((_resolve, reject) => {
+        _input.signal.addEventListener("abort", () => reject(_input.signal.reason), { once: true });
+      }));
+    const session = await createRequestScopedMcpSession({
+      connectorId: "bounded",
+      timeoutMilliseconds: 100,
+      authorize: async () => "allow" as const,
+      connect: async () => ({
+        async listTools() { return { tools: [{ name: "slow", inputSchema: { type: "object" as const } }] }; },
+        callTool,
+      }),
+    }, {});
+
+    await expect(session.callTool({ name: "slow", arguments: {}, toolCallId: "call-timeout",
+      signal: new AbortController().signal })).rejects.toThrow("timed out");
+    expect(callTool.mock.calls[0]?.[0].signal.aborted).toBe(true);
+    await session.close();
+  });
 });

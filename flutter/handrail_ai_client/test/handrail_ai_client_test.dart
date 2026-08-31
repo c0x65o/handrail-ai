@@ -206,4 +206,22 @@ void main() {
     expect(activity.single.unread, isTrue);
     client.close();
   });
+
+  test('streams typed cross-device activity records', () async {
+    final client = HandrailAiClient(
+      baseUri: Uri.parse('https://app.example/api/ai'),
+      httpClient: MockClient(
+        (_) async => http.Response(
+          'event: activity\ndata: {"record":{"conversationId":"remote-live","turnStatus":"running","unread":false}}\n\n',
+          200,
+          headers: {'content-type': 'text/event-stream'},
+        ),
+      ),
+    );
+    final activity = await client.activity().single;
+    expect(activity.conversationId, 'remote-live');
+    expect(activity.status, HandrailTurnStatus.running);
+    expect(activity.unread, isFalse);
+    client.close();
+  });
 }

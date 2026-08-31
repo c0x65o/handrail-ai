@@ -3,7 +3,12 @@ import type { AttachmentReference } from "../protocol.js";
 import type { AttachmentUploadAdapter } from "../attachments/types.js";
 import type { LivePresenceEnvelope } from "../presence/live-delivery.js";
 import type { PresenceRecord } from "../presence/types.js";
-import type { ConversationActivityRecord } from "../conversation/activity.js";
+import {
+  parseConversationActivityRecord,
+  type ConversationActivityRecord,
+  type DurableConversationActivityStore,
+  type LiveConversationActivityDelivery,
+} from "../conversation/activity.js";
 import {
   ConversationCatalogError,
   type ConversationCatalogAuthorizationAction,
@@ -233,6 +238,58 @@ function sse<TEvent>(
   }});
 }
 
+/** Protected activity endpoint; the application gateway authorizes and scope-binds the store first. */
+export function createConversationActivityHttpHandler(
+  store: DurableConversationActivityStore,
+  options: { readonly delivery?: LiveConversationActivityDelivery } = {},
+) {
+  return async (request: Request): Promise<Response> => {
+    if (request.method === "GET" && options.delivery) {
+      const subscription = options.delivery.subscribe(request.signal);
+      const initial = await store.list();
+      const encoder = new TextEncoder();
+      return new Response(new ReadableStream<Uint8Array>({
+        async start(controller) {
+          try {
+            for (const record of initial) {
+              controller.enqueue(encoder.encode(`event: activity\ndata: ${JSON.stringify({ record })}\n\n`));
+            }
+            for await (const envelope of subscription) {
+              controller.enqueue(encoder.encode(`id: ${envelope.deliveryId}\nevent: activity\ndata: ${JSON.stringify(envelope)}\n\n`));
+            }
+            controller.close();
+          } catch (error) {
+            controller.error(error);
+          }
+        },
+        cancel() { subscription.close(); },
+      }), { headers: { "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache, no-transform", connection: "keep-alive" } });
+    }
+    if (request.method !== "POST") {
+      return new Response(null, { status: 405,
+        headers: { allow: options.delivery ? "GET, POST" : "POST" } });
+    }
+    try {
+      const input = await request.json() as { readonly operation?: unknown; readonly conversationId?: unknown };
+      let value: readonly ConversationActivityRecord[] | ConversationActivityRecord | null;
+      if (input.operation === "list") value = await store.list();
+      else if (input.operation === "mark_read" && typeof input.conversationId === "string") {
+        const record = await store.markRead(input.conversationId);
+        if (record !== null) await options.delivery?.publish(record);
+        value = record;
+      } else return new Response(null, { status: 400 });
+      return new Response(JSON.stringify({ ok: true, value }), {
+        headers: { "content-type": "application/json; charset=utf-8" },
+      });
+    } catch {
+      return new Response(JSON.stringify({ ok: false, error: { code: "unavailable",
+        message: "Conversation activity is unavailable.", retryable: true } }),
+      { status: 503, headers: { "content-type": "application/json; charset=utf-8" } });
+    }
+  };
+}
+
 export function createApplicationGateway<TEvent, TRequest, TContext extends ApplicationGatewayAuthorizationContext>(
   options: ApplicationGatewayOptions<TEvent, TRequest, TContext>,
 ): ApplicationGateway {
@@ -277,7 +334,8 @@ export function createApplicationGateway<TEvent, TRequest, TContext extends Appl
         if (action === null) return new Response(null, { status: 404 });
         diagnosticAction = action;
         if ((action === "capabilities" && request.method !== "GET") ||
-          (action !== "capabilities" && action !== "presence" && action !== "attachments" && request.method !== "POST")) {
+          (action !== "capabilities" && action !== "presence" && action !== "activity" &&
+            action !== "attachments" && request.method !== "POST")) {
           return new Response(null, { status: 405, headers: { allow: action === "capabilities" ? "GET" : "POST" } });
         }
         const authorizationContext = await options.authorize(request, action);
@@ -479,6 +537,8 @@ export interface ApplicationGatewayResourceClient {
   listActivity?(): Promise<readonly ConversationActivityRecord[]>;
   /** Available when the negotiated gateway reports `activity: true`. */
   markActivityRead?(input: { readonly conversationId: string }): Promise<ConversationActivityRecord | null>;
+  /** Protected SSE stream; callers should retain polling as a convergence fallback. */
+  subscribeActivity?(signal?: AbortSignal): AsyncIterable<ConversationActivityRecord>;
   listConversations(input: WithoutAuthorization<ListConversationsInput<unknown>>): Promise<ListConversationsResult>;
   createConversation(input: WithoutAuthorization<CreateConversationInput<unknown>>): Promise<CreateConversationResult>;
   getConversation(input: WithoutAuthorization<GetConversationInput<unknown>>): Promise<GetConversationResult>;
@@ -654,6 +714,20 @@ export function createApplicationGatewayResourceClient(
   const client: ApplicationGatewayResourceClient = {
     listActivity: () => invoke<readonly ConversationActivityRecord[]>("/activity", { operation: "list" }),
     markActivityRead: (input) => invoke<ConversationActivityRecord | null>("/activity", { operation: "mark_read", ...input }),
+    subscribeActivity(signal?: AbortSignal) {
+      const url = `${base}/activity`;
+      return (async function* () {
+        const initial: RequestInit = { method: "GET", ...(signal ? { signal } : {}) };
+        const response = await fetcher(url,
+          await options.protectedRequest?.({ url, ...initial }) ?? initial);
+        if (!response.ok || !response.body) throw new TypeError("Activity subscription failed");
+        for await (const frame of parseServerSentEvents(response.body)) {
+          if (!frame.data) continue;
+          const value = JSON.parse(frame.data) as { readonly record?: ConversationActivityRecord };
+          if (value.record) yield parseConversationActivityRecord(value.record);
+        }
+      })();
+    },
     listConversations: (input) => invoke<ListConversationsResult>("/conversations/list", input),
     createConversation: (input) => invoke<CreateConversationResult>("/conversations/create", input),
     getConversation: (input) => invoke<GetConversationResult>("/conversations/get", input),

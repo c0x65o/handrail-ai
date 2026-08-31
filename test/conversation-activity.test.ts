@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { createConversationActivityHttpHandler, InMemoryConversationActivityStore, PollingConversationActivity } from "../src/index.js";
+import {
+  createConversationActivityHttpHandler,
+  createInMemoryLiveConversationActivityDelivery,
+  InMemoryConversationActivityStore,
+  PollingConversationActivity,
+} from "../src/index.js";
 
 describe("conversation activity", () => {
   it("tracks remote running, unread completion, errors, and read state", () => {
@@ -29,6 +34,24 @@ describe("conversation activity", () => {
     activity.stop();
   });
 
+  it("applies live activity immediately while retaining polling convergence", async () => {
+    const delivery = createInMemoryLiveConversationActivityDelivery();
+    const activity = new PollingConversationActivity({
+      load: async () => [],
+      intervalMilliseconds: 60_000,
+      subscribe: (signal) => (async function* () {
+        for await (const envelope of delivery.subscribe(signal)) yield envelope.record;
+      })(),
+    });
+    activity.start();
+    await Promise.resolve();
+    await delivery.publish({ conversationId: "remote-live", turnStatus: "running", unread: false });
+    await vi.waitFor(() => expect(activity.getSnapshot()).toEqual([
+      expect.objectContaining({ conversationId: "remote-live", turnStatus: "running" }),
+    ]));
+    activity.stop();
+  });
+
   it("serves protected list and read operations through a scope-bound handler", async () => {
     const markRead = vi.fn(async () => ({ conversationId: "remote", turnStatus: "completed" as const, unread: false }));
     const handler = createConversationActivityHttpHandler({
@@ -42,5 +65,23 @@ describe("conversation activity", () => {
       body: JSON.stringify({ operation: "mark_read", conversationId: "remote" }) }));
     expect((await read.json()).value.unread).toBe(false);
     expect(markRead).toHaveBeenCalledWith("remote");
+  });
+
+  it("streams an initial activity snapshot and later updates over SSE", async () => {
+    const delivery = createInMemoryLiveConversationActivityDelivery();
+    const handler = createConversationActivityHttpHandler({
+      async list() { return [{ conversationId: "initial", turnStatus: "completed", unread: true }]; },
+      async upsert(record) { return record; },
+      async markRead() { return null; },
+    }, { delivery });
+    const response = await handler(new Request("https://app.example/activity"));
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader();
+    const initial = await reader.read();
+    expect(new TextDecoder().decode(initial.value)).toContain('"conversationId":"initial"');
+    await delivery.publish({ conversationId: "remote-live", turnStatus: "error", unread: true });
+    const update = await reader.read();
+    expect(new TextDecoder().decode(update.value)).toContain('"conversationId":"remote-live"');
+    await reader.cancel();
   });
 });

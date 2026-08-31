@@ -1,4 +1,5 @@
 import type { ConversationId } from "../conversation/events.js";
+import { emitAiDiagnostic, type AiDiagnosticSink } from "../diagnostics.js";
 import type {
   ConversationPresenceSubscription,
   ConversationSyncAdapter,
@@ -65,6 +66,7 @@ export interface CreatePresenceControllerOptions
   readonly clock?: PresenceClock;
   /** Both timer functions must be supplied together. */
   readonly timers?: PresenceTimerFunctions;
+  readonly diagnostics?: AiDiagnosticSink;
 }
 
 export interface PresenceControllerSnapshot {
@@ -207,6 +209,7 @@ class PresenceControllerImpl implements PresenceController {
   private readonly timing: ResolvedTiming;
   private readonly clock: PresenceClock;
   private readonly timers: PresenceTimerFunctions;
+  private readonly diagnostics: AiDiagnosticSink | undefined;
   private readonly listeners = new Set<PresenceControllerListener>();
 
   private connected = false;
@@ -238,6 +241,7 @@ class PresenceControllerImpl implements PresenceController {
     this.timing = resolveTiming(options);
     this.clock = options.clock ?? Date.now;
     this.timers = options.timers ?? defaultTimers;
+    this.diagnostics = options.diagnostics;
     this.lastActivityAt = this.readNow();
 
     const identityRecord = normalizePresenceRecord({
@@ -494,8 +498,13 @@ class PresenceControllerImpl implements PresenceController {
   ): void {
     try {
       const result = this.adapter.publishPresence({ conversationId, record });
-      void Promise.resolve(result).catch(() => undefined);
-    } catch {
+      void Promise.resolve(result).catch((cause: unknown) => emitAiDiagnostic(this.diagnostics, {
+        domain: "presence", operation: "publish", phase: "failed", conversationId,
+        code: "publish_failed", retryable: true, cause,
+      }));
+    } catch (cause) {
+      emitAiDiagnostic(this.diagnostics, { domain: "presence", operation: "publish", phase: "failed",
+        conversationId, code: "publish_failed", retryable: true, cause });
       // A synchronous adapter failure is equivalent to a rejected publication.
       // Heartbeat/typing refresh or a later lifecycle call will retry state.
     }

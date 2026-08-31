@@ -28,23 +28,119 @@ export interface DurableConversationActivityStore {
   markRead(conversationId: ConversationId | string): Promise<ConversationActivityRecord | null>;
 }
 
-/** Protected gateway handler. Authorization and scope selection happen before this handler is resolved. */
-export function createConversationActivityHttpHandler(store: DurableConversationActivityStore) {
-  return async (request: Request): Promise<Response> => {
-    if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
-    try {
-      const input = await request.json() as { readonly operation?: unknown; readonly conversationId?: unknown };
-      const value = input.operation === "list" ? await store.list()
-        : input.operation === "mark_read" && typeof input.conversationId === "string"
-          ? await store.markRead(input.conversationId) : undefined;
-      if (value === undefined) return new Response(null, { status: 400 });
-      return new Response(JSON.stringify({ ok: true, value }), { headers: { "content-type": "application/json; charset=utf-8" } });
-    } catch {
-      return new Response(JSON.stringify({ ok: false, error: { code: "unavailable",
-        message: "Conversation activity is unavailable.", retryable: true } }),
-      { status: 503, headers: { "content-type": "application/json; charset=utf-8" } });
-    }
+export const LIVE_CONVERSATION_ACTIVITY_PROTOCOL_VERSION =
+  "handrail.live-conversation-activity.v1" as const;
+
+export interface LiveConversationActivityEnvelope {
+  readonly version: typeof LIVE_CONVERSATION_ACTIVITY_PROTOCOL_VERSION;
+  readonly sequence: number;
+  readonly deliveryId: string;
+  readonly record: ConversationActivityRecord;
+}
+
+export interface LiveConversationActivitySubscription
+  extends AsyncIterable<LiveConversationActivityEnvelope> {
+  close(): void;
+}
+
+export interface LiveConversationActivityDelivery {
+  publish(record: ConversationActivityRecord): Promise<void>;
+  subscribe(signal?: AbortSignal): LiveConversationActivitySubscription;
+}
+
+/** Multi-instance fan-out seam for a principal/workspace-scoped activity channel. */
+export interface LiveConversationActivityPubSub {
+  publish(channel: string, envelope: LiveConversationActivityEnvelope): Promise<void>;
+  subscribe(
+    channel: string,
+    receive: (envelope: LiveConversationActivityEnvelope) => void,
+  ): Promise<() => void>;
+}
+
+export interface InMemoryLiveConversationActivityOptions {
+  readonly pubSub?: LiveConversationActivityPubSub;
+  readonly channel?: string;
+  readonly now?: () => number;
+}
+
+interface ActivitySubscriber {
+  push(value: LiveConversationActivityEnvelope): void;
+  close(): void;
+}
+
+function activityQueue(onClose: () => void): LiveConversationActivitySubscription & ActivitySubscriber {
+  const values: LiveConversationActivityEnvelope[] = [];
+  const waiters: Array<(result: IteratorResult<LiveConversationActivityEnvelope>) => void> = [];
+  let closed = false;
+  return {
+    push(value) {
+      if (closed) return;
+      const waiter = waiters.shift();
+      if (waiter) waiter({ done: false, value });
+      else values.push(value);
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      onClose();
+      for (const waiter of waiters.splice(0)) waiter({ done: true, value: undefined });
+    },
+    [Symbol.asyncIterator]() {
+      return {
+        next: () => {
+          const value = values.shift();
+          if (value) return Promise.resolve({ done: false as const, value });
+          if (closed) return Promise.resolve({ done: true as const, value: undefined });
+          return new Promise<IteratorResult<LiveConversationActivityEnvelope>>((resolve) => waiters.push(resolve));
+        },
+        return: async () => {
+          this.close();
+          return { done: true as const, value: undefined };
+        },
+      };
+    },
   };
+}
+
+/** Process-local delivery with an injectable Redis/NATS/Postgres pub-sub bridge. */
+export function createInMemoryLiveConversationActivityDelivery(
+  options: InMemoryLiveConversationActivityOptions = {},
+): LiveConversationActivityDelivery {
+  const subscribers = new Set<ActivitySubscriber>();
+  const seen = new Set<string>();
+  const channel = options.channel ?? "handrail:conversation-activity";
+  const now = options.now ?? Date.now;
+  let sequence = 0;
+  let counter = 0;
+  let subscribed: Promise<() => void> | null = null;
+  const emit = (envelope: LiveConversationActivityEnvelope) => {
+    if (seen.has(envelope.deliveryId)) return;
+    seen.add(envelope.deliveryId);
+    if (seen.size > 10_000) seen.delete(seen.values().next().value!);
+    for (const subscriber of subscribers) subscriber.push(envelope);
+  };
+  return Object.freeze({
+    async publish(input: ConversationActivityRecord) {
+      const record = parseConversationActivityRecord(input);
+      const envelope = Object.freeze({
+        version: LIVE_CONVERSATION_ACTIVITY_PROTOCOL_VERSION,
+        sequence: ++sequence,
+        deliveryId: `${now().toString(36)}-${(++counter).toString(36)}`,
+        record,
+      });
+      emit(envelope);
+      await options.pubSub?.publish(channel, envelope);
+    },
+    subscribe(signal?: AbortSignal) {
+      const queue = activityQueue(() => subscribers.delete(queue));
+      subscribers.add(queue);
+      if (options.pubSub && subscribed === null) {
+        subscribed = options.pubSub.subscribe(channel, emit);
+      }
+      signal?.addEventListener("abort", () => queue.close(), { once: true });
+      return queue;
+    },
+  });
 }
 
 const ACTIVITY_STATUSES = new Set<ConversationActivityTurnStatus>([
@@ -115,6 +211,8 @@ export interface PollingConversationActivityOptions {
   readonly load: (signal: AbortSignal) => Promise<readonly ConversationActivityRecord[]>;
   readonly intervalMilliseconds?: number;
   readonly store?: ConversationActivityStore;
+  /** Optional protected live stream. Polling remains the convergence fallback. */
+  readonly subscribe?: (signal: AbortSignal) => AsyncIterable<ConversationActivityRecord>;
 }
 
 /** Cross-platform polling adapter for server-backed launcher activity indexes. */
@@ -122,8 +220,10 @@ export class PollingConversationActivity implements ConversationActivityReadable
   readonly #store: ConversationActivityStore;
   readonly #load: PollingConversationActivityOptions["load"];
   readonly #intervalMilliseconds: number;
+  readonly #subscribe: PollingConversationActivityOptions["subscribe"];
   #timer: ReturnType<typeof setTimeout> | null = null;
   #controller: AbortController | null = null;
+  #liveController: AbortController | null = null;
 
   constructor(options: PollingConversationActivityOptions) {
     const interval = options.intervalMilliseconds ?? 5_000;
@@ -132,11 +232,30 @@ export class PollingConversationActivity implements ConversationActivityReadable
     }
     this.#store = options.store ?? new InMemoryConversationActivityStore();
     this.#load = options.load;
+    this.#subscribe = options.subscribe;
     this.#intervalMilliseconds = interval;
   }
   getSnapshot = () => this.#store.getSnapshot();
   subscribe = (listener: () => void) => this.#store.subscribe(listener);
-  start(): void { if (this.#timer === null && this.#controller === null) void this.refresh(); }
+  start(): void {
+    if (this.#timer === null && this.#controller === null) void this.refresh();
+    if (this.#subscribe && this.#liveController === null) {
+      const controller = new AbortController();
+      this.#liveController = controller;
+      void (async () => {
+        try {
+          for await (const record of this.#subscribe!(controller.signal)) {
+            if (controller.signal.aborted) break;
+            this.#store.upsert(record);
+          }
+        } catch {
+          // The scheduled authoritative poll remains the recovery path.
+        } finally {
+          if (this.#liveController === controller) this.#liveController = null;
+        }
+      })();
+    }
+  }
   async refresh(): Promise<void> {
     if (this.#controller) return;
     const controller = new AbortController(); this.#controller = controller;
@@ -150,6 +269,7 @@ export class PollingConversationActivity implements ConversationActivityReadable
   }
   stop(): void {
     this.#controller?.abort(); this.#controller = null;
+    this.#liveController?.abort(); this.#liveController = null;
     if (this.#timer !== null) clearTimeout(this.#timer);
     this.#timer = null;
   }

@@ -150,6 +150,13 @@ and [`examples/trusted-server-application-gateway-express.ts`](./examples/truste
 show an Express mount. `createApplicationGatewayResourceClient` adds typed
 conversation lifecycle, approval, synchronization, and title APIs; attachment,
 presence, and turn streaming remain negotiated transport capabilities.
+`createHandrailAiClient` is the high-level headless bootstrap: it negotiates
+capabilities and composes the transport, resource client, catalog, optional
+standard runtime registry/workspace, event-store factory, request builder,
+attachment upload, presence, and conversation activity. Activity uses protected
+SSE updates when available and keeps polling as its convergence fallback. The
+styled React preset remains a separate optional entry point so custom web,
+React Native, and Flutter UI do not inherit DOM dependencies.
 
 See [`docs/wire-protocol.md`](./docs/wire-protocol.md) for the language-neutral
 contract and `flutter/handrail_ai_client` for the tested Dart implementation.

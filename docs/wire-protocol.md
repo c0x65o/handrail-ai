@@ -6,6 +6,7 @@ All endpoints are relative to an application-owned mount path. Every request mus
 
 - `GET /capabilities` returns cancellation, attachment limits/media types/upload URL, presence, conversation activity, and sync support.
 - `POST /activity` with `{operation:"list"}` returns the authorized launcher index; `{operation:"mark_read",conversationId}` clears unread state. The same protected request identity scopes both operations.
+- `GET /activity` optionally streams the authorized activity index and updates as `activity` SSE frames. Clients retain `POST /activity` polling to converge after stream loss or a missed multi-instance publication.
 - `POST /turns/start` accepts `StartTurnInput` and streams `started`, `event`, then exactly one `terminal` SSE frame.
 - `POST /turns/resume` accepts the conversation/turn IDs and last event ID, opaque cursor, and revision. Replayed events must be idempotent.
 - `POST /turns/cancel` requests authoritative cancellation using a distinct mutation and idempotency key. Closing an SSE connection only disconnects that device.

@@ -180,8 +180,8 @@ class HandrailConversationWorkspace {
   final Map<String, HandrailConversationActivityRecord> _remoteActivity = {};
   final StreamController<HandrailConversationWorkspaceSnapshot> _changes =
       StreamController<HandrailConversationWorkspaceSnapshot>.broadcast(
-        sync: true,
-      );
+    sync: true,
+  );
   String? _selectedConversationId;
 
   Stream<HandrailConversationWorkspaceSnapshot> get changes => _changes.stream;
@@ -201,23 +201,19 @@ class HandrailConversationWorkspace {
     String conversationId,
     HandrailStreamFrame frame,
   ) {
-    final current =
-        _entries[conversationId] ??
+    final current = _entries[conversationId] ??
         HandrailConversationWorkspaceEntry(
           HandrailConversationState(conversationId: conversationId),
         );
-    final wasRunning =
-        current.state.status == HandrailTurnStatus.running ||
+    final wasRunning = current.state.status == HandrailTurnStatus.running ||
         current.state.status == HandrailTurnStatus.waitingForTool;
     final next = current.state.apply(frame);
-    final terminal =
-        next.status == HandrailTurnStatus.completed ||
+    final terminal = next.status == HandrailTurnStatus.completed ||
         next.status == HandrailTurnStatus.cancelled ||
         next.status == HandrailTurnStatus.failed;
     _entries[conversationId] = HandrailConversationWorkspaceEntry(
       next,
-      unread:
-          current.unread ||
+      unread: current.unread ||
           (_selectedConversationId != conversationId && wasRunning && terminal),
     );
     _publish();
@@ -279,8 +275,7 @@ class HandrailConversationWorkspace {
     return HandrailConversationWorkspaceSnapshot(
       selectedConversationId: _selectedConversationId,
       conversations: values,
-      runningCount:
-          values
+      runningCount: values
               .where(
                 (entry) =>
                     entry.state.status == HandrailTurnStatus.running ||
@@ -294,15 +289,13 @@ class HandrailConversationWorkspace {
                     record.status == HandrailTurnStatus.waitingForTool,
               )
               .length,
-      errorCount:
-          values
+      errorCount: values
               .where((entry) => entry.state.status == HandrailTurnStatus.failed)
               .length +
           unopened
               .where((record) => record.status == HandrailTurnStatus.failed)
               .length,
-      unreadCount:
-          values.where((entry) => entry.unread).length +
+      unreadCount: values.where((entry) => entry.unread).length +
           unopened.where((record) => record.unread).length,
     );
   }
@@ -349,12 +342,12 @@ class HandrailAiClient {
   }) : _http = httpClient ?? http.Client();
 
   Future<Map<String, String>> _headers() async => {
-    'content-type': 'application/json',
-    ...?await protectedHeaders?.call(),
-  };
+        'content-type': 'application/json',
+        ...?await protectedHeaders?.call(),
+      };
   Uri _uri(String path) => baseUri.replace(
-    path: '${baseUri.path.replaceFirst(RegExp(r'/$'), '')}$path',
-  );
+        path: '${baseUri.path.replaceFirst(RegExp(r'/$'), '')}$path',
+      );
 
   Future<HandrailGatewayCapabilities> capabilities() async {
     final started = DateTime.now();
@@ -387,11 +380,12 @@ class HandrailAiClient {
     required String conversationId,
     required String turnId,
     required Map<String, Object?> resumeFrom,
-  }) => _stream('/turns/resume', {
-    'conversationId': conversationId,
-    'turnId': turnId,
-    'resumeFrom': resumeFrom,
-  });
+  }) =>
+      _stream('/turns/resume', {
+        'conversationId': conversationId,
+        'turnId': turnId,
+        'resumeFrom': resumeFrom,
+      });
 
   Future<Map<String, Object?>> cancelTurn(Map<String, Object?> request) async {
     return _post('/turns/cancel', request);
@@ -407,15 +401,18 @@ class HandrailAiClient {
       _post('/conversations/rename', input);
   Future<Map<String, Object?>> archiveConversation(
     Map<String, Object?> input,
-  ) => _post('/conversations/archive', input);
+  ) =>
+      _post('/conversations/archive', input);
   Future<Map<String, Object?>> restoreConversation(
     Map<String, Object?> input,
-  ) => _post('/conversations/restore', input);
+  ) =>
+      _post('/conversations/restore', input);
   Future<Map<String, Object?>> clearConversation(Map<String, Object?> input) =>
       _post('/conversations/clear', input);
   Future<Map<String, Object?>> permanentlyDeleteConversation(
     Map<String, Object?> input,
-  ) => _post('/conversations/permanent-delete', input);
+  ) =>
+      _post('/conversations/permanent-delete', input);
   Future<Map<String, Object?>> createApproval(Map<String, Object?> input) =>
       _post('/approvals/create', input);
   Future<Map<String, Object?>> getApproval(String proposalId) =>
@@ -464,14 +461,28 @@ class HandrailAiClient {
         : null;
   }
 
+  /// Protected live launcher activity. Keep [listActivity] polling as the
+  /// convergence fallback after a disconnect or missed publication.
+  Stream<HandrailConversationActivityRecord> activity() async* {
+    await for (final frame
+        in _streamRequest(http.Request('GET', _uri('/activity')))) {
+      final value = frame.data['record'];
+      if (value is Map) {
+        yield HandrailConversationActivityRecord.fromJson(
+          Map<String, Object?>.from(value),
+        );
+      }
+    }
+  }
+
   Stream<HandrailStreamFrame> presence(String conversationId) => _streamRequest(
-    http.Request(
-      'GET',
-      _uri(
-        '/presence',
-      ).replace(queryParameters: {'conversationId': conversationId}),
-    ),
-  );
+        http.Request(
+          'GET',
+          _uri(
+            '/presence',
+          ).replace(queryParameters: {'conversationId': conversationId}),
+        ),
+      );
 
   Future<void> publishPresence(
     String conversationId,
@@ -546,9 +557,10 @@ class HandrailAiClient {
   Stream<HandrailStreamFrame> _stream(
     String path,
     Map<String, Object?> payload,
-  ) => _streamRequest(
-    http.Request('POST', _uri(path))..body = jsonEncode(payload),
-  );
+  ) =>
+      _streamRequest(
+        http.Request('POST', _uri(path))..body = jsonEncode(payload),
+      );
 
   Stream<HandrailStreamFrame> _streamRequest(http.Request request) async* {
     final operation = request.url.path;
@@ -566,10 +578,9 @@ class HandrailAiClient {
         );
       String? eventType, eventId;
       final data = <String>[];
-      await for (final line
-          in response.stream
-              .transform(utf8.decoder)
-              .transform(const LineSplitter())) {
+      await for (final line in response.stream
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())) {
         if (line.isEmpty) {
           if (data.isNotEmpty)
             yield HandrailStreamFrame(
@@ -592,8 +603,7 @@ class HandrailAiClient {
           eventType = value;
         else if (field == 'id')
           eventId = value;
-        else if (field == 'data')
-          data.add(value);
+        else if (field == 'data') data.add(value);
       }
       _diagnose(
         operation,

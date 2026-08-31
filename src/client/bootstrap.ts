@@ -13,11 +13,23 @@ import { ConversationRuntimeRegistry, type ConversationRuntimeFactory,
 import { ConversationWorkspace } from "../conversation/workspace.js";
 import type { ConversationTransport } from "../transports/types.js";
 import type { ConversationCatalog } from "../conversation/catalog.js";
+import type { ConversationEventStore } from "../conversation/event-store.js";
+import type { ConversationClientId, ConversationDeviceId } from "../conversation/events.js";
+import { createConversationRuntime } from "../runtime.js";
 
 export interface HandrailAiClientBootstrapOptions<TEvent, TRequest, TAuthorizationContext, TSynchronization = unknown>
 extends ApplicationGatewayTransportOptions<TEvent, TSynchronization> {
   readonly createRuntime?: ConversationRuntimeFactory<TRequest, TAuthorizationContext>;
   readonly authorizeRuntime?: ConversationRuntimeRegistryPolicy<TAuthorizationContext>;
+  /** Standard runtime assembly; mutually exclusive with createRuntime. */
+  readonly runtime?: {
+    readonly clientId: ConversationClientId;
+    readonly deviceId?: ConversationDeviceId;
+    readonly eventStoreFor: (input: Parameters<ConversationRuntimeFactory<TRequest, TAuthorizationContext>>[0]) =>
+      ConversationEventStore | Promise<ConversationEventStore>;
+    readonly authorize: ConversationRuntimeRegistryPolicy<TAuthorizationContext>;
+  };
+  readonly buildRequest?: (input: { readonly content: string; readonly attachments: readonly unknown[] }) => TRequest;
   readonly activityPollingMilliseconds?: number;
   readonly startActivityPolling?: boolean;
 }
@@ -30,6 +42,9 @@ export interface HandrailAiClient<TEvent, TRequest, TAuthorizationContext> {
   readonly catalog: ConversationCatalog<unknown>;
   readonly registry: ConversationRuntimeRegistry<TRequest, TAuthorizationContext> | null;
   readonly workspace: ConversationWorkspace<TRequest, TAuthorizationContext> | null;
+  readonly attachmentUpload: unknown | null;
+  readonly presence: unknown | null;
+  buildRequest(input: { readonly content: string; readonly attachments?: readonly unknown[] }): TRequest;
   markActivityRead(conversationId: string): Promise<void>;
   dispose(): Promise<void>;
 }
@@ -42,7 +57,8 @@ export async function createHandrailAiClient<TEvent = unknown, TRequest = unknow
   TAuthorizationContext = unknown, TSynchronization = unknown>(
   options: HandrailAiClientBootstrapOptions<TEvent, TRequest, TAuthorizationContext, TSynchronization>,
 ): Promise<HandrailAiClient<TEvent, TRequest, TAuthorizationContext>> {
-  if ((options.createRuntime === undefined) !== (options.authorizeRuntime === undefined)) {
+  if ((options.createRuntime === undefined) !== (options.authorizeRuntime === undefined) ||
+    options.runtime !== undefined && options.createRuntime !== undefined) {
     throw new TypeError("createRuntime and authorizeRuntime must be configured together");
   }
   const capabilities = options.capabilities ?? await negotiateApplicationGatewayCapabilities(options);
@@ -50,18 +66,36 @@ export async function createHandrailAiClient<TEvent = unknown, TRequest = unknow
   const resources = createApplicationGatewayResourceClient(options);
   const activity = capabilities.activity === true && resources.listActivity
     ? new PollingConversationActivity({ load: () => resources.listActivity!(),
+      ...(resources.subscribeActivity === undefined ? {} : {
+        subscribe: (signal: AbortSignal) => resources.subscribeActivity!(signal),
+      }),
       ...(options.activityPollingMilliseconds === undefined ? {} : { intervalMilliseconds: options.activityPollingMilliseconds }) }) : null;
   if (activity && options.startActivityPolling !== false) activity.start();
   const catalog = createApplicationGatewayConversationCatalog(resources, capabilities);
-  const registry = options.createRuntime && options.authorizeRuntime
+  const runtimeFactory = options.runtime ? (async (input: Parameters<ConversationRuntimeFactory<TRequest, TAuthorizationContext>>[0]) =>
+    createConversationRuntime<TRequest>({ conversationId: input.conversationId, clientId: options.runtime!.clientId,
+      ...(options.runtime!.deviceId === undefined ? {} : { deviceId: options.runtime!.deviceId }), transport,
+      eventStore: await options.runtime!.eventStoreFor(input) })) : options.createRuntime;
+  const runtimeAuthorization = options.runtime?.authorize ?? options.authorizeRuntime;
+  const registry = runtimeFactory && runtimeAuthorization
     ? new ConversationRuntimeRegistry<TRequest, TAuthorizationContext>({
       catalog,
-      createRuntime: options.createRuntime, authorize: options.authorizeRuntime,
+      createRuntime: runtimeFactory, authorize: runtimeAuthorization,
     }) : null;
   const workspace = registry ? new ConversationWorkspace(registry) : null;
+  const attachmentUpload = transport.capabilities.attachmentUpload.supported
+    ? transport.capabilities.attachmentUpload.capability : null;
+  const presence = transport.capabilities.presence.supported ? transport.capabilities.presence.capability : null;
   return Object.freeze({ capabilities, transport, resources, activity, catalog, registry, workspace,
+    attachmentUpload, presence,
+    buildRequest(input: { readonly content: string; readonly attachments?: readonly unknown[] }) {
+      if (!options.buildRequest) throw new TypeError("No application request builder is configured");
+      return options.buildRequest({ content: input.content, attachments: input.attachments ?? [] });
+    },
     async markActivityRead(conversationId: string) {
-      if (!resources.markActivityRead) return; await resources.markActivityRead({ conversationId }); await activity?.refresh();
+      if (!activity || !resources.markActivityRead) return;
+      await resources.markActivityRead({ conversationId });
+      await activity.refresh();
     },
     async dispose() { activity?.stop(); await workspace?.dispose(); } });
 }
