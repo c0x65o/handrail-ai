@@ -25,6 +25,7 @@ Node.js 20 or newer is required for package tooling and trusted-server use.
 | `@handrail/ai/server/trusted-server` | Framework-neutral request protection contracts | Trusted server only |
 | `@handrail/ai/connectors/mcp` | Injected-client MCP tool-plugin/discovery adapter | Optional connector boundary |
 | `@handrail/ai/adapters/spartan-aegis` | Supported proposal-only adapter for Spartan's existing Aegis definitions and action registry | Trusted Spartan application server only |
+| `@handrail/ai/adapters/mills-family` | Supported proposal-only adapter for Mills' existing tool runtime, citations, and proposal boundary | Trusted Mills application server only |
 | `@handrail/ai/persistence/postgres` | Injected-client reference Postgres persistence | Optional database boundary |
 | `@handrail/ai/providers/openai` | OpenAI Chat Completions and Responses adapters, including hosted/deferred tool projection | Trusted server only |
 | `@handrail/ai/providers/openai/transcription` | OpenAI transcription capability | Trusted server only |
@@ -164,6 +165,8 @@ See [`docs/platform-contracts.md`](./docs/platform-contracts.md) for security,
 compatibility, package boundaries, and production persistence guidance. The
 read-only Spartan Aegis mapping is in
 [`docs/spartan-aegis-migration.md`](./docs/spartan-aegis-migration.md).
+The Mills tool-runtime and rollback-safe adoption path is in
+[`docs/mills-family-migration.md`](./docs/mills-family-migration.md).
 
 React Native applications should import the transport, typed runtime/state, and
 resource APIs from `@handrail/ai/client`, and provider/selectors/actions from

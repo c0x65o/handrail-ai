@@ -71,6 +71,10 @@ export type MessagePartRenderer = (
   message: ConversationMessageRecord | undefined,
   index: number,
 ) => ReactNode;
+export type MessageContentRenderer = (
+  parts: ConversationMessageRecord["content"],
+  message: ConversationMessageRecord | undefined,
+) => ReactNode;
 export type MessageAttachmentRenderer = (
   attachment: ConversationMessageRecord["attachments"][number],
   message: ConversationMessageRecord,
@@ -263,6 +267,7 @@ interface MessageCollectionOptions {
       readonly toolCalls: readonly ConversationToolCallRecord[];
     },
   ) => ReactNode;
+  renderContent?: MessageContentRenderer;
   renderPart?: MessagePartRenderer;
   renderAttachment?: MessageAttachmentRenderer;
   renderToolCall?: ToolCallRenderer;
@@ -300,6 +305,7 @@ export const Transcript = forwardRef<HTMLElement, TranscriptProps>(function Tran
   const {
     error,
     messages,
+    renderContent,
     renderError,
     renderMessage,
     renderPart,
@@ -315,6 +321,7 @@ export const Transcript = forwardRef<HTMLElement, TranscriptProps>(function Tran
     <MessageList
       {...(error === undefined ? {} : { error })}
       {...(messages === undefined ? {} : { messages })}
+      {...(renderContent === undefined ? {} : { renderContent })}
       {...(renderError === undefined ? {} : { renderError })}
       {...(renderMessage === undefined ? {} : { renderMessage })}
       {...(renderPart === undefined ? {} : { renderPart })}
@@ -351,6 +358,7 @@ export const MessageList = forwardRef<HTMLDivElement, MessageListProps>(
       error,
       messages: explicitMessages,
       render,
+      renderContent,
       renderError,
       renderMessage,
       renderPart,
@@ -380,6 +388,7 @@ export const MessageList = forwardRef<HTMLDivElement, MessageListProps>(
               message={message}
               error={context.error}
               toolCalls={context.toolCalls}
+              {...(renderContent === undefined ? {} : { renderContent })}
               {...(renderError === undefined ? {} : { renderError })}
               {...(renderPart === undefined ? {} : { renderPart })}
               {...(renderAttachment === undefined ? {} : { renderAttachment })}
@@ -412,6 +421,7 @@ export interface MessageProps extends Omit<HTMLAttributes<HTMLElement>, "childre
   message?: ConversationMessageRecord;
   parts?: ConversationMessageRecord["content"];
   render?: PrimitiveRender<HTMLElement, HTMLAttributes<HTMLElement>>;
+  renderContent?: MessageContentRenderer;
   renderError?: ErrorRenderer;
   renderPart?: MessagePartRenderer;
   renderAttachment?: MessageAttachmentRenderer;
@@ -427,6 +437,7 @@ export const Message = forwardRef<HTMLElement, MessageProps>(function Message(
     message,
     parts,
     render,
+    renderContent,
     renderError,
     renderPart,
     renderAttachment,
@@ -438,15 +449,17 @@ export const Message = forwardRef<HTMLElement, MessageProps>(function Message(
   forwardedRef,
 ) {
   const content = children ?? <>
-    {(parts ?? message?.content ?? []).map((part, index) => (
-      <MessagePart
-        key={index}
-        part={part}
-        index={index}
-        {...(message === undefined ? {} : { message })}
-        {...(renderPart === undefined ? {} : { renderPart })}
-      />
-    ))}
+    {renderContent
+      ? renderContent(parts ?? message?.content ?? [], message)
+      : (parts ?? message?.content ?? []).map((part, index) => (
+        <MessagePart
+          key={index}
+          part={part}
+          index={index}
+          {...(message === undefined ? {} : { message })}
+          {...(renderPart === undefined ? {} : { renderPart })}
+        />
+      ))}
     {message?.attachments.length ? <ul aria-label="Message attachments">
       {message.attachments.map((attachment, index) => <li key={attachment.attachment_id}>
         {renderAttachment

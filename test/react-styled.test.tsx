@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import { createInitialConversationState } from "../src/conversation/state.js";
 import { StyledChatLauncher, StyledChatPreset, StyledChatPresetStyles, WorkspaceThreadPicker, installToolRendererPlugins } from "../src/react-styled/index.js";
 
 describe("styled React preset", () => {
@@ -34,6 +35,33 @@ describe("styled React preset", () => {
     expect(screen.getByText("Approval required")).toBeTruthy();
     expect(container.querySelector("[data-layout=drawer]")).toBeTruthy();
     expect(container.querySelector("style[data-handrail-ai-preset]")?.textContent).toContain("prefers-reduced-motion");
+  });
+  it("renders safe semantic Markdown, target citations, rich attachments, and voice composition", () => {
+    const initial = createInitialConversationState("conversation" as never);
+    const message = {
+      message_id: "message" as never, turn_id: "turn" as never, role: "assistant" as const,
+      content: [{ type: "text" as const,
+        text: "### Summary\n\n- Safe item\n\n[Good](https://example.com) [Bad](javascript:alert(1))" }],
+      attachments: [{ attachment_id: "attachment" as never, kind: "image" as const,
+        filename: "chart.png", media_type: "image/png" as const, size_bytes: 2048 }],
+      created_at: null, attribution: null,
+    };
+    const state = { ...initial, messages: [message],
+      citation_sources: [{ source_id: "source" as never, type: "web" as const,
+        label: "Trusted source", locator: "https://example.com/source" }],
+      citations: [{ citation_id: "citation" as never, source_id: "source" as never, order: 1,
+        target: { type: "assistant_message" as const, message_id: "message" as never } }],
+    };
+    render(<StyledChatPreset state={state} voiceControls={<button>Speak</button>}
+      resolveAttachmentUrl={() => "/api/attachments/attachment"}/>);
+    expect(screen.getByRole("heading", { name: "Summary", level: 3 })).toBeTruthy();
+    expect(screen.getByText("Safe item")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Good" }).getAttribute("rel")).toContain("noopener");
+    expect(screen.getByText("Bad").closest("a")).toBeNull();
+    expect(screen.getByRole("img").getAttribute("src")).toBe("/api/attachments/attachment");
+    expect(screen.getByRole("link", { name: /Trusted source/ }).getAttribute("href"))
+      .toBe("https://example.com/source");
+    expect(screen.getByRole("button", { name: "Speak" })).toBeTruthy();
   });
   it("binds completion and unread workspace state to the launcher button", () => {
     const snapshot = { selectedConversationId: "second", runningCount: 0, errorCount: 0,
