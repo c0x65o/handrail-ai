@@ -27,6 +27,10 @@ import type {
 
 export interface SynchronizedConversationEventStoreOptions {
   readonly adapter: Pick<ConversationSyncAdapter, "appendMutations" | "readSince">;
+  /** Bounded retries for lost responses or a temporarily lagging authoritative read. Defaults to 3. */
+  readonly maximumAppendAttempts?: number;
+  /** Base delay between visibility retries. Defaults to 20 ms. */
+  readonly appendRetryDelayMilliseconds?: number;
 }
 
 /**
@@ -40,6 +44,14 @@ export interface SynchronizedConversationEventStoreOptions {
 export function createSynchronizedConversationEventStore(
   options: SynchronizedConversationEventStoreOptions,
 ): ConversationEventStore {
+  const maximumAppendAttempts = boundedInteger(options.maximumAppendAttempts, 3, 1, 10, "maximumAppendAttempts");
+  const appendRetryDelayMilliseconds = boundedInteger(
+    options.appendRetryDelayMilliseconds,
+    20,
+    0,
+    5_000,
+    "appendRetryDelayMilliseconds",
+  );
   const read = async (input: ReadConversationEventsInput): Promise<ReadConversationEventsResult> => {
     const afterRevision = input.after === undefined
       ? null
@@ -65,12 +77,18 @@ export function createSynchronizedConversationEventStore(
           events: Object.freeze([{ ...event, mutation_id: mutationId }]) as ConversationSyncMutation["events"],
         });
       });
-      const result = await options.adapter.appendMutations({
-        conversationId: input.conversationId,
-        expectedRevision: input.expectedRevision,
-        mutations,
-      });
-      return appendResult(input, mutations, result);
+      for (let attempt = 1; ; attempt += 1) {
+        const result = await options.adapter.appendMutations({
+          conversationId: input.conversationId,
+          expectedRevision: input.expectedRevision,
+          mutations,
+        });
+        if (attempt < maximumAppendAttempts && retryableVisibilityResult(input, result)) {
+          await delay(appendRetryDelayMilliseconds * attempt);
+          continue;
+        }
+        return appendResult(input, mutations, result);
+      }
     },
     read,
     getLatestRevision: async (conversationId: ConversationId): Promise<ConversationRevision | null> => {
@@ -79,6 +97,33 @@ export function createSynchronizedConversationEventStore(
       throwReadFailure(conversationId, null, result);
     },
   });
+}
+
+function retryableVisibilityResult(
+  input: AppendConversationEventsInput,
+  result: AppendMutationsResult,
+): boolean {
+  if (result.status === "temporarily_unavailable") return true;
+  return result.status === "conflict" && input.expectedRevision !== null &&
+    (result.actualRevision ?? 0) < input.expectedRevision;
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return milliseconds === 0 ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function boundedInteger(
+  value: number | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+  name: string,
+): number {
+  const resolved = value ?? fallback;
+  if (!Number.isSafeInteger(resolved) || resolved < minimum || resolved > maximum) {
+    throw new TypeError(`${name} is invalid`);
+  }
+  return resolved;
 }
 
 function validateProposedAppend(input: AppendConversationEventsInput): readonly ConversationEvent[] {

@@ -665,7 +665,15 @@ export class PostgresConversationEventStore implements ConversationEventStore {
         return this.appendConflict("idempotency_conflict", input,
           await this.latest(tx, input.conversationId), identifiers[0] ?? null);
       }
-      const actual = await this.latest(tx, input.conversationId);
+      let actual = await this.latest(tx, input.conversationId);
+      if (input.expectedRevision !== null && (actual ?? 0) < input.expectedRevision) {
+        const evidence = await tx.query<{ revision: string }>(
+          "SELECT revision::text AS revision FROM handrail_ai_events WHERE tenant_id=$1 AND conversation_id=$2 AND revision >= $3 ORDER BY revision DESC LIMIT 1",
+          [this.tenantId, input.conversationId, input.expectedRevision],
+        );
+        const evidencedRevision = evidence.rows[0] ? Number(evidence.rows[0].revision) as ConversationRevision : null;
+        if (evidencedRevision !== null && (actual === null || evidencedRevision > actual)) actual = evidencedRevision;
+      }
       if (actual !== input.expectedRevision) return this.appendConflict("revision_conflict", input, actual, null);
       for (const event of events) await tx.query(
         "INSERT INTO handrail_ai_events (tenant_id,conversation_id,revision,event_id,mutation_id,payload) VALUES ($1,$2,$3,$4,$5,$6::jsonb)",
@@ -687,8 +695,16 @@ export class PostgresConversationEventStore implements ConversationEventStore {
         [this.tenantId, input.conversationId, after, limit + 1],
       );
       const entries = Object.freeze(result.rows.slice(0, limit).map((row) => storedEvent(parseConversationEvent(row.payload))));
+      const queriedLatest = await this.latest(tx, input.conversationId);
+      // A routed/read-replica client can transiently report an older aggregate
+      // revision than the rows returned by the same logical read. Never publish
+      // a latest revision behind evidence already included in this page.
+      const pageLatest = entries.at(-1)?.event.revision ?? null;
+      const latestRevision = queriedLatest === null || pageLatest !== null && queriedLatest < pageLatest
+        ? pageLatest
+        : queriedLatest;
       return Object.freeze({ entries, nextCursor: entries.at(-1)?.cursor ?? null,
-        latestRevision: await this.latest(tx, input.conversationId), hasMore: result.rows.length > limit });
+        latestRevision, hasMore: result.rows.length > limit });
     }); } catch (error) { throw this.storeError(error, "read"); }
   }
 

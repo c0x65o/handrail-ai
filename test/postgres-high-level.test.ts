@@ -100,6 +100,7 @@ describe("Postgres high-level adapters", () => {
 
   it("appends, idempotently reconciles, and cursor-reads canonical conversation events", async () => {
     const events: ConversationEvent[] = [];
+    let lagLatestRead = false;
     const query = async (sql: string, values: readonly unknown[] = []) => {
         if (sql.includes("pg_advisory_xact_lock")) return { rows: [], rowCount: 1 };
         if (sql.includes("event_id=ANY")) {
@@ -113,8 +114,13 @@ describe("Postgres high-level adapters", () => {
           const rows = events.filter((event) => event.revision > after).slice(0, limit).map((payload) => ({ payload }));
           return { rows, rowCount: rows.length };
         }
+        if (sql.includes("revision >= $3")) {
+          const minimum = Number(values[2]);
+          const latest = [...events].reverse().find((event) => event.revision >= minimum);
+          return { rows: latest ? [{ revision: String(latest.revision) }] : [], rowCount: latest ? 1 : 0 };
+        }
         if (sql.includes("ORDER BY revision DESC")) {
-          const latest = events.at(-1);
+          const latest = lagLatestRead ? events.at(-2) : events.at(-1);
           return { rows: latest ? [{ revision: String(latest.revision) }] : [], rowCount: latest ? 1 : 0 };
         }
         if (sql.startsWith("INSERT INTO handrail_ai_events")) {
@@ -140,8 +146,19 @@ describe("Postgres high-level adapters", () => {
       .resolves.toMatchObject({ status: "appended", latestRevision: 1 });
     await expect(store.append({ conversationId, expectedRevision: null, events: [event] }))
       .resolves.toMatchObject({ status: "idempotent", latestRevision: 1 });
-    const first = await store.read({ conversationId, limit: 1 });
-    expect(first).toMatchObject({ latestRevision: 1, hasMore: false, entries: [{ event: { event_id: "event-a" } }] });
+    const second = { ...event, event_id: "event-b", revision: 2, mutation_id: "mutation-b",
+      payload: { ...event.payload, message_id: "message-b", content: [{ type: "text", text: "Again" }] } } as ConversationEvent;
+    await expect(store.append({ conversationId, expectedRevision: 1 as never, events: [second] }))
+      .resolves.toMatchObject({ status: "appended", latestRevision: 2 });
+    lagLatestRead = true;
+    const third = { ...second, event_id: "event-c", revision: 3, mutation_id: "mutation-c",
+      payload: { ...second.payload, message_id: "message-c" } } as ConversationEvent;
+    await expect(store.append({ conversationId, expectedRevision: 2 as never, events: [third] }))
+      .resolves.toMatchObject({ status: "appended", latestRevision: 3 });
+    const first = await store.read({ conversationId, limit: 3 });
+    expect(first).toMatchObject({ latestRevision: 3, hasMore: false,
+      entries: [{ event: { event_id: "event-a" } }, { event: { event_id: "event-b" } },
+        { event: { event_id: "event-c" } }] });
     expect(await store.read({ conversationId, after: { cursor: first.nextCursor! } })).toMatchObject({ entries: [] });
   });
 });

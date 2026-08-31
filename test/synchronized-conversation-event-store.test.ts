@@ -127,4 +127,26 @@ describe("synchronized conversation event store", () => {
     await expect(remote.read({ conversationId: otherConversation, after: { cursor: page.nextCursor! } }))
       .rejects.toMatchObject({ name: "ConversationEventStoreConflictError", code: "cursor_not_found" });
   });
+
+  it("retries stable mutations when the authoritative revision is briefly observed behind", async () => {
+    const authority = new InMemoryConversationEventStore();
+    const delegate = authoritativeAdapter(authority);
+    let calls = 0;
+    const adapter = {
+      readSince: delegate.readSince,
+      appendMutations: async (input: Parameters<typeof delegate.appendMutations>[0]) => {
+        calls += 1;
+        if (calls === 1) return { status: "conflict" as const, expectedRevision: input.expectedRevision,
+          actualRevision: null };
+        return delegate.appendMutations(input);
+      },
+    };
+    const remote = createSynchronizedConversationEventStore({ adapter, appendRetryDelayMilliseconds: 0 });
+    const seed = localEvent({ eventId: "seed", revision: 1, step: 1 });
+    await authority.append({ conversationId, expectedRevision: null, events: [seed] });
+    const next = localEvent({ eventId: "visibility-lag", revision: 2, step: 2 });
+    await expect(remote.append({ conversationId, expectedRevision: 1 as never, events: [next] }))
+      .resolves.toMatchObject({ status: "appended", latestRevision: 2 });
+    expect(calls).toBe(2);
+  });
 });

@@ -152,4 +152,39 @@ describe("event-store conversation synchronization adapter", () => {
     expect(validateCanonicalBatch).toHaveBeenCalledOnce();
     expect(await store.getLatestRevision(conversationId)).toBeNull();
   });
+
+  it("lets the atomic store decide when a preliminary latest-revision read is stale", async () => {
+    const authority = new InMemoryConversationEventStore();
+    const staleReader = {
+      append: authority.append.bind(authority),
+      read: authority.read.bind(authority),
+      getLatestRevision: vi.fn(async () => null),
+    };
+    const sync = createEventStoreConversationSyncAdapter({
+      authorizationContext: { userId: "user-1" },
+      eventStore: staleReader,
+      authorize: () => true,
+      canonicalizeMutation: async ({ proposedEvent }) => ({
+        actor: { type: "user" }, source: proposedEvent.source, payload: proposedEvent.payload,
+      }),
+      createEventId: ({ mutationId }) => `server:${mutationId}` as ConversationEventId,
+    });
+    await authority.append({ conversationId, expectedRevision: null, events: [
+      parseConversationEvent({
+        version: 1, event_id: "seed-event", conversation_id: conversationId, revision: 1,
+        occurred_at: "2026-08-31T20:00:00.000Z", actor: { type: "user" },
+        source: { type: "client", client_id: "seed-client" }, mutation_id: "seed-mutation",
+        payload: { type: "conversation.metadata_updated", metadata: { seed: true } },
+      }),
+    ] });
+    await expect(sync.appendMutations({ conversationId, expectedRevision: 1 as never,
+      mutations: [proposal("after-stale-read", 2)] })).resolves.toMatchObject({
+        status: "mutations", latestRevision: 2,
+      });
+    await expect(sync.readSince({ conversationId, afterRevision: 1 as never })).resolves.toMatchObject({
+      status: "events", revision: 2, latestRevision: 2,
+      events: [{ mutation_id: "after-stale-read" }],
+    });
+    expect(await authority.getLatestRevision(conversationId)).toBe(2);
+  });
 });

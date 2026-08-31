@@ -76,7 +76,7 @@ rollback implementation. It stages attachment bytes in the expiring Postgres
 blob store, exposes persisted activity with live SSE plus polling fallback,
 publishes automatic assistant presence, and uses
 `createRequestScopedMcpSession` inside the existing per-message Handrail bridge.
-The `0.1.63` qualification artifact also composes
+The `0.1.70` qualification artifact also composes
 `createPostgresLivePubSubFromPool` from Spartan's existing `pg` pool, so live
 launcher activity and typing/presence fan out across application instances.
 The bridge is explicitly closed before the pool during shutdown; authoritative
@@ -89,31 +89,35 @@ Spartan can now opt into the drop-in browser workspace with
 `AEGIS_HANDRAIL_AI_CLIENT=handrail_ai`. The default remains `legacy`, and the
 server refuses to advertise the new client unless dual-write persistence and
 the protected application gateway are both available. The opt-in client uses
-IndexedDB scoped to the signed-in principal, keeps background threads alive,
-shows Running/Done/Error on the launcher, supports image/PDF upload, copy
-actions, streamed typing state, and protected proposal confirmation. Failure
+the gateway's server-authoritative synchronized event store, keeps background
+threads alive, shows Running/Done/Error on the launcher, supports image/PDF
+upload, copy actions, streamed typing state, and protected proposal
+confirmation. Failure
 to load or negotiate the SDK leaves the legacy assistant available as the
 explicit fallback. A host can inject shared activity and presence delivery
 (Redis, NATS, Postgres NOTIFY, and similar) instead of the process-local
 default.
 
-This is deliberately a new-client qualification mode, not a multi-device
-history cutover. Spartan legacy rows still mint message/event identities that
-do not match browser-authored SDK event identities. Until the server owns one
-canonical mutation/event envelope for both paths, browser transcript state is
-durable on the local device only and the runtime config reports
-`synchronization: "local_device"`. Do not market or enable cross-device history
-convergence before that identity migration and its reconciliation tests land.
+The protected gateway now advertises writable synchronization only inside the
+explicit Handrail qualification mode. Browser envelopes are proposals: Spartan
+authorizes the conversation, assigns canonical identity/actor/source/time and
+revision, validates the proposed batch against replayed state, and proves every
+assistant frame against the durable application-turn record. Provider execution
+cannot start until the canonical user message, attachment metadata, turn, and
+mutation identity are admitted. Runtime and usage proposals remain denied by
+the shared adapter unless a host explicitly enables and verifies them.
 
-The protected gateway now includes a read-only synchronization qualification
-handler over the reconciled Postgres shadow. Authorized devices can pull the
-canonical snapshot and contiguous imported message/attachment/citation events;
-foreign conversations and all client mutation appends fail closed. Capability
-negotiation intentionally remains `false`, so the production browser cannot
-mistake parity reads for a writable convergence authority. The remaining
-cutover gate is unifying active-turn runtime identities with these shadow event
-identities, then proving two-device convergence before changing runtime config.
+Focused qualification proves one canonical active turn through attachments,
+streamed deltas, usage, citations and terminal state; exact idempotent replay;
+forged assistant denial; a second device hydrating the same transcript;
+observer disconnect without cancellation; cancellation from another gateway;
+and resume from the last applied frame. Shared Postgres reads also clamp a
+lagging aggregate revision to rows already observed, while atomic appends
+corroborate a lagging latest-revision lookup under the conversation lock.
+This establishes multi-device convergence for the opt-in path, but it does not
+authorize deleting legacy rows or routes: legacy Aegis remains the rollback and
+business-side-effect authority until reconciliation reports are converged.
 
 Do not remove `provider.ts`, current Aegis routes, or old persistence during these steps. Cut reads over independently after the matching reconciliation report is converged. Binary attachment authorization/resolution, Zod schemas, company/actor construction, system instructions, proposal confirmation side effects, retention, and rollout flags remain Spartan-owned boundaries.
 
-Git dependencies require the package `prepare` script because public exports point at generated `dist` files. Production should pin an immutable tag or package integrity. Spartan's qualification seam pins the locally generated `0.1.63` artifact; the prior `0.1.62` tarball and legacy transport remain available for rollback. A temporary vendored tarball is acceptable for cross-repository qualification when its source tag and lockfile integrity are reviewed together. This artifact contains the Responses grounding/reasoning request options documented above, although the provider-loop cutover remains independently gated from the client qualification switch.
+Git dependencies require the package `prepare` script because public exports point at generated `dist` files. Production should pin an immutable tag or package integrity. Spartan's qualification seam pins the locally generated `0.1.70` artifact; the prior `0.1.68` artifact and legacy transport remain available for rollback. A temporary vendored tarball is acceptable for cross-repository qualification when its source revision, package version, and lockfile integrity are reviewed together. This artifact contains the Responses grounding/reasoning request options documented above, although removal of the legacy provider/persistence path remains independently gated by reconciliation and parity evidence.

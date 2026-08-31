@@ -270,12 +270,12 @@ export function createEventStoreConversationSyncAdapter<TAuthorizationContext>(
       return await diagnoseAiOperation(options.diagnostics, { domain: "persistence", operation: "sync_read_since",
         conversationId: input.conversationId }, async () => {
         const limit = boundedInteger(input.limit, readPageSize, 1, readPageSize, "limit");
-        const latestRevision = await options.eventStore.getLatestRevision(input.conversationId);
+        const page = await options.eventStore.read({ conversationId: input.conversationId,
+          ...(input.afterRevision === null ? {} : { after: { revision: input.afterRevision } }), limit });
+        const latestRevision = page.latestRevision;
         if (input.afterRevision !== null && (latestRevision === null || input.afterRevision > latestRevision)) {
           return Object.freeze({ status: "snapshot_required" as const, reason: "revision_gap" as const, latestRevision });
         }
-        const page = await options.eventStore.read({ conversationId: input.conversationId,
-          ...(input.afterRevision === null ? {} : { after: { revision: input.afterRevision } }), limit });
         const events = Object.freeze(page.entries.map(({ event }) => event));
         const expectedFirst = (input.afterRevision ?? 0) + 1;
         if (events[0] && events[0].revision !== expectedFirst) {
@@ -294,18 +294,17 @@ export function createEventStoreConversationSyncAdapter<TAuthorizationContext>(
       return await diagnoseAiOperation(options.diagnostics, { domain: "persistence", operation: "sync_append_mutations",
         conversationId: input.conversationId }, async () => {
         const proposals = await canonicalize(input);
-        const actualRevision = await options.eventStore.getLatestRevision(input.conversationId);
-        if (actualRevision !== input.expectedRevision) {
-          const duplicate = await duplicateResult(input, proposals, actualRevision);
-          return duplicate ?? Object.freeze({ status: "conflict" as const,
-            expectedRevision: input.expectedRevision, actualRevision });
+        const observedRevision = await options.eventStore.getLatestRevision(input.conversationId);
+        if (observedRevision !== input.expectedRevision) {
+          const duplicate = await duplicateResult(input, proposals, observedRevision);
+          if (duplicate !== null) return duplicate;
         }
         const occurredAt = (options.now ?? (() => new Date().toISOString() as ConversationTimestamp))();
         const events = proposals.map(({ mutation, canonical }, index) => parseConversationEvent({
           version: CONVERSATION_EVENT_VERSION,
           event_id: options.createEventId({ conversationId: input.conversationId, mutationId: mutation.mutationId }),
           conversation_id: input.conversationId,
-          revision: ((actualRevision ?? 0) + index + 1) as ConversationRevision,
+          revision: ((input.expectedRevision ?? 0) + index + 1) as ConversationRevision,
           occurred_at: occurredAt,
           actor: canonical.actor,
           source: canonical.source,
