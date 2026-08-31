@@ -16,6 +16,9 @@ import type {
   ListApprovalProposalGroupInput, TransitionApprovalProposalInput,
 } from "../conversation/approval-proposal-store.js";
 import type { ConversationApprovalProposalRecord } from "../conversation/state.js";
+import type { DocumentInputCapabilityDescriptor } from "../providers/index.js";
+import type { AppendMutationsInput, AppendMutationsResult, PullSnapshotInput, PullSnapshotResult,
+  ReadSinceInput, ReadSinceResult } from "../sync/types.js";
 import type {
   AuthoritativeCancelTurnResult,
   CancelTurnInput,
@@ -42,6 +45,7 @@ export interface ApplicationGatewayCapabilities {
     readonly acceptedMediaTypes: readonly string[];
     readonly uploadUrl?: string;
   };
+  readonly documentInput?: false | DocumentInputCapabilityDescriptor;
   readonly presence: boolean;
   readonly synchronization: boolean;
   readonly resources?: {
@@ -182,6 +186,7 @@ export function createApplicationGateway<TEvent, TRequest, TContext extends Appl
     attachments: options.capabilities?.attachments ?? false,
     presence: options.capabilities?.presence ?? false,
     synchronization: options.capabilities?.synchronization ?? false,
+    ...(options.capabilities?.documentInput === undefined ? {} : { documentInput: options.capabilities.documentInput }),
     resources: Object.freeze({ conversations: options.conversations !== undefined,
       approvals: options.approvals !== undefined, titleGeneration: options.titleGeneration !== undefined }),
   });
@@ -372,6 +377,9 @@ export interface ApplicationGatewayResourceClient {
   listApprovalGroup(input: WithoutAuthorization<ListApprovalProposalGroupInput<unknown>>): Promise<readonly ConversationApprovalProposalRecord[]>;
   transitionApproval(input: WithoutAuthorization<TransitionApprovalProposalInput<unknown>>): Promise<ConversationApprovalProposalRecord>;
   generateTitle(input: { readonly conversationId: string; readonly idempotencyKey: string }): Promise<string>;
+  pullSnapshot(input: PullSnapshotInput): Promise<PullSnapshotResult>;
+  readSince(input: ReadSinceInput): Promise<ReadSinceResult>;
+  appendMutations(input: AppendMutationsInput): Promise<AppendMutationsResult>;
 }
 
 /** Typed, cross-platform resource client paired with the application gateway. */
@@ -402,6 +410,9 @@ export function createApplicationGatewayResourceClient(
     listApprovalGroup: (input) => invoke<readonly ConversationApprovalProposalRecord[]>("/approvals/list-group", input),
     transitionApproval: (input) => invoke<ConversationApprovalProposalRecord>("/approvals/transition", input),
     generateTitle: (input) => invoke<string>("/titles/generate", input),
+    pullSnapshot: (input) => invoke<PullSnapshotResult>("/synchronization", { operation: "pull_snapshot", input }),
+    readSince: (input) => invoke<ReadSinceResult>("/synchronization", { operation: "read_since", input }),
+    appendMutations: (input) => invoke<AppendMutationsResult>("/synchronization", { operation: "append_mutations", input }),
   };
   return Object.freeze(client);
 }
@@ -461,7 +472,9 @@ export function createApplicationGatewayTransport<TEvent = unknown, TRequest = u
     authoritativeCancellation: negotiated?.authoritativeCancellation === true
       ? { supported: true, capability: cancellation }
       : { supported: false },
-    documentInput: { supported: false }, attachmentUpload: attachmentUpload
+    documentInput: negotiated?.documentInput
+      ? { supported: true, capability: negotiated.documentInput }
+      : { supported: false }, attachmentUpload: attachmentUpload
       ? { supported: true, capability: attachmentUpload }
       : { supported: false },
     presence: negotiated?.presence === true

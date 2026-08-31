@@ -14,11 +14,11 @@ This is a migration seam, not a rewrite of Spartan's business domain. It was der
 
 | Existing Aegis concern | Reusable handrail-ai boundary |
 | --- | --- |
-| `provider.ts` Responses loop and normalized stream | `createOpenAIResponsesProviderAdapter` plus `projectOpenAIResponsesTools`; retain Spartan's bounded multi-call policy around tool results |
+| `provider.ts` Responses loop and normalized stream | `createOpenAIResponsesProviderAdapter` plus `runToolLoop({ limits: { maxTotalToolCalls: 4 } })`; configure `maximumInputMessages: 30` |
 | `tool-catalog.ts` namespace projection | `createDeferredToolDiscoveryPlan`; Spartan supplies stable namespace membership |
 | `handrail-bridge.ts` MCP discovery/execution glue | `@handrail/ai/connectors/mcp` |
 | routes, protected request plumbing, cancellation, replay | `createApplicationGateway` plus `@handrail/ai/server/application-gateway` |
-| thread/event/catalog persistence | conversation contracts plus `@handrail/ai/persistence/postgres` |
+| thread/event/catalog persistence | `PostgresConversationEventStore`, `PostgresConversationCatalog`, `PostgresManagedRuntimeTurnStateStore`, and `PostgresConversationSyncStateStore` |
 | action request persistence and confirmation UI | approval proposal store and plugin approval presentation |
 | bespoke launcher/dialog/transcript/composer | unstyled `@handrail/ai/react` or optional `@handrail/ai/react/styled` |
 | typing animation and multi-device state | ephemeral live presence delivery; never the durable event log |
@@ -27,18 +27,20 @@ This is a migration seam, not a rewrite of Spartan's business domain. It was der
 ## Minimal plugin mapping
 
 ```ts
-const aegisPlugin = createToolPlugin({
+const aegisPlugin = createDescriptorToolPlugin({
   pluginId: "spartan.aegis.erp",
   version: "1.0.0",
   displayName: "Spartan Aegis ERP",
-  registrations: ({ actor }) => actorAuthorizedDescriptors(actor).map(toRegistration),
+  descriptors: [...readDescriptors, ...proposalDescriptors],
   policy: enforceCompanyAndActionPolicy,
-  approvals: actionDescriptors.map((action) => ({
-    toolName: action.name,
-    mode: "always",
-    summarize: (args, actor) => action.summarizeForActor(actor, args),
-    rendererKey: `spartan.aegis.approval.${action.name}`,
-  })),
+});
+
+const application = await createAiApplication({
+  plugins: [aegisPlugin],
+  connectors: [optionalHandrailMcpConnector],
+  installContext: undefined,
+  policy: enforceCompanyAndActionPolicy,
+  toolLoopLimits: { maxTotalToolCalls: 4 },
 });
 ```
 
@@ -52,8 +54,10 @@ The existing provider sends `web_search`, deferred `namespace` function tools, a
 
 1. Wrap existing descriptors as one plugin and assert that the discovered name set is identical for representative roles.
 2. Replace only namespace projection, preserving provider code and golden request tests.
-3. Put the current routes behind the gateway transport and dual-write canonical events while the existing workspace response remains authoritative.
+3. Put the current routes behind the gateway transport. Use `DualWriteConversationEventStore` and `DualWriteApprovalProposalStore`; their primary stores remain authoritative and their reconciliation methods never overwrite divergence.
 4. Migrate the client to the headless runtime, then the styled preset or a Spartan-owned UI. Keep old routes during rollback.
 5. Cut persistence reads over after event/revision, proposal, attachment, and catalog reconciliation. Remove duplicated generic code only after parity tests.
 
 Required parity tests cover every role's discovered tools, denied cross-company access, proposal-only actions, idempotent confirmation, four-call budget, hosted web citations, attachment limits, archive/restore/new threads, stream reconnect, cancellation, and multi-device convergence.
+
+Do not remove `provider.ts`, current Aegis routes, or old persistence during these steps. Cut reads over independently after the matching reconciliation report is converged. Binary attachment authorization/resolution, Zod schemas, company/actor construction, system instructions, proposal confirmation side effects, retention, and rollout flags remain Spartan-owned boundaries.

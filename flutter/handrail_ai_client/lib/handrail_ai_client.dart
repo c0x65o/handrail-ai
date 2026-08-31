@@ -11,12 +11,14 @@ typedef ProtectedHeaders = FutureOr<Map<String, String>> Function();
 class HandrailGatewayCapabilities {
   final bool authoritativeCancellation;
   final Map<String, Object?>? attachments;
+  final Map<String, Object?>? documentInput;
   final bool presence;
   final bool synchronization;
   final Map<String, Object?> resources;
   const HandrailGatewayCapabilities({
     required this.authoritativeCancellation,
     this.attachments,
+    this.documentInput,
     required this.presence,
     required this.synchronization,
     this.resources = const {},
@@ -26,6 +28,9 @@ class HandrailGatewayCapabilities {
         authoritativeCancellation: json['authoritativeCancellation'] == true,
         attachments: json['attachments'] is Map
             ? Map<String, Object?>.from(json['attachments'] as Map)
+            : null,
+        documentInput: json['documentInput'] is Map
+            ? Map<String, Object?>.unmodifiable(json['documentInput'] as Map)
             : null,
         presence: json['presence'] == true,
         synchronization: json['synchronization'] == true,

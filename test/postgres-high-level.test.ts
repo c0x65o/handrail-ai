@@ -1,13 +1,77 @@
 import { describe, expect, it } from "vitest";
-import { PostgresAiPersistence, PostgresConversationEventStore, type PostgresSqlClient } from "../src/postgres/index.js";
+import { PostgresAiPersistence, PostgresApprovalProposalStore, PostgresConversationCatalog, PostgresConversationEventStore, type PostgresSqlClient } from "../src/postgres/index.js";
+import { ConversationCatalogError } from "../src/index.js";
 import type { ConversationEvent, ConversationId } from "../src/index.js";
 
 describe("Postgres high-level adapters", () => {
+  it("durably creates proposal-only approvals and replays the exact idempotent result", async () => {
+    const idempotency = new Map<string, { fingerprint: string; result: unknown }>();
+    let approvalInserts = 0;
+    const query = async (sql: string, values: readonly unknown[] = []) => {
+      if (sql.includes("pg_advisory_xact_lock")) return { rows: [], rowCount: 1 };
+      if (sql.startsWith("SELECT fingerprint,result")) {
+        const row = idempotency.get(String(values[3])); return { rows: row ? [row] : [], rowCount: row ? 1 : 0 };
+      }
+      if (sql.startsWith("INSERT INTO handrail_ai_approvals")) { approvalInserts += 1; return { rows: [], rowCount: 1 }; }
+      if (sql.startsWith("INSERT INTO handrail_ai_idempotency")) {
+        idempotency.set(String(values[3]), { fingerprint: String(values[4]), result: JSON.parse(String(values[5])) });
+        return { rows: [], rowCount: 1 };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    };
+    const client: PostgresSqlClient = { query: query as PostgresSqlClient["query"], transaction: async (operation) => operation(client) };
+    const store = new PostgresApprovalProposalStore({ persistence: new PostgresAiPersistence(client), tenantId: "tenant-a",
+      scopeId: (actor: { companyId: string }) => actor.companyId,
+      authorize: async ({ permissionContext }) => permissionContext.companyId === "company-a" ? "allow" : "deny",
+      now: () => "2026-08-30T12:00:00.000Z" as never });
+    const request = { permissionContext: { companyId: "company-a" }, proposalId: "proposal-a" as never,
+      turnId: "turn-a" as never, toolCallId: "call-a" as never, toolName: "issue_invoice",
+      reviewedArguments: { type: "redacted_json" as const, value: { invoiceId: "invoice-a" } },
+      expiresAt: "2026-08-30T12:05:00.000Z" as never,
+      attribution: { actor: { type: "system" as const }, source: { type: "runtime" as const } },
+      idempotencyKey: "approval-a", idempotencyFingerprint: "fingerprint-a" };
+    await expect(store.create(request)).resolves.toMatchObject({ proposal_id: "proposal-a", status: "pending", proposal_version: 1 });
+    await expect(store.create(request)).resolves.toMatchObject({ proposal_id: "proposal-a", status: "pending" });
+    expect(approvalInserts).toBe(1);
+    await expect(store.create({ ...request, permissionContext: { companyId: "company-b" }, idempotencyKey: "denied" }))
+      .rejects.toMatchObject({ code: "permission_denied" });
+  });
+
+  it("authorizes catalog operations before durable lookup and retains idempotent create results", async () => {
+    const idempotency = new Map<string, { fingerprint: string; result: unknown }>();
+    const conversations: unknown[] = [];
+    const query = async (sql: string, values: readonly unknown[] = []) => {
+      if (sql.includes("pg_advisory_xact_lock")) return { rows: [], rowCount: 1 };
+      if (sql.startsWith("SELECT fingerprint,result")) {
+        const row = idempotency.get(String(values[3])); return { rows: row ? [row] : [], rowCount: row ? 1 : 0 };
+      }
+      if (sql.startsWith("INSERT INTO handrail_ai_conversations")) {
+        conversations.push(values); return { rows: [], rowCount: 1 };
+      }
+      if (sql.startsWith("INSERT INTO handrail_ai_idempotency")) {
+        idempotency.set(String(values[3]), { fingerprint: String(values[4]), result: JSON.parse(String(values[5])) });
+        return { rows: [], rowCount: 1 };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    };
+    const client: PostgresSqlClient = { query: query as PostgresSqlClient["query"], transaction: async (operation) => operation(client) };
+    const authorize = async ({ authorizationContext }: { authorizationContext: { companyId: string } }) =>
+      authorizationContext.companyId === "company-a" ? "allow" as const : "deny" as const;
+    const catalog = new PostgresConversationCatalog({ persistence: new PostgresAiPersistence(client), tenantId: "tenant-a",
+      scopeId: (actor: { companyId: string }) => actor.companyId, authorize, createId: () => "conversation-a" as ConversationId,
+      now: () => "2026-08-30T12:00:00.000Z" as never });
+    const request = { authorizationContext: { companyId: "company-a" }, title: "Aegis", idempotencyKey: "create-a" as never };
+    await expect(catalog.create(request)).resolves.toMatchObject({ status: "created", descriptor: { conversationId: "conversation-a", version: 1 } });
+    await expect(catalog.create(request)).resolves.toMatchObject({ status: "idempotent", descriptor: { conversationId: "conversation-a" } });
+    expect(conversations).toHaveLength(1);
+    await expect(catalog.create({ ...request, authorizationContext: { companyId: "company-b" }, idempotencyKey: "denied" as never }))
+      .rejects.toMatchObject({ code: "forbidden" });
+    await expect(catalog.create({ ...request, title: "Different" })).rejects.toBeInstanceOf(ConversationCatalogError);
+  });
+
   it("appends, idempotently reconciles, and cursor-reads canonical conversation events", async () => {
     const events: ConversationEvent[] = [];
-    const client: PostgresSqlClient = {
-      transaction: async (operation) => operation(client),
-      query: async (sql, values = []) => {
+    const query = async (sql: string, values: readonly unknown[] = []) => {
         if (sql.includes("pg_advisory_xact_lock")) return { rows: [], rowCount: 1 };
         if (sql.includes("event_id=ANY")) {
           const identifiers = values[1] as string[];
@@ -29,7 +93,10 @@ describe("Postgres high-level adapters", () => {
           return { rows: [], rowCount: 1 };
         }
         throw new Error(`Unexpected SQL: ${sql}`);
-      },
+      };
+    const client: PostgresSqlClient = {
+      transaction: async (operation) => operation(client),
+      query: query as PostgresSqlClient["query"],
     };
     const store = new PostgresConversationEventStore(new PostgresAiPersistence(client), "tenant-a");
     const conversationId = "conversation-a" as ConversationId;

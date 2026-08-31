@@ -19,6 +19,7 @@ Node.js 20 or newer is required for package tooling and trusted-server use.
 | `@handrail/ai/react` | Optional unstyled React bindings and accessible composition seams for chat, citations, conversation picking, approvals, transcription, and realtime voice | Browser/React; React is an optional peer |
 | `@handrail/ai/react/styled` | Optional responsive styled launcher/dialog/drawer/page preset | Browser/React; theme variables and renderers are application-owned |
 | `@handrail/ai/server/application-gateway` | Express-compatible adapter for the web-standard streaming gateway | Trusted application server only |
+| `@handrail/ai/server/application` | One-call trusted assembly for plugins, MCP connectors, policy, approvals, bounded tools, runtime, and gateway routing | Trusted application server only |
 | `@handrail/ai/server/managed` | Optional Handrail AI Runtime v1 streaming transport | Trusted server only |
 | `@handrail/ai/server/trusted-server` | Framework-neutral request protection contracts | Trusted server only |
 | `@handrail/ai/connectors/mcp` | Injected-client MCP tool-plugin/discovery adapter | Optional connector boundary |
@@ -121,7 +122,8 @@ reserved for the explicit Stop action. The fake transport and uploader are
 deterministic and perform no network, provider, or Handrail control-plane call.
 
 The unstyled entry injects no CSS, fonts, branding, layout, or theme. Applications
-that want a ready surface can import `StyledChatPreset` and
+that want a ready surface can import the one-component `HandrailChat` (runtime,
+uploader, and request builder in; complete chat surface out) or `StyledChatPreset` and
 `StyledChatPresetStyles` from `@handrail/ai/react/styled`; every visual can still
 be replaced through the unstyled entry, CSS custom properties, slots, and tool
 result renderer keys.
@@ -134,7 +136,9 @@ handling. `createApplicationGatewayTransport` supplies the matching browser or
 React Native transport, including protected-request hooks and negotiated Blob
 uploads. The server does not depend on Express; the optional structural adapter
 and [`examples/trusted-server-application-gateway-express.ts`](./examples/trusted-server-application-gateway-express.ts)
-show an Express mount.
+show an Express mount. `createApplicationGatewayResourceClient` adds typed
+conversation lifecycle, approval, synchronization, and title APIs; attachment,
+presence, and turn streaming remain negotiated transport capabilities.
 
 See [`docs/wire-protocol.md`](./docs/wire-protocol.md) for the language-neutral
 contract and `flutter/handrail_ai_client` for the tested Dart implementation.

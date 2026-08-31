@@ -1,6 +1,6 @@
 # Platform contracts and package boundaries
 
-The stable contract versions introduced by this platform layer are `handrail.tool-plugin.v1`, `handrail.deferred-tools.v1`, `handrail.mcp-connector.v1`, `handrail.application-gateway.v1`, `handrail.live-presence.v1`, and Postgres schema version 1. Patch releases may add optional fields and event kinds. Breaking field meaning, removal, or wire changes require a new version string/export and a migration window.
+The stable contract versions introduced by this platform layer are `handrail.tool-plugin.v1`, `handrail.ai-application.v1`, `handrail.deferred-tools.v1`, `handrail.mcp-connector.v1`, `handrail.application-gateway.v1`, `handrail.live-presence.v1`, and Postgres schema version 1. Patch releases may add optional fields and event kinds. Breaking field meaning, removal, or wire changes require a new version string/export and a migration window.
 
 ## Boundaries
 
@@ -8,13 +8,14 @@ The stable contract versions introduced by this platform layer are `handrail.too
 - `@handrail/ai/client` is React-free and usable by browser/React Native environments.
 - `@handrail/ai/react` remains unstyled; `@handrail/ai/react/styled` is optional and fully themeable.
 - `@handrail/ai/server/application-gateway` adapts web-standard handlers to Express-like servers without depending on Express.
+- `@handrail/ai/server/application` is the trusted assembly closure for plugins, connectors, host/plugin policy, approvals, bounded execution, runtime, and gateway creation. Its client catalog is data-only.
 - `@handrail/ai/connectors/mcp` depends only on an injected MCP client subset.
 - `@handrail/ai/persistence/postgres` depends only on an injected SQL client subset.
 - Provider-specific payloads stay in provider entry points. Database, UI, provider, MCP, and application framework packages must never be imported by the runtime-neutral core.
 
 ## Capability negotiation
 
-Clients call `/capabilities` before enabling cancellation, attachments, presence, or synchronization. Unsupported capabilities must not expose callable adapters. Attachment media types and byte/file limits are server authority; client checks are only UX. A protocol version mismatch fails closed.
+Clients call `/capabilities` before enabling cancellation, PDF/document input, attachments, presence, synchronization, conversation resources, approvals, or title generation. Unsupported capabilities must not expose callable adapters. Attachment media types and byte/file limits are server authority; client checks are only UX. A protocol version mismatch fails closed.
 
 ## Security and privacy
 
@@ -23,3 +24,5 @@ Applications own authentication, conversation/tenant authorization, CSRF/origin 
 Disconnecting a stream is not cancellation. Cancellation uses its own authorized, idempotent mutation. Resume only from a checkpoint durably applied on that device. Presence/typing is expiring and non-authoritative and must not enter transcripts, checkpoints, retention exports, or audit claims. Durable events, proposals, and execution results require tenant-scoped keys, atomic optimistic concurrency, defensive parsing, bounded reads, and encrypted transport/storage supplied by the host.
 
 Postgres migrations run under an application-controlled role. Production deployments should add retention/partition policies, backups/PITR, monitoring, connection deadlines, row-level security where appropriate, and a transaction wrapper that guarantees rollback. The reference adapter never interpolates identifiers or values into data queries.
+
+The high-level Postgres adapters bind one authenticated tenant/scope, validate canonical records, use optimistic versions and durable idempotency identities, and normalize domain conflicts. The host still owns pool sizing, statement/transaction deadlines, migrations, encryption, RLS, retention, backups, observability, and mapping authenticated actors to tenant/scope IDs.

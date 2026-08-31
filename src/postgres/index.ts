@@ -25,7 +25,7 @@ import {
   ConversationCatalogError, createConversationCatalogCursor,
   parseArchiveConversationInput, parseClearConversationInput, parseCreateConversationInput,
   parseGetConversationInput, parseListConversationsInput, parsePermanentlyDeleteConversationInput,
-  parseRenameConversationInput, parseRestoreConversationInput,
+  parseRenameConversationInput, parseRestoreConversationInput, parseConversationCatalogDescriptor,
   type ActiveConversationCatalogDescriptor, type ArchiveConversationResult,
   type ArchivedConversationCatalogDescriptor, type ClearConversationResult,
   type ConversationCatalog, type ConversationCatalogAuthorizer, type ConversationCatalogDescriptor,
@@ -34,6 +34,15 @@ import {
   type RenameConversationResult, type RestoreConversationResult,
 } from "../conversation/catalog.js";
 import type { ConversationTimestamp } from "../conversation/events.js";
+import {
+  ApprovalProposalStoreError,
+  type ApprovalProposalPermissionCheck, type ApprovalProposalStore,
+  type CreateApprovalProposalInput, type GetApprovalProposalInput,
+  type ListApprovalProposalGroupInput, type TransitionApprovalProposalInput,
+} from "../conversation/approval-proposal-store.js";
+import { isConversationApprovalReason, isConversationApprovalReviewedArguments,
+  isLegalConversationApprovalProposalTransition } from "../conversation/events.js";
+import type { ConversationApprovalProposalRecord, ConversationEventAttribution } from "../conversation/state.js";
 
 export const POSTGRES_PERSISTENCE_SCHEMA_VERSION = 1 as const;
 
@@ -58,6 +67,8 @@ export const handrailPostgresSchemaV1 = Object.freeze([
   `CREATE TABLE IF NOT EXISTS handrail_ai_idempotency (tenant_id text NOT NULL, domain text NOT NULL, scope_id text NOT NULL, idempotency_key text NOT NULL, fingerprint text NOT NULL, result jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (tenant_id, domain, scope_id, idempotency_key))`,
   `CREATE TABLE IF NOT EXISTS handrail_ai_conversations (tenant_id text NOT NULL, scope_id text NOT NULL, conversation_id text NOT NULL, lifecycle text NOT NULL CHECK (lifecycle IN ('active','archived')), title text, created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL, archived_at timestamptz, version bigint NOT NULL, metadata jsonb NOT NULL, PRIMARY KEY (tenant_id, scope_id, conversation_id))`,
   `CREATE INDEX IF NOT EXISTS handrail_ai_conversations_updated ON handrail_ai_conversations (tenant_id, scope_id, lifecycle, updated_at DESC, conversation_id)`,
+  `CREATE TABLE IF NOT EXISTS handrail_ai_approvals (tenant_id text NOT NULL, scope_id text NOT NULL, proposal_id text NOT NULL, group_id text, version bigint NOT NULL, payload jsonb NOT NULL, updated_at timestamptz NOT NULL, PRIMARY KEY (tenant_id, scope_id, proposal_id))`,
+  `CREATE INDEX IF NOT EXISTS handrail_ai_approvals_group ON handrail_ai_approvals (tenant_id, scope_id, group_id, updated_at, proposal_id)`,
 ] as const);
 
 export type PostgresDocumentKind = "checkpoint" | "catalog" | "approval" | "turn_state" | "sync_state";
@@ -446,3 +457,361 @@ export class PostgresConversationEventStore implements ConversationEventStore {
     }
   }
 }
+
+export interface PostgresConversationCatalogOptions<TAuthorizationContext> {
+  readonly persistence: PostgresAiPersistence;
+  readonly tenantId: string;
+  /** Stable company/user ownership scope derived only after authentication. */
+  readonly scopeId: (context: TAuthorizationContext) => string;
+  readonly authorize: ConversationCatalogAuthorizer<TAuthorizationContext>;
+  readonly createId: () => ConversationId;
+  readonly now?: () => ConversationTimestamp;
+  /** Runs in the same SQL transaction before the catalog clear is committed. */
+  readonly clearContents?: (input: { readonly client: PostgresSqlClient; readonly tenantId: string;
+    readonly scopeId: string; readonly conversationId: ConversationId }) => Promise<void>;
+  /** Runs in the same SQL transaction before permanent catalog deletion. */
+  readonly permanentlyDeleteContents?: (input: { readonly client: PostgresSqlClient; readonly tenantId: string;
+    readonly scopeId: string; readonly conversationId: ConversationId }) => Promise<void>;
+}
+
+interface PostgresCatalogRow extends Record<string, unknown> {
+  readonly conversation_id: string;
+  readonly lifecycle: "active" | "archived";
+  readonly title: string | null;
+  readonly created_at: string | Date;
+  readonly updated_at: string | Date;
+  readonly archived_at: string | Date | null;
+  readonly version: string;
+  readonly metadata: Record<string, unknown>;
+}
+
+function timestamp(value: string | Date): ConversationTimestamp {
+  return (value instanceof Date ? value : new Date(value)).toISOString() as ConversationTimestamp;
+}
+
+function catalogDescriptor(row: PostgresCatalogRow): ConversationCatalogDescriptor {
+  const common = { conversationId: row.conversation_id as ConversationId, title: row.title,
+    createdAt: timestamp(row.created_at), updatedAt: timestamp(row.updated_at),
+    version: Number(row.version) as ConversationCatalogVersion, metadata: jsonClone(row.metadata) };
+  return parseConversationCatalogDescriptor(row.lifecycle === "active"
+    ? { ...common, lifecycle: "active", archivedAt: null }
+    : { ...common, lifecycle: "archived", archivedAt: timestamp(row.archived_at!) });
+}
+
+function catalogFingerprint(operation: string, value: unknown): string {
+  return `${operation}:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
+}
+
+function cursorValues(cursor: string): { readonly primary: string; readonly conversationId: string } {
+  const parts = cursor.split("|");
+  return { primary: decodeURIComponent(parts[3]!), conversationId: decodeURIComponent(parts[4]!) };
+}
+
+/** Production catalog with authorization-before-lookup, keyset pages, CAS, and durable idempotency. */
+export class PostgresConversationCatalog<TAuthorizationContext> implements ConversationCatalog<TAuthorizationContext> {
+  readonly capabilities = Object.freeze({ rename: { supported: true as const }, clear: { supported: true as const },
+    archive: { supported: true as const }, restore: { supported: true as const }, permanentDelete: { supported: true as const } });
+  readonly #now: () => ConversationTimestamp;
+  constructor(readonly options: PostgresConversationCatalogOptions<TAuthorizationContext>) {
+    id(options.tenantId, "tenantId"); this.#now = options.now ?? (() => new Date().toISOString() as ConversationTimestamp);
+  }
+
+  async list(value: Parameters<ConversationCatalog<TAuthorizationContext>["list"]>[0]): Promise<ListConversationsResult> {
+    const input = parseListConversationsInput<TAuthorizationContext>(value); await this.allowed({ action: "list", authorizationContext: input.authorizationContext });
+    const scope = id(this.options.scopeId(input.authorizationContext), "scopeId");
+    const cursor = input.cursor ? cursorValues(input.cursor) : null;
+    const primary = input.order.field === "updated_at" ? "updated_at" : "created_at";
+    const comparison = input.order.direction === "asc" ? ">" : "<";
+    const order = input.order.direction === "asc" ? "ASC" : "DESC";
+    const values: unknown[] = [this.options.tenantId, scope, input.pageSize + 1];
+    let lifecycleSql = "", cursorSql = "";
+    if (input.lifecycle !== "all") { values.push(input.lifecycle); lifecycleSql = ` AND lifecycle=$${values.length}`; }
+    if (cursor) {
+      const primaryIndex = values.length + 1, idIndex = values.length + 2;
+      values.push(cursor.primary, cursor.conversationId);
+      cursorSql = ` AND (${primary}${comparison}$${primaryIndex} OR (${primary}=$${primaryIndex} AND conversation_id>$${idIndex}))`;
+    }
+    const rows = await this.options.persistence.client.query<PostgresCatalogRow>(
+      `SELECT conversation_id,lifecycle,title,created_at,updated_at,archived_at,version::text AS version,metadata FROM handrail_ai_conversations WHERE tenant_id=$1 AND scope_id=$2${lifecycleSql}${cursorSql} ORDER BY ${primary} ${order},conversation_id ASC LIMIT $3`,
+      values,
+    );
+    const items = Object.freeze(rows.rows.slice(0, input.pageSize).map(catalogDescriptor));
+    const hasMore = rows.rows.length > input.pageSize, final = items.at(-1);
+    return Object.freeze({ items, hasMore, nextCursor: hasMore && final ? createConversationCatalogCursor(final, input.order) : null,
+      order: input.order });
+  }
+
+  async create(value: Parameters<ConversationCatalog<TAuthorizationContext>["create"]>[0]): Promise<CreateConversationResult> {
+    const input = parseCreateConversationInput<TAuthorizationContext>(value); await this.allowed({ action: "create", authorizationContext: input.authorizationContext,
+      ...(input.conversationId ? { conversationId: input.conversationId } : {}) });
+    const scope = id(this.options.scopeId(input.authorizationContext), "scopeId");
+    const fingerprint = catalogFingerprint("create", { conversationId: input.conversationId ?? null, title: input.title ?? null, metadata: input.metadata ?? {} });
+    try {
+      const retained = await this.options.persistence.getOrCreateIdempotent({ tenantId: this.options.tenantId, domain: "catalog.create", scopeId: scope,
+        idempotencyKey: input.idempotencyKey, fingerprint, execute: async (tx) => {
+          const conversationId = input.conversationId ?? this.options.createId(); const now = this.#now();
+          const descriptor: ActiveConversationCatalogDescriptor = Object.freeze({ conversationId, title: input.title ?? null,
+            createdAt: now, updatedAt: now, version: 1 as ConversationCatalogVersion, metadata: input.metadata ?? {}, lifecycle: "active", archivedAt: null });
+          await tx.query("INSERT INTO handrail_ai_conversations (tenant_id,scope_id,conversation_id,lifecycle,title,created_at,updated_at,archived_at,version,metadata) VALUES ($1,$2,$3,'active',$4,$5,$5,NULL,1,$6::jsonb)",
+            [this.options.tenantId, scope, conversationId, descriptor.title, now, JSON.stringify(descriptor.metadata)]);
+          return descriptor;
+        } });
+      return Object.freeze({ operation: "create", status: retained.status === "created" ? "created" : "idempotent", descriptor: retained.value });
+    } catch (error) { throw this.idempotencyError(error, "create"); }
+  }
+
+  async get(value: Parameters<ConversationCatalog<TAuthorizationContext>["get"]>[0]): Promise<GetConversationResult> {
+    const input = parseGetConversationInput<TAuthorizationContext>(value); await this.allowed({ action: "get", authorizationContext: input.authorizationContext,
+      conversationId: input.conversationId });
+    const descriptor = await this.lookup(this.options.persistence.client, this.options.scopeId(input.authorizationContext), input.conversationId);
+    if (!descriptor) throw new ConversationCatalogError("not_found", "get");
+    return Object.freeze({ operation: "get", status: "found", descriptor });
+  }
+
+  rename(value: Parameters<ConversationCatalog<TAuthorizationContext>["rename"]>[0]): Promise<RenameConversationResult> {
+    const input = parseRenameConversationInput<TAuthorizationContext>(value);
+    return this.mutate("rename", input, (current, now) => ({ ...current, title: input.title, updatedAt: now }), "updated");
+  }
+  clear(value: Parameters<ConversationCatalog<TAuthorizationContext>["clear"]>[0]): Promise<ClearConversationResult> {
+    const input = parseClearConversationInput<TAuthorizationContext>(value);
+    return this.mutate("clear", input, (current, now) => ({ ...current, updatedAt: now }), "cleared", this.options.clearContents) as Promise<ClearConversationResult>;
+  }
+  archive(value: Parameters<ConversationCatalog<TAuthorizationContext>["archive"]>[0]): Promise<ArchiveConversationResult> {
+    const input = parseArchiveConversationInput<TAuthorizationContext>(value);
+    return this.mutate("archive", input, (current, now) => ({ ...current, lifecycle: "archived", archivedAt: now, updatedAt: now }), "archived") as Promise<ArchiveConversationResult>;
+  }
+  restore(value: Parameters<ConversationCatalog<TAuthorizationContext>["restore"]>[0]): Promise<RestoreConversationResult> {
+    const input = parseRestoreConversationInput<TAuthorizationContext>(value);
+    return this.mutate("restore", input, (current, now) => ({ ...current, lifecycle: "active", archivedAt: null, updatedAt: now }), "restored") as Promise<RestoreConversationResult>;
+  }
+
+  async permanentlyDelete(value: Parameters<ConversationCatalog<TAuthorizationContext>["permanentlyDelete"]>[0]): Promise<PermanentlyDeleteConversationResult> {
+    const input = parsePermanentlyDeleteConversationInput<TAuthorizationContext>(value); await this.allowed({ action: "permanent_delete",
+      authorizationContext: input.authorizationContext, conversationId: input.conversationId });
+    const scope = id(this.options.scopeId(input.authorizationContext), "scopeId");
+    const deleteFingerprint = catalogFingerprint("permanent_delete", {
+      conversationId: input.conversationId, expectedVersion: input.expectedVersion,
+    });
+    try {
+      const retained = await this.options.persistence.getOrCreateIdempotent({ tenantId: this.options.tenantId, domain: "catalog.permanent_delete",
+        scopeId: scope, idempotencyKey: input.idempotencyKey, fingerprint: deleteFingerprint, execute: async (tx) => {
+          const current = await this.lookup(tx, scope, input.conversationId, true);
+          if (!current) throw new ConversationCatalogError("not_found", "permanent_delete");
+          if (current.version !== input.expectedVersion) throw new ConversationCatalogError("version_conflict", "permanent_delete");
+          await this.options.permanentlyDeleteContents?.({ client: tx, tenantId: this.options.tenantId, scopeId: scope, conversationId: input.conversationId });
+          const deleted = await tx.query("DELETE FROM handrail_ai_conversations WHERE tenant_id=$1 AND scope_id=$2 AND conversation_id=$3 AND version=$4",
+            [this.options.tenantId, scope, input.conversationId, input.expectedVersion]);
+          if (deleted.rowCount !== 1) throw new ConversationCatalogError("version_conflict", "permanent_delete");
+          return { conversationId: input.conversationId, deletedVersion: input.expectedVersion };
+        } });
+      return Object.freeze({ operation: "permanent_delete", status: retained.status === "created" ? "deleted" : "idempotent", ...retained.value });
+    } catch (error) { throw this.idempotencyError(error, "permanent_delete"); }
+  }
+
+  private async mutate(operation: "rename" | "clear" | "archive" | "restore", input: { authorizationContext: TAuthorizationContext;
+    conversationId: ConversationId; expectedVersion: ConversationCatalogVersion; idempotencyKey: string },
+    update: (current: ConversationCatalogDescriptor, now: ConversationTimestamp) => ConversationCatalogDescriptor,
+    success: "updated" | "cleared" | "archived" | "restored",
+    contents?: PostgresConversationCatalogOptions<TAuthorizationContext>["clearContents"]): Promise<any> {
+    await this.allowed({ action: operation, authorizationContext: input.authorizationContext, conversationId: input.conversationId });
+    const scope = id(this.options.scopeId(input.authorizationContext), "scopeId");
+    const logicalInput = { ...input } as Record<string, unknown>;
+    delete logicalInput.authorizationContext;
+    try {
+      const retained = await this.options.persistence.getOrCreateIdempotent({ tenantId: this.options.tenantId, domain: `catalog.${operation}`,
+        scopeId: scope, idempotencyKey: input.idempotencyKey, fingerprint: catalogFingerprint(operation, logicalInput), execute: async (tx) => {
+          const current = await this.lookup(tx, scope, input.conversationId, true);
+          if (!current) throw new ConversationCatalogError("not_found", operation);
+          if (current.version !== input.expectedVersion) throw new ConversationCatalogError("version_conflict", operation);
+          if (operation === "archive" && current.lifecycle !== "active" || operation === "restore" && current.lifecycle !== "archived" || operation === "clear" && current.lifecycle !== "active") {
+            throw new ConversationCatalogError("invalid_input", operation);
+          }
+          await contents?.({ client: tx, tenantId: this.options.tenantId, scopeId: scope, conversationId: input.conversationId });
+          const next = { ...update(current, this.#now()), version: (current.version + 1) as ConversationCatalogVersion } as ConversationCatalogDescriptor;
+          const changed = await tx.query("UPDATE handrail_ai_conversations SET lifecycle=$5,title=$6,updated_at=$7,archived_at=$8,version=$9,metadata=$10::jsonb WHERE tenant_id=$1 AND scope_id=$2 AND conversation_id=$3 AND version=$4",
+            [this.options.tenantId, scope, input.conversationId, input.expectedVersion, next.lifecycle, next.title, next.updatedAt, next.archivedAt, next.version, JSON.stringify(next.metadata)]);
+          if (changed.rowCount !== 1) throw new ConversationCatalogError("version_conflict", operation);
+          return next;
+        } });
+      return Object.freeze({ operation, status: retained.status === "created" ? success : "idempotent", descriptor: retained.value });
+    } catch (error) { throw this.idempotencyError(error, operation); }
+  }
+
+  private async lookup(client: PostgresSqlClient, scope: string, conversationId: ConversationId, lock = false): Promise<ConversationCatalogDescriptor | null> {
+    const result = await client.query<PostgresCatalogRow>(
+      `SELECT conversation_id,lifecycle,title,created_at,updated_at,archived_at,version::text AS version,metadata FROM handrail_ai_conversations WHERE tenant_id=$1 AND scope_id=$2 AND conversation_id=$3${lock ? " FOR UPDATE" : ""}`,
+      [this.options.tenantId, id(scope, "scopeId"), conversationId],
+    );
+    return result.rows[0] ? catalogDescriptor(result.rows[0]) : null;
+  }
+  private async allowed(request: Parameters<ConversationCatalogAuthorizer<TAuthorizationContext>>[0]): Promise<void> {
+    if (await this.options.authorize(request) !== "allow") throw new ConversationCatalogError("forbidden", request.action);
+  }
+  private idempotencyError(error: unknown, operation: Parameters<ConversationCatalogAuthorizer<TAuthorizationContext>>[0]["action"]): unknown {
+    if (error instanceof ConversationCatalogError) return error;
+    if (error instanceof PostgresPersistenceConflictError) return new ConversationCatalogError("idempotency_conflict", operation);
+    return new ConversationCatalogError("unavailable", operation);
+  }
+}
+
+export interface PostgresApprovalProposalStoreOptions<TPermissionContext> {
+  readonly persistence: PostgresAiPersistence;
+  readonly tenantId: string;
+  readonly scopeId: (context: TPermissionContext) => string;
+  readonly authorize: ApprovalProposalPermissionCheck<TPermissionContext>;
+  readonly now?: () => ConversationTimestamp;
+  readonly expiryAttribution?: ConversationEventAttribution;
+}
+
+const POSTGRES_EXPIRY_ATTRIBUTION = Object.freeze({ actor: { type: "system" as const }, source: { type: "runtime" as const } });
+
+function approvalId(value: unknown, operation: "create" | "get" | "list_group" | "transition"): string {
+  if (typeof value !== "string" || value.length < 1 || value.length > 256) throw new ApprovalProposalStoreError("invalid_input", operation);
+  return value;
+}
+
+function approvalRecord(value: unknown, operation: "create" | "get" | "list_group" | "transition"): ConversationApprovalProposalRecord {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new ApprovalProposalStoreError("unavailable", operation);
+  return jsonClone(value) as ConversationApprovalProposalRecord;
+}
+
+function approvalTransition(current: ConversationApprovalProposalRecord, input: TransitionApprovalProposalInput<unknown>,
+  now: ConversationTimestamp): ConversationApprovalProposalRecord {
+  const decision = ["confirmed", "rejected", "expired"].includes(input.status);
+  return jsonClone({ ...current, status: input.status, proposal_version: current.proposal_version + 1,
+    updated_at: now, latest_attribution: input.attribution,
+    decision_at: decision ? now : current.decision_at,
+    decision_attribution: decision ? input.attribution : current.decision_attribution,
+    decision_reason: decision ? input.decisionReason ?? null : current.decision_reason,
+    failure_reason: input.status === "failed" ? input.failureReason! : input.status === "executing" ? null : current.failure_reason });
+}
+
+/** Durable approval proposals; authorization runs before every identifier lookup. */
+export class PostgresApprovalProposalStore<TPermissionContext> implements ApprovalProposalStore<TPermissionContext> {
+  readonly #now: () => ConversationTimestamp;
+  readonly #expiryAttribution: ConversationEventAttribution;
+  constructor(readonly options: PostgresApprovalProposalStoreOptions<TPermissionContext>) {
+    id(options.tenantId, "tenantId"); this.#now = options.now ?? (() => new Date().toISOString() as ConversationTimestamp);
+    this.#expiryAttribution = options.expiryAttribution ?? POSTGRES_EXPIRY_ATTRIBUTION;
+  }
+
+  async create(input: CreateApprovalProposalInput<TPermissionContext>): Promise<ConversationApprovalProposalRecord> {
+    approvalId(input.proposalId, "create"); approvalId(input.turnId, "create"); approvalId(input.toolCallId, "create"); approvalId(input.toolName, "create");
+    if (input.groupId !== undefined) approvalId(input.groupId, "create");
+    if (!isConversationApprovalReviewedArguments(input.reviewedArguments) || input.attribution.actor.type !== "system" ||
+      !Number.isFinite(Date.parse(input.expiresAt)) || !this.validIdempotency(input)) throw new ApprovalProposalStoreError("invalid_input", "create");
+    await this.allowed({ operation: "create", permissionContext: input.permissionContext, proposalId: input.proposalId,
+      ...(input.groupId ? { groupId: input.groupId } : {}) });
+    const scope = id(this.options.scopeId(input.permissionContext), "scopeId"), now = this.#now();
+    if (Date.parse(input.expiresAt) <= Date.parse(now)) throw new ApprovalProposalStoreError("invalid_input", "create");
+    const logical = { proposalId: input.proposalId, groupId: input.groupId ?? null, turnId: input.turnId,
+      toolCallId: input.toolCallId, toolName: input.toolName, reviewedArguments: input.reviewedArguments,
+      expiresAt: input.expiresAt, attribution: input.attribution };
+    try {
+      const retained = await this.options.persistence.getOrCreateIdempotent({ tenantId: this.options.tenantId,
+        domain: "approval.create", scopeId: scope, idempotencyKey: input.idempotencyKey,
+        fingerprint: catalogFingerprint(input.idempotencyFingerprint, logical), execute: async (tx) => {
+          const record = approvalRecord({ proposal_id: input.proposalId, group_id: input.groupId ?? null,
+            turn_id: input.turnId, tool_call_id: input.toolCallId, tool_name: input.toolName,
+            reviewed_arguments: input.reviewedArguments, status: "pending", proposal_version: 1,
+            expires_at: input.expiresAt, created_at: now, updated_at: now,
+            created_attribution: input.attribution, latest_attribution: input.attribution,
+            decision_at: null, decision_attribution: null, decision_reason: null, failure_reason: null }, "create");
+          await tx.query("INSERT INTO handrail_ai_approvals (tenant_id,scope_id,proposal_id,group_id,version,payload,updated_at) VALUES ($1,$2,$3,$4,1,$5::jsonb,$6)",
+            [this.options.tenantId, scope, input.proposalId, input.groupId ?? null, JSON.stringify(record), now]);
+          return record;
+        } });
+      return approvalRecord(retained.value, "create");
+    } catch (error) { throw this.conflict(error, "create"); }
+  }
+
+  async get(input: GetApprovalProposalInput<TPermissionContext>): Promise<ConversationApprovalProposalRecord | null> {
+    approvalId(input.proposalId, "get"); await this.allowed({ operation: "get", permissionContext: input.permissionContext, proposalId: input.proposalId });
+    const scope = id(this.options.scopeId(input.permissionContext), "scopeId");
+    return this.options.persistence.client.transaction(async (tx) => {
+      const current = await this.lookup(tx, scope, input.proposalId, true);
+      return current ? this.expireIfDue(tx, scope, current) : null;
+    });
+  }
+
+  async listGroup(input: ListApprovalProposalGroupInput<TPermissionContext>): Promise<readonly ConversationApprovalProposalRecord[]> {
+    approvalId(input.groupId, "list_group"); await this.allowed({ operation: "list_group", permissionContext: input.permissionContext, groupId: input.groupId });
+    const scope = id(this.options.scopeId(input.permissionContext), "scopeId");
+    return this.options.persistence.client.transaction(async (tx) => {
+      const result = await tx.query<{ payload: unknown }>("SELECT payload FROM handrail_ai_approvals WHERE tenant_id=$1 AND scope_id=$2 AND group_id=$3 ORDER BY updated_at,proposal_id FOR UPDATE",
+        [this.options.tenantId, scope, input.groupId]);
+      const records: ConversationApprovalProposalRecord[] = [];
+      for (const row of result.rows) records.push(await this.expireIfDue(tx, scope, approvalRecord(row.payload, "list_group")));
+      return Object.freeze(records);
+    });
+  }
+
+  async transition(input: TransitionApprovalProposalInput<TPermissionContext>): Promise<ConversationApprovalProposalRecord> {
+    approvalId(input.proposalId, "transition");
+    if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1 || !this.validIdempotency(input) ||
+      !["confirmed", "rejected", "expired", "executing", "executed", "failed"].includes(input.status) ||
+      (input.decisionReason !== undefined && (!["confirmed", "rejected", "expired"].includes(input.status) ||
+        !isConversationApprovalReason(input.decisionReason))) ||
+      (input.status === "failed" ? !isConversationApprovalReason(input.failureReason) : input.failureReason !== undefined)) {
+      throw new ApprovalProposalStoreError("invalid_input", "transition");
+    }
+    await this.allowed({ operation: "transition", permissionContext: input.permissionContext,
+      proposalId: input.proposalId, targetStatus: input.status });
+    const scope = id(this.options.scopeId(input.permissionContext), "scopeId");
+    const logical = { proposalId: input.proposalId, expectedVersion: input.expectedVersion, status: input.status,
+      attribution: input.attribution, decisionReason: input.decisionReason ?? null, failureReason: input.failureReason ?? null };
+    try {
+      const retained = await this.options.persistence.getOrCreateIdempotent({ tenantId: this.options.tenantId,
+        domain: "approval.transition", scopeId: scope, idempotencyKey: input.idempotencyKey,
+        fingerprint: catalogFingerprint(input.idempotencyFingerprint, logical), execute: async (tx) => {
+          const current = await this.lookup(tx, scope, input.proposalId, true);
+          if (!current) throw new ApprovalProposalStoreError("not_found", "transition");
+          if (current.proposal_version !== input.expectedVersion) throw new ApprovalProposalStoreError("version_conflict", "transition");
+          const now = this.#now(), expired = Date.parse(now) >= Date.parse(current.expires_at);
+          if (input.status === "expired" && !expired) throw new ApprovalProposalStoreError("not_expired", "transition");
+          if ((current.status === "pending" && expired && input.status !== "expired") ||
+            (input.status === "executing" && expired) || !isLegalConversationApprovalProposalTransition(current.status, input.status)) {
+            throw new ApprovalProposalStoreError("invalid_transition", "transition");
+          }
+          if (["expired", "executing", "executed", "failed"].includes(input.status) && input.attribution.actor.type !== "system" ||
+            ["confirmed", "rejected"].includes(input.status) && !["user", "system"].includes(input.attribution.actor.type)) {
+            throw new ApprovalProposalStoreError("invalid_input", "transition");
+          }
+          const next = approvalTransition(current, input as TransitionApprovalProposalInput<unknown>, now);
+          const updated = await tx.query("UPDATE handrail_ai_approvals SET version=$4,payload=$5::jsonb,updated_at=$6 WHERE tenant_id=$1 AND scope_id=$2 AND proposal_id=$3 AND version=$7",
+            [this.options.tenantId, scope, input.proposalId, next.proposal_version, JSON.stringify(next), now, input.expectedVersion]);
+          if (updated.rowCount !== 1) throw new ApprovalProposalStoreError("version_conflict", "transition");
+          return next;
+        } });
+      return approvalRecord(retained.value, "transition");
+    } catch (error) { throw this.conflict(error, "transition"); }
+  }
+
+  private async lookup(client: PostgresSqlClient, scope: string, proposalId: string, lock: boolean): Promise<ConversationApprovalProposalRecord | null> {
+    const result = await client.query<{ payload: unknown }>(`SELECT payload FROM handrail_ai_approvals WHERE tenant_id=$1 AND scope_id=$2 AND proposal_id=$3${lock ? " FOR UPDATE" : ""}`,
+      [this.options.tenantId, scope, proposalId]);
+    return result.rows[0] ? approvalRecord(result.rows[0].payload, "get") : null;
+  }
+  private async expireIfDue(tx: PostgresSqlClient, scope: string, current: ConversationApprovalProposalRecord): Promise<ConversationApprovalProposalRecord> {
+    const now = this.#now();
+    if (current.status !== "pending" || Date.parse(now) < Date.parse(current.expires_at)) return current;
+    const next = approvalTransition(current, { status: "expired", attribution: this.#expiryAttribution } as TransitionApprovalProposalInput<unknown>, now);
+    await tx.query("UPDATE handrail_ai_approvals SET version=$4,payload=$5::jsonb,updated_at=$6 WHERE tenant_id=$1 AND scope_id=$2 AND proposal_id=$3 AND version=$7",
+      [this.options.tenantId, scope, current.proposal_id, next.proposal_version, JSON.stringify(next), now, current.proposal_version]);
+    return next;
+  }
+  private validIdempotency(input: { idempotencyKey: string; idempotencyFingerprint: string }): boolean {
+    return /^[a-z0-9][a-z0-9._:/-]*$/iu.test(input.idempotencyKey) && input.idempotencyKey.length <= 256 &&
+      /^[a-z0-9][a-z0-9._:/-]*$/iu.test(input.idempotencyFingerprint) && input.idempotencyFingerprint.length <= 256;
+  }
+  private async allowed(request: Parameters<ApprovalProposalPermissionCheck<TPermissionContext>>[0]): Promise<void> {
+    try { if (await this.options.authorize(request) === "allow") return; } catch { /* denial */ }
+    throw new ApprovalProposalStoreError("permission_denied", request.operation);
+  }
+  private conflict(error: unknown, operation: "create" | "transition"): unknown {
+    if (error instanceof ApprovalProposalStoreError) return error;
+    if (error instanceof PostgresPersistenceConflictError) return new ApprovalProposalStoreError("idempotency_conflict", operation);
+    return new ApprovalProposalStoreError("unavailable", operation);
+  }
+}
+import { createHash } from "node:crypto";

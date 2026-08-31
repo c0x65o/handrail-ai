@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createApplicationGateway,
   createApplicationGatewayTransport,
+  createApplicationGatewayResourceClient,
   negotiateApplicationGatewayCapabilities,
   type ConversationTransport,
   type TurnObservation,
@@ -25,6 +26,32 @@ function point(event: Event): TurnResumePoint {
 }
 
 describe("application-owned gateway transport", () => {
+  it("injects server authorization into typed conversation resources", async () => {
+    const create = vi.fn(async (input: { authorizationContext: { companyId: string }; title?: string }) => ({
+      operation: "create" as const, status: "created" as const,
+      descriptor: { conversationId: "conversation-1", title: input.title ?? null,
+        createdAt: "2026-08-30T12:00:00.000Z", updatedAt: "2026-08-30T12:00:00.000Z", version: 1,
+        metadata: { company: input.authorizationContext.companyId }, lifecycle: "active" as const, archivedAt: null },
+    }));
+    const gateway = createApplicationGateway({
+      transport: { capabilities: { authoritativeCancellation: { supported: false }, documentInput: { supported: false },
+        attachmentUpload: { supported: false }, presence: { supported: false }, synchronization: { supported: false } } } as ConversationTransport<Event>,
+      authorize: async () => ({ principalId: "user-1", companyId: "company-authoritative" }), checkpointForEvent: point,
+      conversations: { create, capabilities: {} } as never,
+    });
+    const fetch = (input: string | URL | Request, init?: RequestInit) => gateway.handle(new Request(input, init));
+    const client = createApplicationGatewayResourceClient({ baseUrl: "https://app.test/ai", fetch });
+    await expect(client.createConversation({ title: "Aegis", idempotencyKey: "create-1" as never }))
+      .resolves.toMatchObject({ descriptor: { metadata: { company: "company-authoritative" } } });
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ authorizationContext: expect.objectContaining({ companyId: "company-authoritative" }) }));
+
+    const malicious = await gateway.handle(new Request("https://app.test/ai/conversations/create", { method: "POST",
+      headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "Bad", idempotencyKey: "create-2",
+        authorizationContext: { companyId: "company-attacker" } }) }));
+    expect(malicious.status).toBe(200);
+    expect(create).toHaveBeenLastCalledWith(expect.objectContaining({ authorizationContext: expect.objectContaining({ companyId: "company-authoritative" }) }));
+  });
+
   it("negotiates capabilities, streams events, resumes, and cancels authoritatively", async () => {
     const cancelTurn = vi.fn(async () => ({ ok: true as const, value: { status: "cancellation_requested" as const } }));
     const serverTransport: ConversationTransport<Event, { prompt: string }> = {
