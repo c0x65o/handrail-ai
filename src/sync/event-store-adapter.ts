@@ -59,6 +59,16 @@ export interface CanonicalizeConversationSyncMutationInput<TAuthorizationContext
   readonly proposedEvent: ConversationSyncMutationEvent;
 }
 
+export interface ValidateCanonicalConversationSyncBatchInput<TAuthorizationContext> {
+  readonly authorizationContext: TAuthorizationContext;
+  readonly conversationId: ConversationId;
+  readonly expectedRevision: ConversationRevision | null;
+  /** Fully server-authored envelopes in proposed append order. */
+  readonly events: readonly ConversationEvent[];
+  /** Original untrusted proposals in the same order. */
+  readonly proposedEvents: readonly ConversationSyncMutationEvent[];
+}
+
 export interface EventStoreConversationSyncAdapterOptions<TAuthorizationContext> {
   readonly authorizationContext: TAuthorizationContext;
   readonly eventStore: ConversationEventStore;
@@ -91,12 +101,21 @@ export interface EventStoreConversationSyncAdapterOptions<TAuthorizationContext>
    * when `canonicalizeMutation` verifies the receipt against server metering.
    */
   readonly allowUsageReceiptMutationProposals?: boolean;
+  /**
+   * Optional cross-event/domain invariant check, run after authoritative
+   * envelopes are built and before the atomic append. Throw to deny the whole
+   * batch. This is the place to replay a proposed turn admission as one unit.
+   */
+  readonly validateCanonicalBatch?: (
+    input: ValidateCanonicalConversationSyncBatchInput<TAuthorizationContext>,
+  ) => void | Promise<void>;
   readonly presence?: Pick<ConversationSyncAdapter, "publishPresence" | "subscribePresence">;
   readonly diagnostics?: AiDiagnosticSink;
 }
 
 interface CanonicalMutationProposal {
   readonly mutation: ConversationSyncMutation;
+  readonly proposedEvent: ConversationSyncMutationEvent;
   readonly canonical: CanonicalConversationSyncMutation;
 }
 
@@ -192,7 +211,7 @@ export function createEventStoreConversationSyncAdapter<TAuthorizationContext>(
         conversationId: input.conversationId, mutationId: mutation.mutationId, proposedEvent });
       // Round-trip through the event parser below; this clone also rejects non-JSON callback output.
       JSON.stringify(canonicalComparable(canonical));
-      values.push(Object.freeze({ mutation, canonical }));
+      values.push(Object.freeze({ mutation, proposedEvent, canonical }));
     }
     return Object.freeze(values);
   };
@@ -294,6 +313,13 @@ export function createEventStoreConversationSyncAdapter<TAuthorizationContext>(
           ...(canonical.metadata === undefined ? {} : { metadata: canonical.metadata }),
           payload: canonical.payload,
         }));
+        await options.validateCanonicalBatch?.({
+          authorizationContext: options.authorizationContext,
+          conversationId: input.conversationId,
+          expectedRevision: input.expectedRevision,
+          events: Object.freeze(events),
+          proposedEvents: Object.freeze(proposals.map(({ proposedEvent }) => proposedEvent)),
+        });
         try {
           const appended = await options.eventStore.append({ conversationId: input.conversationId,
             expectedRevision: input.expectedRevision, events });

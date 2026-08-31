@@ -585,16 +585,18 @@ describe("durable conversation event contract", () => {
     }
   });
 
-  it("enforces source identity and client mutation semantics", () => {
+  it("enforces source identity and excludes mutation semantics from imported history", () => {
     expect(() =>
       parseConversationEvent({
         ...event(),
         source: { type: "client", client_id: "" },
       }),
     ).toThrow(/client_id.*must not be empty/);
+    expect(parseConversationEvent({ ...event(), source: { type: "runtime" } })).toBeTypeOf("object");
+    expect(parseConversationEvent({ ...event(), source: { type: "sync" } })).toBeTypeOf("object");
     expect(() =>
-      parseConversationEvent({ ...event(), source: { type: "runtime" } }),
-    ).toThrow(/mutation_id.*source type is client/);
+      parseConversationEvent({ ...event(), source: { type: "import" } }),
+    ).toThrow(/mutation_id.*imported events/);
 
     const runtimeEvent = without(event(), "mutation_id");
     runtimeEvent.source = { type: "runtime" };

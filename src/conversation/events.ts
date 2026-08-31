@@ -558,7 +558,9 @@ export type ConversationEventPayload =
  * Event revisions are assigned monotonically within one conversation. Repeated
  * observations of the same event_id are the same durable fact. When present,
  * repeated observations of the same mutation_id likewise represent the same
- * client mutation and must not be applied as a new mutation.
+ * submitted mutation and must not be applied as a new mutation. Runtime and
+ * sync sources may carry a client-assigned mutation identity after a remote
+ * event-store admission; imported history must not.
  */
 export interface ConversationEvent {
   version: typeof CONVERSATION_EVENT_VERSION;
@@ -1773,10 +1775,10 @@ export function parseConversationEvent(value: unknown): ConversationEvent {
   validateSource(object.source, "$event.source");
   if (Object.hasOwn(object, "mutation_id")) {
     identifier(object.mutation_id, "$event.mutation_id");
-    if (object.source.type !== "client") {
+    if (object.source.type === "import") {
       fail(
         "$event.mutation_id",
-        "is supported only for events whose source type is client",
+        "is not supported for imported events",
       );
     }
   }

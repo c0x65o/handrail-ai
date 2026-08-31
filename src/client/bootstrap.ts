@@ -21,6 +21,7 @@ import { createConversationRuntime } from "../runtime.js";
 import type { AttachmentUploadAdapter } from "../attachments/types.js";
 import { createApplicationGatewaySyncAdapter } from "./synchronization.js";
 import type { ConversationSyncAdapter } from "../sync/types.js";
+import { createSynchronizedConversationEventStore } from "../sync/conversation-event-store.js";
 
 export interface HandrailAiClientBootstrapOptions<TEvent, TRequest, TAuthorizationContext, TSynchronization = unknown>
 extends ApplicationGatewayTransportOptions<TEvent, TSynchronization> {
@@ -30,7 +31,11 @@ extends ApplicationGatewayTransportOptions<TEvent, TSynchronization> {
   readonly runtime?: {
     readonly clientId: ConversationClientId;
     readonly deviceId?: ConversationDeviceId;
-    readonly eventStoreFor: (input: Parameters<ConversationRuntimeFactory<TRequest, TAuthorizationContext>>[0]) =>
+    /**
+     * Optional local/custom event store. When omitted, a negotiated server
+     * synchronization capability becomes the runtime's canonical event store.
+     */
+    readonly eventStoreFor?: (input: Parameters<ConversationRuntimeFactory<TRequest, TAuthorizationContext>>[0]) =>
       ConversationEventStore | Promise<ConversationEventStore>;
     readonly authorize: ConversationRuntimeRegistryPolicy<TAuthorizationContext>;
   };
@@ -78,10 +83,20 @@ export async function createHandrailAiClient<TEvent = unknown, TRequest = unknow
       ...(options.activityPollingMilliseconds === undefined ? {} : { intervalMilliseconds: options.activityPollingMilliseconds }) }) : null;
   if (activity && options.startActivityPolling !== false) activity.start();
   const catalog = createApplicationGatewayConversationCatalog<TAuthorizationContext>(resources, capabilities);
+  const attachmentUpload = transport.capabilities.attachmentUpload.supported
+    ? transport.capabilities.attachmentUpload.capability : null;
+  const presence = transport.capabilities.presence.supported ? transport.capabilities.presence.capability : null;
+  const synchronization = capabilities.synchronization === true
+    ? createApplicationGatewaySyncAdapter({ resources, ...(presence ? { presence } : {}) }) : null;
+  if (options.runtime && options.runtime.eventStoreFor === undefined && synchronization === null) {
+    throw new TypeError("A standard runtime requires eventStoreFor or negotiated synchronization");
+  }
   const runtimeFactory = options.runtime ? (async (input: Parameters<ConversationRuntimeFactory<TRequest, TAuthorizationContext>>[0]) =>
     createConversationRuntime<TRequest>({ conversationId: input.conversationId, clientId: options.runtime!.clientId,
       ...(options.runtime!.deviceId === undefined ? {} : { deviceId: options.runtime!.deviceId }), transport,
-      eventStore: await options.runtime!.eventStoreFor(input) })) : options.createRuntime;
+      eventStore: options.runtime!.eventStoreFor
+        ? await options.runtime!.eventStoreFor(input)
+        : createSynchronizedConversationEventStore({ adapter: synchronization! }) })) : options.createRuntime;
   const runtimeAuthorization = options.runtime?.authorize ?? options.authorizeRuntime;
   const registry = runtimeFactory && runtimeAuthorization
     ? new ConversationRuntimeRegistry<TRequest, TAuthorizationContext>({
@@ -89,11 +104,6 @@ export async function createHandrailAiClient<TEvent = unknown, TRequest = unknow
       createRuntime: runtimeFactory, authorize: runtimeAuthorization,
     }) : null;
   const workspace = registry ? new ConversationWorkspace(registry) : null;
-  const attachmentUpload = transport.capabilities.attachmentUpload.supported
-    ? transport.capabilities.attachmentUpload.capability : null;
-  const presence = transport.capabilities.presence.supported ? transport.capabilities.presence.capability : null;
-  const synchronization = capabilities.synchronization === true
-    ? createApplicationGatewaySyncAdapter({ resources, ...(presence ? { presence } : {}) }) : null;
   return Object.freeze({ capabilities, transport, resources, activity, catalog, registry, workspace,
     attachmentUpload, presence, synchronization,
     buildRequest(input: { readonly content: string; readonly attachments?: readonly unknown[] }) {

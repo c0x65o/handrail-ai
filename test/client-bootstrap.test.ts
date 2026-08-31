@@ -74,4 +74,15 @@ describe("createHandrailAiClient", () => {
       },
     })).rejects.toThrow("createRuntime and authorizeRuntime must be configured together");
   });
+
+  it("requires either a local event store or negotiated server synchronization", async () => {
+    await expect(createHandrailAiClient({
+      baseUrl: "https://app.test/ai",
+      capabilities,
+      runtime: {
+        clientId: "client_web" as never,
+        authorize: () => "allow",
+      },
+    })).rejects.toThrow("eventStoreFor or negotiated synchronization");
+  });
 });

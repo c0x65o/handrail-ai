@@ -133,4 +133,23 @@ describe("event-store conversation synchronization adapter", () => {
       events: [{ mutation_id: "live" }] } });
     subscribed.subscription.close();
   });
+
+  it("denies an entire canonical batch when a host cross-event invariant fails", async () => {
+    const store = new InMemoryConversationEventStore();
+    const validateCanonicalBatch = vi.fn(() => { throw new TypeError("turn admission is not self-consistent"); });
+    const sync = createEventStoreConversationSyncAdapter({
+      authorizationContext: { userId: "user-1" },
+      eventStore: store,
+      authorize: () => true,
+      canonicalizeMutation: async ({ proposedEvent }) => ({
+        actor: { type: "user" }, source: proposedEvent.source, payload: proposedEvent.payload,
+      }),
+      createEventId: () => "server-batch-event" as ConversationEventId,
+      validateCanonicalBatch,
+    });
+    await expect(sync.appendMutations({ conversationId, expectedRevision: null,
+      mutations: [proposal("invalid-batch", 1)] })).resolves.toMatchObject({ status: "unauthorized" });
+    expect(validateCanonicalBatch).toHaveBeenCalledOnce();
+    expect(await store.getLatestRevision(conversationId)).toBeNull();
+  });
 });

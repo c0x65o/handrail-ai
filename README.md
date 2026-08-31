@@ -263,12 +263,21 @@ mounts its bounded JSON operations behind the application gateway.
 On browser, React Native, or other Fetch clients,
 `createApplicationGatewaySyncAdapter` supplies pull/read/append and protected
 polling subscriptions; the high-level `createHandrailAiClient` exposes it as
-`client.synchronization` only when the server negotiates synchronization.
-Applications can pass that adapter and their durable local stores to
-`createConversationSyncCoordinator`. Do not advertise the capability until
-provider/runtime-authored facts and client-authored facts share one canonical
-server event identity; a read-only migration shadow is parity evidence, not a
-completed history cutover.
+`client.synchronization` only when the server negotiates synchronization. In
+the standard runtime configuration, omit `runtime.eventStoreFor` to use
+`createSynchronizedConversationEventStore` automatically; the runtime then
+projects the server's acknowledged canonical envelopes instead of keeping a
+second device-local identity. Supply `eventStoreFor` when an application owns
+an offline/local-first store and connect it with `createConversationSyncCoordinator`.
+
+The trusted-server adapter accepts client-source proposals by default. Runtime
+and usage-receipt proposals remain denied unless the host explicitly enables
+them and its `canonicalizeMutation` callback proves each fact against a durable
+server turn/provider record. Enabling those switches without that proof lets a
+client forge assistant output or metering. Do not advertise synchronization
+until provider/runtime-authored facts and client-authored facts share one
+canonical server event identity; a read-only migration shadow is parity
+evidence, not a completed history cutover.
 
 Presence and typing are ephemeral signals. They are intentionally outside the
 durable log and may expire, coalesce, or disappear across disconnects. Do not
