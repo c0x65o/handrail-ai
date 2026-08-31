@@ -1,12 +1,11 @@
 import type {
-  ConversationClientEventSource,
   ConversationClientMutationId,
   ConversationEvent,
   ConversationEventPayload,
+  ConversationEventSource,
   ConversationId,
   ConversationJsonValue,
   ConversationRevision,
-  UsageReceiptLinkedPayload,
 } from "../conversation/events.js";
 import type { PresenceRecord } from "../presence/types.js";
 
@@ -103,18 +102,20 @@ export interface ConversationSyncMutation {
 /**
  * A client event proposal accepted by `appendMutations`.
  *
- * Usage receipt linkage is intentionally excluded. Client-provided actor,
- * metadata, payload, timestamps, identifiers, and revisions remain untrusted;
- * they must never establish authoritative Handrail attribution, metering,
- * billing, or trust claims.
+ * Client-provided actor, source, metadata, payload, timestamps, identifiers,
+ * and revisions remain untrusted. In particular, a proposed runtime-source or
+ * usage-receipt event must never establish assistant output, metering, billing,
+ * or trust claims. The server adapter rejects those proposals by default and a
+ * host may opt in only when it independently verifies them against its durable
+ * turn/provider authority.
  */
 export type ConversationSyncMutationEvent = Omit<
   ConversationEvent,
-  "mutation_id" | "payload" | "source"
+  "mutation_id" | "source"
 > & {
   readonly mutation_id: ConversationClientMutationId;
-  readonly payload: Exclude<ConversationEventPayload, UsageReceiptLinkedPayload>;
-  readonly source: ConversationClientEventSource;
+  readonly payload: ConversationEventPayload;
+  readonly source: ConversationEventSource;
 };
 
 export interface AppendMutationsInput {

@@ -14,6 +14,35 @@ function response(status: number, value: unknown): Response {
   });
 }
 
+class SynchronizationBodyTooLargeError extends Error {}
+
+async function readBody(request: Request, maximumBodyBytes: number): Promise<Uint8Array> {
+  const contentLength = request.headers.get("content-length");
+  if (contentLength !== null && Number(contentLength) > maximumBodyBytes) {
+    throw new SynchronizationBodyTooLargeError();
+  }
+  if (!request.body) return new Uint8Array();
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      length += chunk.value.byteLength;
+      if (length > maximumBodyBytes) throw new SynchronizationBodyTooLargeError();
+      chunks.push(chunk.value);
+    }
+  } catch (error) {
+    await reader.cancel(error).catch(() => undefined);
+    throw error;
+  }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  return bytes;
+}
+
 /** Protected JSON RPC handler for the application gateway synchronization route. */
 export function createConversationSynchronizationHttpHandler<TContext>(
   options: ConversationSynchronizationHttpHandlerOptions<TContext>,
@@ -26,12 +55,12 @@ export function createConversationSynchronizationHttpHandler<TContext>(
     if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
     let parsed: { readonly operation?: unknown; readonly input?: unknown };
     try {
-      const bytes = new Uint8Array(await request.arrayBuffer());
-      if (bytes.byteLength > maximumBodyBytes) return new Response(null, { status: 413 });
+      const bytes = await readBody(request, maximumBodyBytes);
       parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as typeof parsed;
       if (!parsed || typeof parsed !== "object") return response(400, { ok: false,
         error: { code: "invalid_request", message: "Synchronization request is invalid." } });
-    } catch {
+    } catch (error) {
+      if (error instanceof SynchronizationBodyTooLargeError) return new Response(null, { status: 413 });
       return response(400, { ok: false,
         error: { code: "invalid_request", message: "Synchronization request is invalid." } });
     }

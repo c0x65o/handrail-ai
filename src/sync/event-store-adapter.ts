@@ -7,12 +7,12 @@ import {
 import {
   CONVERSATION_EVENT_VERSION,
   parseConversationEvent,
-  type ConversationClientEventSource,
   type ConversationEvent,
   type ConversationEventActor,
   type ConversationEventId,
   type ConversationEventMetadata,
   type ConversationEventPayload,
+  type ConversationEventSource,
   type ConversationId,
   type ConversationJsonValue,
   type ConversationRevision,
@@ -46,8 +46,8 @@ export type EventStoreSyncOperation = "pull_snapshot" | "read_since" | "append_m
 
 export interface CanonicalConversationSyncMutation {
   readonly actor: ConversationEventActor;
-  readonly source: ConversationClientEventSource;
-  readonly payload: Exclude<ConversationEventPayload, { readonly type: "usage.receipt_linked" }>;
+  readonly source: ConversationEventSource;
+  readonly payload: ConversationEventPayload;
   readonly metadata?: ConversationEventMetadata;
 }
 
@@ -80,6 +80,17 @@ export interface EventStoreConversationSyncAdapterOptions<TAuthorizationContext>
   readonly subscriptionPollingMilliseconds?: number;
   readonly maximumMutationBatchSize?: number;
   readonly maximumIdempotencyScanEvents?: number;
+  /**
+   * Runtime-source proposals are rejected by default. Enable this only when
+   * `canonicalizeMutation` proves every proposed assistant/runtime fact against
+   * a server-owned durable turn or provider record.
+   */
+  readonly allowRuntimeMutationProposals?: boolean;
+  /**
+   * Usage receipt linkage proposals are rejected by default. Enable this only
+   * when `canonicalizeMutation` verifies the receipt against server metering.
+   */
+  readonly allowUsageReceiptMutationProposals?: boolean;
   readonly presence?: Pick<ConversationSyncAdapter, "publishPresence" | "subscribePresence">;
   readonly diagnostics?: AiDiagnosticSink;
 }
@@ -115,13 +126,20 @@ function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-function proposalEvent(mutation: ConversationSyncMutation, conversationId: ConversationId): ConversationSyncMutationEvent {
+function proposalEvent(
+  mutation: ConversationSyncMutation,
+  conversationId: ConversationId,
+  allowRuntime: boolean,
+  allowUsageReceipt: boolean,
+): ConversationSyncMutationEvent {
   if (!mutation || typeof mutation !== "object" || !Array.isArray(mutation.events) || mutation.events.length !== 1) {
     throw new TypeError("Each synchronization mutation must contain exactly one event");
   }
   const event = parseConversationEvent(mutation.events[0]);
-  if (event.conversation_id !== conversationId || event.mutation_id !== mutation.mutationId || event.source.type !== "client" ||
-    event.payload.type === "usage.receipt_linked") {
+  const allowedSource = event.source.type === "client" ||
+    (allowRuntime && event.source.type === "runtime");
+  if (event.conversation_id !== conversationId || event.mutation_id !== mutation.mutationId || !allowedSource ||
+    (!allowUsageReceipt && event.payload.type === "usage.receipt_linked")) {
     throw new TypeError("Synchronization mutation identity is invalid");
   }
   return event as ConversationSyncMutationEvent;
@@ -133,8 +151,8 @@ function canonicalComparable(value: CanonicalConversationSyncMutation): Conversa
 }
 
 function storedComparable(event: ConversationEvent): ConversationJsonValue {
-  return canonicalComparable({ actor: event.actor, source: event.source as ConversationClientEventSource,
-    payload: event.payload as CanonicalConversationSyncMutation["payload"],
+  return canonicalComparable({ actor: event.actor, source: event.source,
+    payload: event.payload,
     ...(event.metadata === undefined ? {} : { metadata: event.metadata }) });
 }
 
@@ -164,7 +182,12 @@ export function createEventStoreConversationSyncAdapter<TAuthorizationContext>(
     for (const mutation of input.mutations) {
       if (seen.has(mutation.mutationId)) throw new TypeError("Synchronization mutation is duplicated in the batch");
       seen.add(mutation.mutationId);
-      const proposedEvent = proposalEvent(mutation, input.conversationId);
+      const proposedEvent = proposalEvent(
+        mutation,
+        input.conversationId,
+        options.allowRuntimeMutationProposals === true,
+        options.allowUsageReceiptMutationProposals === true,
+      );
       const canonical = await options.canonicalizeMutation({ authorizationContext: options.authorizationContext,
         conversationId: input.conversationId, mutationId: mutation.mutationId, proposedEvent });
       // Round-trip through the event parser below; this clone also rejects non-JSON callback output.

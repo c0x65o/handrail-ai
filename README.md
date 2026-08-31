@@ -251,6 +251,25 @@ and logical request/attempt identities. Replayed or redelivered facts must be
 idempotent; never retry a side effect under a fresh identity merely because a
 connection ended.
 
+`createEventStoreConversationSyncAdapter` is the checked trusted-server
+implementation over any conforming event store. It requires application-owned
+conversation authorization and a deterministic `canonicalizeMutation`
+callback; the server assigns event identity, actor, source, timestamp, and
+revision and atomically rejects stale competing batches. Lost-response retries
+return the original durable event, while reuse of a mutation identity with
+different canonical content fails closed. `createConversationSynchronizationHttpHandler`
+mounts its bounded JSON operations behind the application gateway.
+
+On browser, React Native, or other Fetch clients,
+`createApplicationGatewaySyncAdapter` supplies pull/read/append and protected
+polling subscriptions; the high-level `createHandrailAiClient` exposes it as
+`client.synchronization` only when the server negotiates synchronization.
+Applications can pass that adapter and their durable local stores to
+`createConversationSyncCoordinator`. Do not advertise the capability until
+provider/runtime-authored facts and client-authored facts share one canonical
+server event identity; a read-only migration shadow is parity evidence, not a
+completed history cutover.
+
 Presence and typing are ephemeral signals. They are intentionally outside the
 durable log and may expire, coalesce, or disappear across disconnects. Do not
 reconstruct authoritative messages or turn state from presence records.

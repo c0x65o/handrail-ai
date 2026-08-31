@@ -76,7 +76,7 @@ rollback implementation. It stages attachment bytes in the expiring Postgres
 blob store, exposes persisted activity with live SSE plus polling fallback,
 publishes automatic assistant presence, and uses
 `createRequestScopedMcpSession` inside the existing per-message Handrail bridge.
-The `0.1.62` qualification artifact also composes
+The `0.1.63` qualification artifact also composes
 `createPostgresLivePubSubFromPool` from Spartan's existing `pg` pool, so live
 launcher activity and typing/presence fan out across application instances.
 The bridge is explicitly closed before the pool during shutdown; authoritative
@@ -105,6 +105,15 @@ durable on the local device only and the runtime config reports
 `synchronization: "local_device"`. Do not market or enable cross-device history
 convergence before that identity migration and its reconciliation tests land.
 
+The protected gateway now includes a read-only synchronization qualification
+handler over the reconciled Postgres shadow. Authorized devices can pull the
+canonical snapshot and contiguous imported message/attachment/citation events;
+foreign conversations and all client mutation appends fail closed. Capability
+negotiation intentionally remains `false`, so the production browser cannot
+mistake parity reads for a writable convergence authority. The remaining
+cutover gate is unifying active-turn runtime identities with these shadow event
+identities, then proving two-device convergence before changing runtime config.
+
 Do not remove `provider.ts`, current Aegis routes, or old persistence during these steps. Cut reads over independently after the matching reconciliation report is converged. Binary attachment authorization/resolution, Zod schemas, company/actor construction, system instructions, proposal confirmation side effects, retention, and rollout flags remain Spartan-owned boundaries.
 
-Git dependencies require the package `prepare` script because public exports point at generated `dist` files. Production should pin an immutable tag or package integrity. Spartan's qualification seam pins the locally generated `0.1.62` artifact; the prior `0.1.61` tarball and legacy transport remain available for rollback. A temporary vendored tarball is acceptable for cross-repository qualification when its source tag and lockfile integrity are reviewed together. This artifact contains the Responses grounding/reasoning request options documented above, although the provider-loop cutover remains independently gated from the client qualification switch.
+Git dependencies require the package `prepare` script because public exports point at generated `dist` files. Production should pin an immutable tag or package integrity. Spartan's qualification seam pins the locally generated `0.1.63` artifact; the prior `0.1.62` tarball and legacy transport remain available for rollback. A temporary vendored tarball is acceptable for cross-repository qualification when its source tag and lockfile integrity are reviewed together. This artifact contains the Responses grounding/reasoning request options documented above, although the provider-loop cutover remains independently gated from the client qualification switch.
