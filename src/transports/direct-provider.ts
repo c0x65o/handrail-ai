@@ -52,6 +52,7 @@ import type {
   TurnObservationFailed,
   TurnResumePoint,
 } from "./types.js";
+import { emitAiDiagnostic, type AiDiagnosticSink } from "../diagnostics.js";
 
 const EMPTY_CHECKPOINT: TurnResumePoint = Object.freeze({
   lastAppliedEventId: null,
@@ -84,6 +85,8 @@ export interface DirectProviderTransportOptions {
   readonly createContext: DirectProviderContextFactory;
   /** Trusted host resolver passed only to adapters with negotiated document support. */
   readonly resolveDocumentReference?: ProviderDocumentReferenceResolver;
+  /** Host-only provider lifecycle diagnostics. Prompts and payloads are never included. */
+  readonly diagnostics?: AiDiagnosticSink;
 }
 
 export interface DirectProviderTurnObservationCompleted
@@ -466,11 +469,24 @@ async function pumpProvider(
   active: ActiveTurn,
   resolveDocumentReference: ProviderDocumentReferenceResolver | undefined,
   citationProjectionSupported: boolean,
+  diagnostics: AiDiagnosticSink | undefined,
 ): Promise<void> {
   const events: StreamEvent[] = [];
   let heldTerminal: TerminalStreamEvent | null = null;
+  const startedAt = Date.now();
+  const diagnostic = {
+    domain: "provider" as const,
+    operation: "invoke",
+    conversationId: input.conversationId,
+    turnId: context.turn_id,
+    requestId: context.request_id,
+    traceId: context.trace_id,
+    providerId: adapter.metadata.provider_id,
+    modelId: adapter.metadata.model_id,
+  };
 
   try {
+    emitAiDiagnostic(diagnostics, { ...diagnostic, phase: "started" });
     const stream = adapter.invoke({
       continuation_of: input.request.continuation_of,
       messages: input.request.messages,
@@ -512,7 +528,19 @@ async function pumpProvider(
     const receipt = usageReceipt(item.value, context, input, adapter.metadata);
     observation.push(heldTerminal);
     observation.close(observationResult(item.value, receipt));
-  } catch {
+    emitAiDiagnostic(diagnostics, {
+      ...diagnostic,
+      phase: item.value.status === "completed" ? "succeeded" :
+        item.value.status === "cancelled" ? "cancelled" : "failed",
+      durationMs: Date.now() - startedAt,
+      ...(item.value.status === "failed"
+        ? { code: item.value.error.code, retryable: item.value.error.retryable }
+        : {}),
+    });
+  } catch (cause) {
+    emitAiDiagnostic(diagnostics, { ...diagnostic, phase: controller.signal.aborted ? "cancelled" : "failed",
+      code: cause instanceof Error ? cause.name : "unknown", durationMs: Date.now() - startedAt,
+      retryable: false, cause });
     observation.close(internalObservationFailure());
   } finally {
     active.terminal = true;
@@ -674,6 +702,7 @@ export function createDirectProviderTransport(
         active,
         options.resolveDocumentReference,
         citationProjection.supported,
+        options.diagnostics,
       );
 
       return {

@@ -22,7 +22,7 @@ import {
 } from "../conversation/approval-proposal-store.js";
 import type { ConversationApprovalProposalRecord } from "../conversation/state.js";
 import type { DocumentInputCapabilityDescriptor } from "../providers/index.js";
-import { emitAiDiagnostic, type AiDiagnosticSink } from "../diagnostics.js";
+import { diagnoseAiOperation, emitAiDiagnostic, type AiDiagnosticSink } from "../diagnostics.js";
 import type { AppendMutationsInput, AppendMutationsResult, PullSnapshotInput, PullSnapshotResult,
   ReadSinceInput, ReadSinceResult } from "../sync/types.js";
 import type {
@@ -396,18 +396,21 @@ function createGatewayAttachmentUploadAdapter<TEvent>(
 }
 
 export async function negotiateApplicationGatewayCapabilities(
-  options: Pick<ApplicationGatewayTransportOptions<unknown>, "baseUrl" | "fetch" | "protectedRequest">,
+  options: Pick<ApplicationGatewayTransportOptions<unknown>, "baseUrl" | "fetch" | "protectedRequest" | "diagnostics">,
 ): Promise<ApplicationGatewayCapabilities> {
   const fetcher = options.fetch ?? globalThis.fetch;
   const url = `${options.baseUrl.replace(/\/+$/, "")}/capabilities`;
   const initial: RequestInit = { method: "GET" };
-  const response = await fetcher(url, await options.protectedRequest?.({ url, ...initial }) ?? initial);
-  if (!response.ok) throw new TypeError("Application gateway capability negotiation failed");
-  const result = await response.json() as { readonly ok?: boolean; readonly value?: ApplicationGatewayCapabilities };
-  if (!result.ok || result.value?.protocolVersion !== APPLICATION_GATEWAY_PROTOCOL_VERSION) {
-    throw new TypeError("Application gateway returned an incompatible protocol version");
-  }
-  return Object.freeze(result.value);
+  return diagnoseAiOperation(options.diagnostics,
+    { domain: "gateway", operation: "capabilities" }, async () => {
+      const response = await fetcher(url, await options.protectedRequest?.({ url, ...initial }) ?? initial);
+      if (!response.ok) throw new TypeError("Application gateway capability negotiation failed");
+      const result = await response.json() as { readonly ok?: boolean; readonly value?: ApplicationGatewayCapabilities };
+      if (!result.ok || result.value?.protocolVersion !== APPLICATION_GATEWAY_PROTOCOL_VERSION) {
+        throw new TypeError("Application gateway returned an incompatible protocol version");
+      }
+      return Object.freeze(result.value);
+    });
 }
 
 type WithoutAuthorization<T> = Omit<T, "authorizationContext" | "permissionContext">;
@@ -546,6 +549,9 @@ export function createApplicationGatewayResourceClient(
   const fetcher = options.fetch ?? globalThis.fetch;
   const base = options.baseUrl.replace(/\/+$/, "");
   const invoke = async <T>(path: string, input: unknown): Promise<T> => {
+    const startedAt = Date.now();
+    const domain = path.startsWith("/approvals/") ? "approval" as const : "gateway" as const;
+    emitAiDiagnostic(options.diagnostics, { domain, operation: path, phase: "started" });
     const url = `${base}${path}`;
     const initial: RequestInit = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) };
     const response = await fetcher(url, await options.protectedRequest?.({ url, ...initial }) ?? initial);
@@ -567,6 +573,8 @@ export function createApplicationGatewayResourceClient(
         retryable: resourceError.retryable, cause: resourceError });
       throw resourceError;
     }
+    emitAiDiagnostic(options.diagnostics, { domain, operation: path, phase: "succeeded",
+      durationMs: Date.now() - startedAt, statusCode: response.status });
     return result.value as T;
   };
   const client: ApplicationGatewayResourceClient = {
@@ -633,8 +641,23 @@ export function createApplicationGatewayTransport<TEvent = unknown, TRequest = u
   };
   const cancellation = {
     async cancelTurn(input: CancelTurnInput): Promise<TransportResult<AuthoritativeCancelTurnResult>> {
-      const response = await invoke("/turns/cancel", input);
-      return response.json() as Promise<TransportResult<AuthoritativeCancelTurnResult>>;
+      const startedAt = Date.now();
+      emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: "cancel", phase: "started",
+        conversationId: input.conversationId, turnId: input.turnId });
+      try {
+        const response = await invoke("/turns/cancel", input);
+        const result = await response.json() as TransportResult<AuthoritativeCancelTurnResult>;
+        emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: "cancel",
+          phase: result.ok ? "succeeded" : "failed", conversationId: input.conversationId,
+          turnId: input.turnId, durationMs: Date.now() - startedAt, statusCode: response.status,
+          ...(!result.ok ? { code: result.error.code, retryable: result.error.retryable } : {}) });
+        return result;
+      } catch (cause) {
+        emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: "cancel", phase: "failed",
+          conversationId: input.conversationId, turnId: input.turnId, durationMs: Date.now() - startedAt,
+          code: cause instanceof Error ? cause.name : "unknown", retryable: true, cause });
+        return { ok: false, error: { code: "unavailable", message: "The application gateway is unavailable.", retryable: true } };
+      }
     },
   };
   const negotiated = options.capabilities;
@@ -660,26 +683,86 @@ export function createApplicationGatewayTransport<TEvent = unknown, TRequest = u
   return Object.freeze({
     capabilities,
     async startTurn(input: StartTurnInput<TRequest>): Promise<TransportResult<TurnHandle<TEvent>>> {
+      const startedAt = Date.now();
+      emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: "start", phase: "started",
+        conversationId: input.conversationId, turnId: input.conversationTurnId });
       try {
         const connection = new AbortController();
         const response = await invoke("/turns/start", input, connection.signal);
-        if (!response.ok) return await response.json() as TransportResult<TurnHandle<TEvent>>;
+        if (!response.ok) {
+          const result = await response.json() as TransportResult<TurnHandle<TEvent>>;
+          emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: "start", phase: "failed",
+            conversationId: input.conversationId, turnId: input.conversationTurnId,
+            durationMs: Date.now() - startedAt, statusCode: response.status,
+            ...(!result.ok ? { code: result.error.code, retryable: result.error.retryable } : {}) });
+          return result;
+        }
         const observation = await readGatewayStream(response, decode, () => undefined, () => connection.abort());
+        observeGatewayTurnDiagnostics(options.diagnostics, "start", input.conversationId,
+          response.headers.get("x-handrail-turn-id") ?? input.conversationTurnId, observation, startedAt);
         return { ok: true, value: {
           conversationId: response.headers.get("x-handrail-conversation-id") ?? input.conversationId,
           turnId: response.headers.get("x-handrail-turn-id") ?? input.conversationTurnId,
           mutationId: response.headers.get("x-handrail-mutation-id") ?? input.mutationId,
           observation,
         } };
-      } catch { return { ok: false, error: { code: "unavailable", message: "The application gateway is unavailable.", retryable: true } }; }
+      } catch (cause) {
+        emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: "start", phase: "failed",
+          conversationId: input.conversationId, turnId: input.conversationTurnId,
+          durationMs: Date.now() - startedAt, code: cause instanceof Error ? cause.name : "unknown",
+          retryable: true, cause });
+        return { ok: false, error: { code: "unavailable", message: "The application gateway is unavailable.", retryable: true } };
+      }
     },
     async resumeTurn(input: ResumeTurnInput): Promise<TransportResult<TurnObservation<TEvent>>> {
+      const startedAt = Date.now();
+      emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: "resume", phase: "started",
+        conversationId: input.conversationId, turnId: input.turnId });
       try {
         const connection = new AbortController();
         const response = await invoke("/turns/resume", input, connection.signal);
-        if (!response.ok) return await response.json() as TransportResult<TurnObservation<TEvent>>;
-        return { ok: true, value: await readGatewayStream(response, decode, () => undefined, () => connection.abort()) };
-      } catch { return { ok: false, error: { code: "unavailable", message: "The application gateway is unavailable.", retryable: true } }; }
+        if (!response.ok) {
+          const result = await response.json() as TransportResult<TurnObservation<TEvent>>;
+          emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: "resume", phase: "failed",
+            conversationId: input.conversationId, turnId: input.turnId,
+            durationMs: Date.now() - startedAt, statusCode: response.status,
+            ...(!result.ok ? { code: result.error.code, retryable: result.error.retryable } : {}) });
+          return result;
+        }
+        const observation = await readGatewayStream(response, decode, () => undefined, () => connection.abort());
+        observeGatewayTurnDiagnostics(options.diagnostics, "resume", input.conversationId,
+          input.turnId, observation, startedAt);
+        return { ok: true, value: observation };
+      } catch (cause) {
+        emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: "resume", phase: "failed",
+          conversationId: input.conversationId, turnId: input.turnId,
+          durationMs: Date.now() - startedAt, code: cause instanceof Error ? cause.name : "unknown",
+          retryable: true, cause });
+        return { ok: false, error: { code: "unavailable", message: "The application gateway is unavailable.", retryable: true } };
+      }
     },
+  });
+}
+
+function observeGatewayTurnDiagnostics<TEvent>(
+  sink: AiDiagnosticSink | undefined,
+  operation: "start" | "resume",
+  conversationId: string,
+  turnId: string,
+  observation: TurnObservation<TEvent>,
+  startedAt: number,
+): void {
+  void observation.result.then((result) => {
+    emitAiDiagnostic(sink, { domain: "gateway", operation,
+      phase: result.status === "completed" ? "succeeded" :
+        result.status === "cancelled" ? "cancelled" : "failed",
+      conversationId, turnId, durationMs: Date.now() - startedAt,
+      ...(result.status === "failed"
+        ? { code: result.error.code, retryable: result.error.retryable }
+        : result.status === "disconnected" ? { code: "disconnected", retryable: true } : {}) });
+  }, (cause: unknown) => {
+    emitAiDiagnostic(sink, { domain: "gateway", operation, phase: "failed",
+      conversationId, turnId, durationMs: Date.now() - startedAt,
+      code: cause instanceof Error ? cause.name : "unknown", retryable: true, cause });
   });
 }

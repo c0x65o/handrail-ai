@@ -1,11 +1,15 @@
 import type {
   ApplicationToolExecutor,
+  ApplicationToolOutput,
   ApplicationToolPolicy,
   JsonObject,
   JsonSchemaObject,
   JsonValue,
   ToolRegistration,
+  ToolPlugin,
+  ToolPluginPresentation,
 } from "../src/index.js";
+import { createToolPlugin } from "../src/index.js";
 
 /** Structural shapes implemented by Spartan's existing AEGIS_TOOL_DEFINITIONS and AEGIS_ACTION_REGISTRY. */
 export interface SpartanAegisFunctionDefinition {
@@ -75,8 +79,99 @@ export function createSpartanAegisRegistrations<TActor, TExecutionContext>(
 }
 
 export const SPARTAN_AEGIS_TOOL_LOOP_LIMITS = Object.freeze({
-  maxIterations: 8,
-  maxTotalToolCalls: 8,
+  maxIterations: 80,
+  maxTotalToolCalls: 75,
   maxElapsedMs: 120_000,
   parallelism: 1,
 });
+
+export interface SpartanAegisProposalInput<TActor> {
+  readonly actor: TActor;
+  readonly name: string;
+  readonly validatedArguments: Record<string, unknown>;
+  readonly summary: string;
+  readonly toolCallId: string;
+  readonly signal: AbortSignal;
+}
+
+export interface SpartanAegisPluginOptions<TActor> {
+  readonly actor: TActor;
+  readonly readDefinitions: readonly SpartanAegisFunctionDefinition[];
+  readonly runReadTool: (
+    name: string,
+    input: unknown,
+    context: { readonly toolCallId: string; readonly signal: AbortSignal },
+  ) => ApplicationToolOutput | Promise<ApplicationToolOutput>;
+  readonly actionRegistry: Pick<SpartanAegisActionRegistry<TActor, never>,
+    "catalogFunctions" | "validate" | "summarizeForActor">;
+  /** Persist a proposal only. Confirmed side effects remain in Spartan. */
+  readonly proposeAction: (
+    input: SpartanAegisProposalInput<TActor>,
+  ) => ApplicationToolOutput | Promise<ApplicationToolOutput>;
+  readonly policy?: ApplicationToolPolicy<TActor>;
+  readonly presentationFor?: (
+    toolName: string,
+    kind: "read" | "proposal",
+  ) => Omit<ToolPluginPresentation, "toolName"> | undefined;
+}
+
+/**
+ * Production migration seam: read tools execute normally, while action tools
+ * can only create Spartan-owned proposals. The existing confirmation route and
+ * action registry remain the sole path to a business side effect.
+ */
+export function createSpartanAegisPlugin<TActor>(
+  options: SpartanAegisPluginOptions<TActor>,
+): ToolPlugin<ApplicationToolExecutor<TActor>, TActor, undefined, TActor> {
+  const actionDefinitions = options.actionRegistry.catalogFunctions(options.actor);
+  const registrations = [
+    ...options.readDefinitions.map((definition) => ({
+      definition: { name: definition.name, description: definition.description,
+        input_schema: definition.parameters },
+      executor: (input: JsonObject, context: Parameters<ApplicationToolExecutor<TActor>>[1]) =>
+        options.runReadTool(definition.name, input,
+          { toolCallId: context.toolCallId, signal: context.signal }),
+      discover: (actor: TActor) => actor === options.actor,
+      tags: ["spartan-read"],
+    })),
+    ...actionDefinitions.map((definition) => ({
+      definition: { name: definition.name, description: definition.description,
+        input_schema: definition.parameters },
+      executor: async (input: JsonObject, context: Parameters<ApplicationToolExecutor<TActor>>[1]) => {
+        const validatedArguments = options.actionRegistry.validate(definition.name, input);
+        const summary = await options.actionRegistry.summarizeForActor(
+          options.actor, definition.name, validatedArguments,
+        );
+        return options.proposeAction({ actor: options.actor, name: definition.name,
+          validatedArguments, summary, toolCallId: context.toolCallId, signal: context.signal });
+      },
+      discover: (actor: TActor) => actor === options.actor,
+      tags: ["spartan-proposal"],
+    })),
+  ] satisfies readonly ToolRegistration<ApplicationToolExecutor<TActor>, TActor>[];
+  const presentations = [
+    ...options.readDefinitions.flatMap((definition) => {
+      const presentation = options.presentationFor?.(definition.name, "read");
+      return presentation ? [{ toolName: definition.name, ...presentation }] : [];
+    }),
+    ...actionDefinitions.flatMap((definition) => {
+      const presentation = options.presentationFor?.(definition.name, "proposal");
+      return presentation ? [{ toolName: definition.name, ...presentation }] : [];
+    }),
+  ];
+  return createToolPlugin({
+    pluginId: "spartan.aegis.erp",
+    version: "1.0.0",
+    displayName: "Spartan Aegis ERP",
+    registrations,
+    ...(options.policy ? { policy: options.policy } : {}),
+    approvals: actionDefinitions.map((definition) => ({
+      toolName: definition.name,
+      mode: "never" as const,
+      summarize: (input: JsonObject) => options.actionRegistry.summarizeForActor(
+        options.actor, definition.name, options.actionRegistry.validate(definition.name, input),
+      ),
+    })),
+    presentations,
+  });
+}

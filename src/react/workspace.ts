@@ -9,9 +9,22 @@ const EMPTY_WORKSPACE_SNAPSHOT: ConversationWorkspaceSnapshot = Object.freeze({
   selectedConversationId: null, runningCount: 0, errorCount: 0, unreadCount: 0,
   threads: Object.freeze([]),
 });
+const EMPTY_ACTIVITY_SNAPSHOT: readonly ConversationActivityRecord[] = Object.freeze([]);
 
 export interface ConversationWorkspaceReadable {
   getSnapshot(): ConversationWorkspaceSnapshot;
+  subscribe(listener: () => void): () => void;
+}
+
+export interface ConversationActivityRecord {
+  readonly conversationId: string;
+  readonly turnStatus: "idle" | "running" | "completed" | "error";
+  readonly unread: boolean;
+}
+
+/** Optional server-backed index for unopened or remotely running conversations. */
+export interface ConversationActivityReadable {
+  getSnapshot(): readonly ConversationActivityRecord[];
   subscribe(listener: () => void): () => void;
 }
 
@@ -32,13 +45,23 @@ export type ConversationLauncherBinding = Pick<ChatLauncherRootProps,
 export function useConversationLauncherBinding(
   workspace?: ConversationWorkspaceReadable,
   connectionStatus?: ChatLauncherConnectionStatus,
+  activity?: ConversationActivityReadable,
 ): ConversationLauncherBinding {
   const snapshot = useConversationWorkspaceSnapshot(workspace);
+  const subscribeActivity = useCallback((notify: () => void) =>
+    activity?.subscribe(notify) ?? (() => undefined), [activity]);
+  const activitySnapshot = useCallback(() => activity?.getSnapshot() ?? EMPTY_ACTIVITY_SNAPSHOT, [activity]);
+  const remote = useSyncExternalStore(subscribeActivity, activitySnapshot, activitySnapshot);
+  const open = new Set(snapshot.threads.map((thread) => String(thread.conversationId)));
+  const unopened = remote.filter((record) => !open.has(record.conversationId));
+  const runningCount = snapshot.runningCount + unopened.filter((record) => record.turnStatus === "running").length;
+  const errorCount = snapshot.errorCount + unopened.filter((record) => record.turnStatus === "error").length;
+  const unreadCount = snapshot.unreadCount + unopened.filter((record) => record.unread).length;
   return Object.freeze({
     ...(connectionStatus === undefined ? {} : { connectionStatus }),
-    turnStatus: snapshot.errorCount > 0 ? "error" as const :
-      snapshot.runningCount > 0 ? "busy" as const :
-        snapshot.unreadCount > 0 ? "completed" as const : "idle" as const,
-    unreadCount: snapshot.unreadCount,
+    turnStatus: errorCount > 0 ? "error" as const :
+      runningCount > 0 ? "busy" as const :
+        unreadCount > 0 ? "completed" as const : "idle" as const,
+    unreadCount,
   });
 }

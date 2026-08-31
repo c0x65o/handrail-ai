@@ -22,3 +22,11 @@ export {
   useConversationStore,
   type ConversationActions,
 } from "../react/hooks.js";
+export {
+  useConversationLauncherBinding,
+  useConversationWorkspaceSnapshot,
+  type ConversationActivityReadable,
+  type ConversationActivityRecord,
+  type ConversationLauncherBinding,
+  type ConversationWorkspaceReadable,
+} from "../react/workspace.js";

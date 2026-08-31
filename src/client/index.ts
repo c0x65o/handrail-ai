@@ -43,6 +43,7 @@ export {
 } from "../conversation/workspace.js";
 export {
   createRetryDiagnosticHooks,
+  createAiDiagnosticLoggerSink,
   diagnoseAiOperation,
   emitAiDiagnostic,
   publicAiDiagnostic,
@@ -50,6 +51,7 @@ export {
   type AiDiagnosticEvent,
   type AiDiagnosticPhase,
   type AiDiagnosticSink,
+  type AiDiagnosticLogger,
 } from "../diagnostics.js";
 export {
   createConversationRuntime,

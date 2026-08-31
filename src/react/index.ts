@@ -20,6 +20,8 @@ export {
   useConversationLauncherBinding,
   useConversationWorkspaceSnapshot,
   type ConversationLauncherBinding,
+  type ConversationActivityReadable,
+  type ConversationActivityRecord,
   type ConversationWorkspaceReadable,
 } from "./workspace.js";
 export {

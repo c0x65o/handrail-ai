@@ -20,6 +20,7 @@ import {
   type BoundedToolExecutorLimits,
 } from "../tools/executor.js";
 import type { ApprovalExecutionCoordinator } from "../tools/approval-execution.js";
+import type { AiDiagnosticSink } from "../diagnostics.js";
 import {
   runToolLoop,
   type RunToolLoopOptions,
@@ -85,6 +86,8 @@ export interface CreateAiApplicationOptions<
   readonly installContext: TInstallContext;
   readonly policy: ApplicationToolPolicy<TApplicationContext>;
   readonly approvalCoordinator?: ApprovalExecutionCoordinator<TApprovalPermissionContext>;
+  /** One host-only sink shared by bounded tool and approval execution. */
+  readonly diagnostics?: AiDiagnosticSink;
   readonly executorLimits?: Partial<BoundedToolExecutorLimits>;
   readonly toolLoopLimits?: Partial<ToolLoopLimits>;
 }
@@ -178,6 +181,7 @@ export async function createAiApplication<
     registry,
     policy,
     ...(options.approvalCoordinator ? { approvalCoordinator: options.approvalCoordinator } : {}),
+    ...(options.diagnostics ? { diagnostics: options.diagnostics } : {}),
     ...(options.executorLimits ? { limits: options.executorLimits } : {}),
   });
   const discover = (query: ToolDiscoveryQuery<TDiscoveryContext>) => registry.discover(query);
@@ -233,7 +237,12 @@ export async function createAiApplication<
     createGateway<TEvent, TRequest, TContext extends ApplicationGatewayAuthorizationContext>(
       gatewayOptions: ApplicationGatewayOptions<TEvent, TRequest, TContext>,
     ) {
-      return createApplicationGateway(gatewayOptions);
+      return createApplicationGateway({
+        ...gatewayOptions,
+        ...(gatewayOptions.diagnostics ?? options.diagnostics
+          ? { diagnostics: gatewayOptions.diagnostics ?? options.diagnostics }
+          : {}),
+      });
     },
   });
 }

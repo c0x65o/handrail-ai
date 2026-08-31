@@ -15,6 +15,16 @@ describe("styled React preset", () => {
       toolRendererKeys: { "spartan.invoice.lookup": "spartan.invoice.result" },
     });
   });
+  it("derives tool mappings from a matching data-only server catalog", () => {
+    const renderer = () => <span>Invoice</span>;
+    expect(installToolRendererPlugins([{
+      pluginId: "spartan.erp", version: "1.0.0",
+      renderers: { "spartan.invoice.result": renderer },
+    }], { plugins: [{ pluginId: "spartan.erp", version: "1.0.0",
+      presentations: [{ toolName: "spartan.invoice.lookup", rendererKey: "spartan.invoice.result" }] }] }))
+      .toEqual({ renderers: { "spartan.invoice.result": renderer },
+        toolRendererKeys: { "spartan.invoice.lookup": "spartan.invoice.result" } });
+  });
   it("renders an accessible responsive chat surface without changing headless primitives", () => {
     const { container } = render(<><StyledChatPresetStyles/><StyledChatPreset title="Aegis" layout="drawer" conversationPicker={<button>Threads</button>} approvals={<section>Approval required</section>} citations={<aside>Sources</aside>}/></>);
     expect(screen.getByRole("heading", { name: "Aegis" })).toBeTruthy();
@@ -35,5 +45,15 @@ describe("styled React preset", () => {
     expect(trigger.dataset.unreadCount).toBe("1");
     fireEvent.click(trigger);
     expect(screen.getByRole("region", { name: "Aegis" })).toBeTruthy();
+  });
+  it("includes unopened server activity in launcher status", () => {
+    const empty = { selectedConversationId: null, runningCount: 0, errorCount: 0,
+      unreadCount: 0, threads: [] } as never;
+    const { container } = render(<StyledChatLauncher workspace={{ getSnapshot: () => empty,
+      subscribe: () => () => undefined }} activity={{ getSnapshot: () => [{ conversationId: "remote",
+        turnStatus: "running", unread: false }], subscribe: () => () => undefined }}/>);
+    const trigger = container.querySelector<HTMLButtonElement>(".hr-chat__launcher-trigger")!;
+    expect(trigger.dataset.turnStatus).toBe("busy");
+    expect(trigger.textContent).toContain("Running");
   });
 });

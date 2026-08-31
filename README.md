@@ -129,6 +129,15 @@ uploader, and request builder in; complete chat surface out) or `StyledChatPrese
 be replaced through the unstyled entry, CSS custom properties, slots, and tool
 result renderer keys.
 
+For concurrent conversations, use `HandrailChatWorkspace` or
+`HandrailChatWorkspaceLauncher`. Their built-in thread picker can create and
+switch chats while another turn continues in its independently owned runtime;
+the launcher exposes Running, Done/unread, and Error state. Pass an optional
+server-backed `ConversationActivityReadable` when unopened or remote turns must
+also affect the badge. A client renderer plugin only needs stable renderer
+implementations plus the data-only `AiApplication.catalog()` result—the styled
+surface automatically joins matching plugin identities and renderer keys.
+
 ## Application-owned gateway and mobile clients
 
 `createApplicationGateway` exposes protected capability, start, resume, and
@@ -158,6 +167,11 @@ styled preset is intentionally not presented as native UI: a native drop-in
 would impose navigation and design-system dependencies, so native UI stays
 host-owned while the complete typed headless path remains shared.
 
+The Dart client includes the same typed gateway lifecycle operations,
+`HandrailConversationState`, and `HandrailConversationWorkspace` for keeping
+background streams alive across native navigation. It intentionally supplies
+state rather than imposing Flutter widgets.
+
 ## Direct/BYOK and managed operation
 
 Both credential modes belong on an application-owned trusted server. Browser
@@ -171,6 +185,12 @@ Create one of the four provider adapters on the trusted server, then inject it
 into `createDirectProviderTransport`. The host supplies authoritative request,
 trace, tenant attribution, and usage-attempt identities. It also resolves
 opaque attachment references before provider-native input is constructed.
+
+Pass one `diagnostics` sink to `createAiApplication`, the gateway/client, or a
+direct-provider transport to receive correlated provider, gateway, retry, and
+tool lifecycle events without prompts or payloads. `createAiDiagnosticLoggerSink`
+adapts Pino-compatible structured loggers and removes the host-only error cause;
+retain a separate access-controlled sink only when raw failures are required.
 
 The checked
 [`examples/trusted-server-transports.ts`](./examples/trusted-server-transports.ts)

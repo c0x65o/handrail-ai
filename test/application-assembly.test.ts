@@ -67,6 +67,7 @@ class ToolThenTextTransport implements ConversationTransport<StreamEvent, ChatRe
 
 describe("trusted AI application assembly", () => {
   it("installs a plugin once, exposes a data-only catalog, and runs its bounded tool loop", async () => {
+    const diagnostics: import("../src/index.js").AiDiagnosticEvent[] = [];
     const execute = vi.fn<ApplicationToolExecutor<{ companyId: string }>>(async ({ id }, context) => ({
       id: String(id ?? ""), companyId: context.applicationContext.companyId,
     }));
@@ -87,6 +88,7 @@ describe("trusted AI application assembly", () => {
     });
     const hostPolicy = vi.fn(() => ({ outcome: "allow" as const }));
     const app = await createAiApplication({ plugins: [plugin], installContext: undefined, policy: hostPolicy,
+      diagnostics: (event) => diagnostics.push(event),
       executorLimits: { maxConcurrency: 1 }, toolLoopLimits: { maxTotalToolCalls: 4 } });
 
     expect(app.discover({ context: { role: "viewer" } })).toEqual([]);
@@ -123,5 +125,9 @@ describe("trusted AI application assembly", () => {
     expect(hostPolicy).toHaveBeenCalledOnce();
     expect(pluginPolicy).toHaveBeenCalledOnce();
     expect(summarize).not.toHaveBeenCalled();
+    expect(diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ domain: "tool", phase: "started", toolName: "spartan.invoice.lookup" }),
+      expect.objectContaining({ domain: "tool", phase: "succeeded", toolName: "spartan.invoice.lookup" }),
+    ]));
   });
 });

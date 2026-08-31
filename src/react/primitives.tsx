@@ -71,6 +71,11 @@ export type MessagePartRenderer = (
   message: ConversationMessageRecord | undefined,
   index: number,
 ) => ReactNode;
+export type MessageAttachmentRenderer = (
+  attachment: ConversationMessageRecord["attachments"][number],
+  message: ConversationMessageRecord,
+  index: number,
+) => ReactNode;
 
 export type ToolResultRenderer = (
   result: ConversationToolResultRecord,
@@ -259,6 +264,7 @@ interface MessageCollectionOptions {
     },
   ) => ReactNode;
   renderPart?: MessagePartRenderer;
+  renderAttachment?: MessageAttachmentRenderer;
   renderToolCall?: ToolCallRenderer;
   renderToolResult?: ToolResultRenderer;
   state?: ConversationState;
@@ -297,6 +303,7 @@ export const Transcript = forwardRef<HTMLElement, TranscriptProps>(function Tran
     renderError,
     renderMessage,
     renderPart,
+    renderAttachment,
     renderToolCall,
     renderToolResult,
     state,
@@ -311,6 +318,7 @@ export const Transcript = forwardRef<HTMLElement, TranscriptProps>(function Tran
       {...(renderError === undefined ? {} : { renderError })}
       {...(renderMessage === undefined ? {} : { renderMessage })}
       {...(renderPart === undefined ? {} : { renderPart })}
+      {...(renderAttachment === undefined ? {} : { renderAttachment })}
       {...(renderToolCall === undefined ? {} : { renderToolCall })}
       {...(renderToolResult === undefined ? {} : { renderToolResult })}
       {...(state === undefined ? {} : { state })}
@@ -346,6 +354,7 @@ export const MessageList = forwardRef<HTMLDivElement, MessageListProps>(
       renderError,
       renderMessage,
       renderPart,
+      renderAttachment,
       renderToolCall,
       renderToolResult,
       state: explicitState,
@@ -373,6 +382,7 @@ export const MessageList = forwardRef<HTMLDivElement, MessageListProps>(
               toolCalls={context.toolCalls}
               {...(renderError === undefined ? {} : { renderError })}
               {...(renderPart === undefined ? {} : { renderPart })}
+              {...(renderAttachment === undefined ? {} : { renderAttachment })}
               {...(renderToolCall === undefined ? {} : { renderToolCall })}
               {...(renderToolResult === undefined ? {} : { renderToolResult })}
             />
@@ -404,6 +414,7 @@ export interface MessageProps extends Omit<HTMLAttributes<HTMLElement>, "childre
   render?: PrimitiveRender<HTMLElement, HTMLAttributes<HTMLElement>>;
   renderError?: ErrorRenderer;
   renderPart?: MessagePartRenderer;
+  renderAttachment?: MessageAttachmentRenderer;
   renderToolCall?: ToolCallRenderer;
   renderToolResult?: ToolResultRenderer;
   toolCalls?: readonly ConversationToolCallRecord[];
@@ -418,6 +429,7 @@ export const Message = forwardRef<HTMLElement, MessageProps>(function Message(
     render,
     renderError,
     renderPart,
+    renderAttachment,
     renderToolCall,
     renderToolResult,
     toolCalls = [],
@@ -435,6 +447,13 @@ export const Message = forwardRef<HTMLElement, MessageProps>(function Message(
         {...(renderPart === undefined ? {} : { renderPart })}
       />
     ))}
+    {message?.attachments.length ? <ul aria-label="Message attachments">
+      {message.attachments.map((attachment, index) => <li key={attachment.attachment_id}>
+        {renderAttachment
+          ? renderAttachment(attachment, message, index)
+          : attachment.filename ?? attachment.media_type}
+      </li>)}
+    </ul> : null}
     {toolCalls.map((toolCall) => (
       <div key={toolCall.tool_call_id}>
         {renderToolCall
