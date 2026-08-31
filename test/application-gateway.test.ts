@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  ApprovalProposalStoreError,
+  ConversationCatalogError,
   createApplicationGateway,
   createApplicationGatewayTransport,
   createApplicationGatewayResourceClient,
@@ -123,5 +125,87 @@ describe("application-owned gateway transport", () => {
     const response = await gateway.handle(new Request("https://app.test/ai/capabilities"));
     expect(response.status).toBe(403);
     expect(await response.text()).not.toContain("secret");
+  });
+
+  it("preserves normalized resource error semantics without exposing native failures", async () => {
+    const gateway = createApplicationGateway({
+      transport: { capabilities: {
+        authoritativeCancellation: { supported: false }, documentInput: { supported: false },
+        attachmentUpload: { supported: false }, presence: { supported: false }, synchronization: { supported: false },
+      } } as ConversationTransport<Event>,
+      authorize: async () => ({ principalId: "server-user" }),
+      checkpointForEvent: point,
+      conversations: {
+        create: async () => { throw new ConversationCatalogError("idempotency_conflict", "create"); },
+      } as never,
+      approvals: {
+        transition: async () => { throw new ApprovalProposalStoreError("version_conflict", "transition"); },
+      } as never,
+    });
+    const conversation = await gateway.handle(new Request("https://app.test/ai/conversations/create", {
+      method: "POST", body: "{}",
+    }));
+    expect(conversation.status).toBe(409);
+    await expect(conversation.json()).resolves.toMatchObject({ ok: false, error: { code: "conflict", retryable: false } });
+    const approval = await gateway.handle(new Request("https://app.test/ai/approvals/transition", {
+      method: "POST", body: "{}",
+    }));
+    expect(approval.status).toBe(409);
+    await expect(approval.json()).resolves.toMatchObject({ ok: false, error: { code: "conflict", retryable: true } });
+  });
+
+  it("routes approvals, title generation, and synchronization through authoritative context", async () => {
+    const createApproval = vi.fn(async (input: { permissionContext: { principalId: string } }) => ({
+      proposal_id: "proposal-1",
+      authorized_by: input.permissionContext.principalId,
+    }));
+    const transitionApproval = vi.fn(async (input: { permissionContext: { principalId: string }; status: string }) => ({
+      proposal_id: "proposal-1",
+      status: input.status,
+      authorized_by: input.permissionContext.principalId,
+    }));
+    const generate = vi.fn(async (_input: unknown, context: { principalId: string }) => `Title for ${context.principalId}`);
+    const synchronization = vi.fn(async (request: Request, context: { principalId: string }) => {
+      const value = await request.json() as { operation: string; input: unknown };
+      return new Response(JSON.stringify({ ok: true, value: { operation: value.operation, principalId: context.principalId } }), {
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const gateway = createApplicationGateway({
+      transport: { capabilities: {
+        authoritativeCancellation: { supported: false }, documentInput: { supported: false },
+        attachmentUpload: { supported: false }, presence: { supported: false }, synchronization: { supported: false },
+      } } as ConversationTransport<Event>,
+      authorize: async () => ({ principalId: "server-user" }),
+      checkpointForEvent: point,
+      approvals: {
+        create: createApproval,
+        get: vi.fn(async () => null),
+        listGroup: vi.fn(async () => []),
+        transition: transitionApproval,
+      } as never,
+      titleGeneration: { generate },
+      capabilities: { synchronization: true },
+      handlers: { synchronization },
+    });
+    const fetch = (input: string | URL | Request, init?: RequestInit) => gateway.handle(new Request(input, init));
+    const client = createApplicationGatewayResourceClient({ baseUrl: "https://app.test/ai", fetch });
+
+    await expect(client.createApproval({ proposalId: "proposal-1" } as never))
+      .resolves.toMatchObject({ authorized_by: "server-user" });
+    await expect(client.transitionApproval({ proposalId: "proposal-1", status: "confirmed" } as never))
+      .resolves.toMatchObject({ status: "confirmed", authorized_by: "server-user" });
+    await expect(client.generateTitle({ conversationId: "conversation-1", idempotencyKey: "title-1" }))
+      .resolves.toBe("Title for server-user");
+    await expect(client.pullSnapshot({ conversationId: "conversation-1" } as never))
+      .resolves.toMatchObject({ operation: "pull_snapshot", principalId: "server-user" });
+    await expect(client.readSince({ conversationId: "conversation-1" } as never))
+      .resolves.toMatchObject({ operation: "read_since" });
+    await expect(client.appendMutations({ conversationId: "conversation-1" } as never))
+      .resolves.toMatchObject({ operation: "append_mutations" });
+    expect(createApproval).toHaveBeenCalledWith(expect.objectContaining({
+      permissionContext: { principalId: "server-user" },
+    }));
+    expect(synchronization).toHaveBeenCalledTimes(3);
   });
 });

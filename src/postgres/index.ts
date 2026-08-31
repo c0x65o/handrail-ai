@@ -1,6 +1,7 @@
 import { parseConversationEvent, type ConversationEvent, type ConversationId, type ConversationRevision } from "../conversation/events.js";
 import {
   ConversationEventStoreConflictError,
+  ConversationEventStoreUnavailableError,
   type AppendConversationEventsInput, type AppendConversationEventsResult,
   type ConversationEventCheckpoint, type ConversationEventCursor, type ConversationEventStore,
   type ReadConversationEventsInput, type ReadConversationEventsResult,
@@ -27,7 +28,7 @@ import {
   parseGetConversationInput, parseListConversationsInput, parsePermanentlyDeleteConversationInput,
   parseRenameConversationInput, parseRestoreConversationInput, parseConversationCatalogDescriptor,
   type ActiveConversationCatalogDescriptor, type ArchiveConversationResult,
-  type ArchivedConversationCatalogDescriptor, type ClearConversationResult,
+  type ClearConversationResult,
   type ConversationCatalog, type ConversationCatalogAuthorizer, type ConversationCatalogDescriptor,
   type ConversationCatalogVersion, type CreateConversationResult, type GetConversationResult,
   type ListConversationsResult, type PermanentlyDeleteConversationResult,
@@ -43,6 +44,7 @@ import {
 import { isConversationApprovalReason, isConversationApprovalReviewedArguments,
   isLegalConversationApprovalProposalTransition } from "../conversation/events.js";
 import type { ConversationApprovalProposalRecord, ConversationEventAttribution } from "../conversation/state.js";
+import { isConversationApprovalProposalRecord } from "../conversation/state-validation.js";
 
 export const POSTGRES_PERSISTENCE_SCHEMA_VERSION = 1 as const;
 
@@ -372,7 +374,7 @@ export class PostgresConversationEventStore implements ConversationEventStore {
     if (events.some((event) => event.conversation_id !== input.conversationId || event.revision !== expected++)) {
       return this.appendConflict("invalid_append", input, null, null);
     }
-    return this.persistence.client.transaction(async (tx) => {
+    try { return await this.persistence.client.transaction(async (tx) => {
       await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`${this.tenantId}\0${input.conversationId}`]);
       const identifiers = events.flatMap((event) => [event.event_id, ...(event.mutation_id ? [event.mutation_id] : [])]);
       const duplicates = await tx.query<{ payload: ConversationEvent }>(
@@ -397,7 +399,7 @@ export class PostgresConversationEventStore implements ConversationEventStore {
       );
       return Object.freeze({ status: "appended" as const, entries: Object.freeze(events.map(storedEvent)),
         latestRevision: events.at(-1)!.revision });
-    });
+    }); } catch (error) { throw this.storeError(error, "append"); }
   }
 
   async read(input: ReadConversationEventsInput): Promise<ReadConversationEventsResult> {
@@ -405,7 +407,7 @@ export class PostgresConversationEventStore implements ConversationEventStore {
       : input.after?.revision ?? 0;
     const limit = input.limit ?? 1_000;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) throw new TypeError("Event read limit is invalid");
-    return this.persistence.client.transaction(async (tx) => {
+    try { return await this.persistence.client.transaction(async (tx) => {
       const result = await tx.query<{ payload: ConversationEvent }>(
         "SELECT payload FROM handrail_ai_events WHERE tenant_id=$1 AND conversation_id=$2 AND revision>$3 ORDER BY revision LIMIT $4",
         [this.tenantId, input.conversationId, after, limit + 1],
@@ -413,11 +415,12 @@ export class PostgresConversationEventStore implements ConversationEventStore {
       const entries = Object.freeze(result.rows.slice(0, limit).map((row) => storedEvent(parseConversationEvent(row.payload))));
       return Object.freeze({ entries, nextCursor: entries.at(-1)?.cursor ?? null,
         latestRevision: await this.latest(tx, input.conversationId), hasMore: result.rows.length > limit });
-    });
+    }); } catch (error) { throw this.storeError(error, "read"); }
   }
 
-  getLatestRevision(conversationId: ConversationId): Promise<ConversationRevision | null> {
-    return this.latest(this.persistence.client, conversationId);
+  async getLatestRevision(conversationId: ConversationId): Promise<ConversationRevision | null> {
+    try { return await this.latest(this.persistence.client, conversationId); }
+    catch (error) { throw this.storeError(error, "latest_revision"); }
   }
 
   private async latest(client: PostgresSqlClient, conversationId: ConversationId): Promise<ConversationRevision | null> {
@@ -436,7 +439,8 @@ export class PostgresConversationEventStore implements ConversationEventStore {
   }
 
   private async readCheckpoint(conversationId: ConversationId): Promise<ConversationEventCheckpoint | null> {
-    return (await this.persistence.readCheckpoint<ConversationEventCheckpoint>(this.tenantId, conversationId))?.value ?? null;
+    try { return (await this.persistence.readCheckpoint<ConversationEventCheckpoint>(this.tenantId, conversationId))?.value ?? null; }
+    catch (error) { throw this.storeError(error, "checkpoint_read"); }
   }
 
   private async writeCheckpoint(checkpoint: ConversationEventCheckpoint): Promise<WriteConversationEventCheckpointResult> {
@@ -449,12 +453,17 @@ export class PostgresConversationEventStore implements ConversationEventStore {
       const saved = await this.persistence.writeCheckpoint(this.tenantId, checkpoint.conversationId, current?.version ?? null, checkpoint);
       return { status: "written", checkpoint: jsonClone(saved.value) };
     } catch (error) {
-      if (!(error instanceof PostgresPersistenceConflictError)) throw error;
+      if (!(error instanceof PostgresPersistenceConflictError)) throw this.storeError(error, "checkpoint_write");
       throw new ConversationEventStoreConflictError("The checkpoint conflicts with durable state.", {
         code: "checkpoint_conflict", conversationId: checkpoint.conversationId,
         expectedRevision: checkpoint.revision, actualRevision: null, identifier: null,
       });
     }
+  }
+
+  private storeError(error: unknown, operation: ConstructorParameters<typeof ConversationEventStoreUnavailableError>[0]): Error {
+    if (error instanceof ConversationEventStoreConflictError || error instanceof ConversationEventStoreUnavailableError) return error;
+    return new ConversationEventStoreUnavailableError(operation, "The conversation event store is unavailable.");
   }
 }
 
@@ -531,14 +540,16 @@ export class PostgresConversationCatalog<TAuthorizationContext> implements Conve
       values.push(cursor.primary, cursor.conversationId);
       cursorSql = ` AND (${primary}${comparison}$${primaryIndex} OR (${primary}=$${primaryIndex} AND conversation_id>$${idIndex}))`;
     }
-    const rows = await this.options.persistence.client.query<PostgresCatalogRow>(
-      `SELECT conversation_id,lifecycle,title,created_at,updated_at,archived_at,version::text AS version,metadata FROM handrail_ai_conversations WHERE tenant_id=$1 AND scope_id=$2${lifecycleSql}${cursorSql} ORDER BY ${primary} ${order},conversation_id ASC LIMIT $3`,
-      values,
-    );
-    const items = Object.freeze(rows.rows.slice(0, input.pageSize).map(catalogDescriptor));
-    const hasMore = rows.rows.length > input.pageSize, final = items.at(-1);
-    return Object.freeze({ items, hasMore, nextCursor: hasMore && final ? createConversationCatalogCursor(final, input.order) : null,
-      order: input.order });
+    try {
+      const rows = await this.options.persistence.client.query<PostgresCatalogRow>(
+        `SELECT conversation_id,lifecycle,title,created_at,updated_at,archived_at,version::text AS version,metadata FROM handrail_ai_conversations WHERE tenant_id=$1 AND scope_id=$2${lifecycleSql}${cursorSql} ORDER BY ${primary} ${order},conversation_id ASC LIMIT $3`,
+        values,
+      );
+      const items = Object.freeze(rows.rows.slice(0, input.pageSize).map(catalogDescriptor));
+      const hasMore = rows.rows.length > input.pageSize, final = items.at(-1);
+      return Object.freeze({ items, hasMore, nextCursor: hasMore && final ? createConversationCatalogCursor(final, input.order) : null,
+        order: input.order });
+    } catch (error) { throw this.storageError(error, "list"); }
   }
 
   async create(value: Parameters<ConversationCatalog<TAuthorizationContext>["create"]>[0]): Promise<CreateConversationResult> {
@@ -563,7 +574,9 @@ export class PostgresConversationCatalog<TAuthorizationContext> implements Conve
   async get(value: Parameters<ConversationCatalog<TAuthorizationContext>["get"]>[0]): Promise<GetConversationResult> {
     const input = parseGetConversationInput<TAuthorizationContext>(value); await this.allowed({ action: "get", authorizationContext: input.authorizationContext,
       conversationId: input.conversationId });
-    const descriptor = await this.lookup(this.options.persistence.client, this.options.scopeId(input.authorizationContext), input.conversationId);
+    let descriptor: ConversationCatalogDescriptor | null;
+    try { descriptor = await this.lookup(this.options.persistence.client, this.options.scopeId(input.authorizationContext), input.conversationId); }
+    catch (error) { throw this.storageError(error, "get"); }
     if (!descriptor) throw new ConversationCatalogError("not_found", "get");
     return Object.freeze({ operation: "get", status: "found", descriptor });
   }
@@ -608,11 +621,13 @@ export class PostgresConversationCatalog<TAuthorizationContext> implements Conve
     } catch (error) { throw this.idempotencyError(error, "permanent_delete"); }
   }
 
-  private async mutate(operation: "rename" | "clear" | "archive" | "restore", input: { authorizationContext: TAuthorizationContext;
+  private async mutate<TOperation extends "rename" | "clear" | "archive" | "restore", TSuccess extends "updated" | "cleared" | "archived" | "restored">(
+    operation: TOperation, input: { authorizationContext: TAuthorizationContext;
     conversationId: ConversationId; expectedVersion: ConversationCatalogVersion; idempotencyKey: string },
     update: (current: ConversationCatalogDescriptor, now: ConversationTimestamp) => ConversationCatalogDescriptor,
-    success: "updated" | "cleared" | "archived" | "restored",
-    contents?: PostgresConversationCatalogOptions<TAuthorizationContext>["clearContents"]): Promise<any> {
+    success: TSuccess,
+    contents?: PostgresConversationCatalogOptions<TAuthorizationContext>["clearContents"],
+  ): Promise<{ readonly operation: TOperation; readonly status: TSuccess | "idempotent"; readonly descriptor: ConversationCatalogDescriptor }> {
     await this.allowed({ action: operation, authorizationContext: input.authorizationContext, conversationId: input.conversationId });
     const scope = id(this.options.scopeId(input.authorizationContext), "scopeId");
     const logicalInput = { ...input } as Record<string, unknown>;
@@ -652,6 +667,9 @@ export class PostgresConversationCatalog<TAuthorizationContext> implements Conve
     if (error instanceof PostgresPersistenceConflictError) return new ConversationCatalogError("idempotency_conflict", operation);
     return new ConversationCatalogError("unavailable", operation);
   }
+  private storageError(error: unknown, operation: Parameters<ConversationCatalogAuthorizer<TAuthorizationContext>>[0]["action"]): Error {
+    return error instanceof ConversationCatalogError ? error : new ConversationCatalogError("unavailable", operation);
+  }
 }
 
 export interface PostgresApprovalProposalStoreOptions<TPermissionContext> {
@@ -672,7 +690,10 @@ function approvalId(value: unknown, operation: "create" | "get" | "list_group" |
 
 function approvalRecord(value: unknown, operation: "create" | "get" | "list_group" | "transition"): ConversationApprovalProposalRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ApprovalProposalStoreError("unavailable", operation);
-  return jsonClone(value) as ConversationApprovalProposalRecord;
+  let candidate: unknown;
+  try { candidate = jsonClone(value); } catch { throw new ApprovalProposalStoreError("unavailable", operation); }
+  if (!isConversationApprovalProposalRecord(candidate)) throw new ApprovalProposalStoreError("unavailable", operation);
+  return candidate;
 }
 
 function approvalTransition(current: ConversationApprovalProposalRecord, input: TransitionApprovalProposalInput<unknown>,
@@ -728,22 +749,22 @@ export class PostgresApprovalProposalStore<TPermissionContext> implements Approv
   async get(input: GetApprovalProposalInput<TPermissionContext>): Promise<ConversationApprovalProposalRecord | null> {
     approvalId(input.proposalId, "get"); await this.allowed({ operation: "get", permissionContext: input.permissionContext, proposalId: input.proposalId });
     const scope = id(this.options.scopeId(input.permissionContext), "scopeId");
-    return this.options.persistence.client.transaction(async (tx) => {
+    try { return await this.options.persistence.client.transaction(async (tx) => {
       const current = await this.lookup(tx, scope, input.proposalId, true);
       return current ? this.expireIfDue(tx, scope, current) : null;
-    });
+    }); } catch (error) { throw this.unavailable(error, "get"); }
   }
 
   async listGroup(input: ListApprovalProposalGroupInput<TPermissionContext>): Promise<readonly ConversationApprovalProposalRecord[]> {
     approvalId(input.groupId, "list_group"); await this.allowed({ operation: "list_group", permissionContext: input.permissionContext, groupId: input.groupId });
     const scope = id(this.options.scopeId(input.permissionContext), "scopeId");
-    return this.options.persistence.client.transaction(async (tx) => {
+    try { return await this.options.persistence.client.transaction(async (tx) => {
       const result = await tx.query<{ payload: unknown }>("SELECT payload FROM handrail_ai_approvals WHERE tenant_id=$1 AND scope_id=$2 AND group_id=$3 ORDER BY updated_at,proposal_id FOR UPDATE",
         [this.options.tenantId, scope, input.groupId]);
       const records: ConversationApprovalProposalRecord[] = [];
       for (const row of result.rows) records.push(await this.expireIfDue(tx, scope, approvalRecord(row.payload, "list_group")));
       return Object.freeze(records);
-    });
+    }); } catch (error) { throw this.unavailable(error, "list_group"); }
   }
 
   async transition(input: TransitionApprovalProposalInput<TPermissionContext>): Promise<ConversationApprovalProposalRecord> {
@@ -812,6 +833,9 @@ export class PostgresApprovalProposalStore<TPermissionContext> implements Approv
     if (error instanceof ApprovalProposalStoreError) return error;
     if (error instanceof PostgresPersistenceConflictError) return new ApprovalProposalStoreError("idempotency_conflict", operation);
     return new ApprovalProposalStoreError("unavailable", operation);
+  }
+  private unavailable(error: unknown, operation: "get" | "list_group"): Error {
+    return error instanceof ApprovalProposalStoreError ? error : new ApprovalProposalStoreError("unavailable", operation);
   }
 }
 import { createHash } from "node:crypto";

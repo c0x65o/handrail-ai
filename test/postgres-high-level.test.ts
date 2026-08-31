@@ -1,9 +1,38 @@
 import { describe, expect, it } from "vitest";
 import { PostgresAiPersistence, PostgresApprovalProposalStore, PostgresConversationCatalog, PostgresConversationEventStore, type PostgresSqlClient } from "../src/postgres/index.js";
-import { ConversationCatalogError } from "../src/index.js";
+import { ApprovalProposalStoreError, ConversationCatalogError, ConversationEventStoreUnavailableError } from "../src/index.js";
 import type { ConversationEvent, ConversationId } from "../src/index.js";
 
 describe("Postgres high-level adapters", () => {
+  it("normalizes database failures without leaking native details", async () => {
+    const client: PostgresSqlClient = {
+      query: async () => { throw new Error("postgres password=secret host=internal"); },
+      transaction: async (operation) => operation(client),
+    };
+    const persistence = new PostgresAiPersistence(client);
+    const eventStore = new PostgresConversationEventStore(persistence, "tenant-a");
+    await expect(eventStore.getLatestRevision("conversation-a" as ConversationId))
+      .rejects.toEqual(expect.objectContaining({
+        name: "ConversationEventStoreUnavailableError",
+        message: "The conversation event store is unavailable.",
+      }));
+    await expect(eventStore.getLatestRevision("conversation-a" as ConversationId))
+      .rejects.toBeInstanceOf(ConversationEventStoreUnavailableError);
+
+    const catalog = new PostgresConversationCatalog({ persistence, tenantId: "tenant-a",
+      scopeId: () => "company-a", authorize: async () => "allow" as const, createId: () => "conversation-a" as ConversationId });
+    await expect(catalog.list({ authorizationContext: {}, lifecycle: "active", pageSize: 10,
+      order: { field: "updated_at", direction: "desc" } }))
+      .rejects.toEqual(expect.objectContaining({ code: "unavailable", message: "The conversation catalog is unavailable." }));
+
+    const approvals = new PostgresApprovalProposalStore({ persistence, tenantId: "tenant-a",
+      scopeId: () => "company-a", authorize: async () => "allow" as const });
+    await expect(approvals.get({ permissionContext: {}, proposalId: "proposal-a" as never }))
+      .rejects.toEqual(expect.objectContaining({ code: "unavailable", message: "The approval proposal store is temporarily unavailable." }));
+    await expect(approvals.get({ permissionContext: {}, proposalId: "proposal-a" as never }))
+      .rejects.toBeInstanceOf(ApprovalProposalStoreError);
+  });
+
   it("durably creates proposal-only approvals and replays the exact idempotent result", async () => {
     const idempotency = new Map<string, { fingerprint: string; result: unknown }>();
     let approvalInserts = 0;

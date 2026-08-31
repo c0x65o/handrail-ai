@@ -3,17 +3,19 @@ import type { AttachmentReference } from "../protocol.js";
 import type { AttachmentUploadAdapter } from "../attachments/types.js";
 import type { LivePresenceEnvelope } from "../presence/live-delivery.js";
 import type { PresenceRecord } from "../presence/types.js";
-import type {
-  ArchiveConversationInput, ClearConversationInput, ConversationCatalog, CreateConversationInput,
-  GetConversationInput, ListConversationsInput, PermanentlyDeleteConversationInput,
-  RenameConversationInput, RestoreConversationInput, ArchiveConversationResult,
-  ClearConversationResult, CreateConversationResult, GetConversationResult,
-  ListConversationsResult, PermanentlyDeleteConversationResult,
-  RenameConversationResult, RestoreConversationResult,
+import {
+  ConversationCatalogError,
+  type ArchiveConversationInput, type ClearConversationInput, type ConversationCatalog, type CreateConversationInput,
+  type GetConversationInput, type ListConversationsInput, type PermanentlyDeleteConversationInput,
+  type RenameConversationInput, type RestoreConversationInput, type ArchiveConversationResult,
+  type ClearConversationResult, type CreateConversationResult, type GetConversationResult,
+  type ListConversationsResult, type PermanentlyDeleteConversationResult,
+  type RenameConversationResult, type RestoreConversationResult,
 } from "../conversation/catalog.js";
-import type {
-  ApprovalProposalStore, CreateApprovalProposalInput, GetApprovalProposalInput,
-  ListApprovalProposalGroupInput, TransitionApprovalProposalInput,
+import {
+  ApprovalProposalStoreError,
+  type ApprovalProposalStore, type CreateApprovalProposalInput, type GetApprovalProposalInput,
+  type ListApprovalProposalGroupInput, type TransitionApprovalProposalInput,
 } from "../conversation/approval-proposal-store.js";
 import type { ConversationApprovalProposalRecord } from "../conversation/state.js";
 import type { DocumentInputCapabilityDescriptor } from "../providers/index.js";
@@ -127,6 +129,20 @@ function failure(error: TransportError): Response {
 
 function publicFailure(error: unknown): Response {
   if (error instanceof Response) return error;
+  if (error instanceof ConversationCatalogError) {
+    const code: TransportError["code"] = error.code === "invalid_input" ? "invalid_request"
+      : error.code === "not_found" ? "not_found"
+      : error.code === "forbidden" ? "forbidden"
+      : error.code === "unavailable" || error.code === "unsupported" ? "unavailable" : "conflict";
+    return failure({ code, message: error.message, retryable: error.retryable });
+  }
+  if (error instanceof ApprovalProposalStoreError) {
+    const code: TransportError["code"] = error.code === "invalid_input" ? "invalid_request"
+      : error.code === "not_found" ? "not_found"
+      : error.code === "permission_denied" ? "forbidden"
+      : error.code === "unavailable" || error.code === "capacity_exceeded" ? "unavailable" : "conflict";
+    return failure({ code, message: error.message, retryable: error.retryable });
+  }
   return json({ ok: false, error: { code: "forbidden", message: "The request is not authorized.", retryable: false } }, 403);
 }
 

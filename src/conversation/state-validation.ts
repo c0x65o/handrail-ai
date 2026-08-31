@@ -6,7 +6,7 @@ import {
   type ConversationRevision,
 } from "./events.js";
 import { normalizeCitationRecords } from "../citations.js";
-import type { ConversationState } from "./state.js";
+import type { ConversationApprovalProposalRecord, ConversationState } from "./state.js";
 
 export function isConversationState(
   value: unknown,
@@ -290,6 +290,12 @@ function isToolCall(value: Record<string, unknown>): boolean {
     (value.approval_required_at === null || typeof value.approval_required_at === "string") &&
     isNullableAttribution(value.attribution) &&
     (value.result === null || isToolResult(value.result, value.tool_call_id as string));
+}
+
+export function isConversationApprovalProposalRecord(
+  value: unknown,
+): value is ConversationApprovalProposalRecord {
+  return isPlainRecord(value) && isApprovalProposal(value);
 }
 
 function isApprovalProposal(value: Record<string, unknown>): boolean {

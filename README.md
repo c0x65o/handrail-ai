@@ -16,6 +16,7 @@ Node.js 20 or newer is required for package tooling and trusted-server use.
 | `@handrail/ai` | Protocol, conversation runtime/store/catalog, citations, provider-context, approval, transcription, realtime voice, web-search, event-store and sync contracts, tools, presence, retry, and usage APIs | Runtime-neutral core; direct-provider construction and side effects are trusted-server only |
 | `@handrail/ai/browser` | IndexedDB stores plus generalized image/PDF attachment intake, audio capture, and WebRTC voice helpers | Browser only; no provider credentials or server-side tool execution |
 | `@handrail/ai/client` | Application-gateway transport and language-neutral wire types | Browser, React Native, and other Fetch/stream clients |
+| `@handrail/ai/react/headless` | Runtime provider, selectors, and actions with no DOM elements or `react-dom` import | React Native and fully custom React renderers |
 | `@handrail/ai/react` | Optional unstyled React bindings and accessible composition seams for chat, citations, conversation picking, approvals, transcription, and realtime voice | Browser/React; React is an optional peer |
 | `@handrail/ai/react/styled` | Optional responsive styled launcher/dialog/drawer/page preset | Browser/React; theme variables and renderers are application-owned |
 | `@handrail/ai/server/application-gateway` | Express-compatible adapter for the web-standard streaming gateway | Trusted application server only |
@@ -146,6 +147,16 @@ See [`docs/platform-contracts.md`](./docs/platform-contracts.md) for security,
 compatibility, package boundaries, and production persistence guidance. The
 read-only Spartan Aegis mapping is in
 [`docs/spartan-aegis-migration.md`](./docs/spartan-aegis-migration.md).
+
+React Native applications should import the transport, typed runtime/state, and
+resource APIs from `@handrail/ai/client`, and provider/selectors/actions from
+`@handrail/ai/react/headless`. That entry imports neither DOM components nor
+`react-dom`; render ordinary native `View`, `Text`, and `TextInput` components.
+Inject the platform's protected `fetch`, Blob upload support, and a durable
+`ConversationEventStore` backed by application-owned storage. The browser
+styled preset is intentionally not presented as native UI: a native drop-in
+would impose navigation and design-system dependencies, so native UI stays
+host-owned while the complete typed headless path remains shared.
 
 ## Direct/BYOK and managed operation
 

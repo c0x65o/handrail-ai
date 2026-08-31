@@ -1,6 +1,6 @@
 {
   "name": "@handrail/ai",
-  "version": "0.1.48",
+  "version": "0.1.49",
   "description": "Provider-neutral TypeScript primitives and runtime tooling for building AI applications with Handrail.",
   "license": "UNLICENSED",
   "type": "module",
@@ -26,6 +26,11 @@
       "types": "./dist/react/index.d.ts",
       "import": "./dist/react/index.js",
       "default": "./dist/react/index.js"
+    },
+    "./react/headless": {
+      "types": "./dist/react-headless/index.d.ts",
+      "import": "./dist/react-headless/index.js",
+      "default": "./dist/react-headless/index.js"
     },
     "./react/styled": {
       "types": "./dist/react-styled/index.d.ts",

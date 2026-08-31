@@ -24,13 +24,16 @@ const runtimeNeutralFiles = files.filter(
   (path) =>
     !/[\\/]browser[\\/]/u.test(path) &&
     !/[\\/]react[\\/]/u.test(path) &&
+    !/[\\/]react-headless[\\/]/u.test(path) &&
     !/[\\/]react-styled[\\/]/u.test(path) &&
     !/[\\/]server[\\/]/u.test(path) &&
-    !/[\\/]transports[\\/](?:managed-runtime|sse)\.d\.ts$/u.test(path) &&
+    !/[\\/](?:mcp|postgres)[\\/]/u.test(path) &&
+    !/[\\/]presence[\\/]live-delivery\.d\.ts$/u.test(path) &&
+    !/[\\/]transports[\\/](?:application-gateway|managed-runtime|sse)\.d\.ts$/u.test(path) &&
     !/[\\/]providers[\\/](?!index\.d\.ts$)[^\\/]+\.d\.ts$/u.test(path),
 );
 const browserDeclarationFiles = files.filter((path) => /[\\/]browser[\\/]/u.test(path));
-const reactDeclarationFiles = files.filter((path) => /[\\/](?:react|react-styled)[\\/]/u.test(path));
+const reactDeclarationFiles = files.filter((path) => /[\\/](?:react|react-headless|react-styled)[\\/]/u.test(path));
 const runtimeNeutralDeclarations = runtimeNeutralFiles
   .map((path) => readFileSync(path, "utf8"))
   .join("\n");

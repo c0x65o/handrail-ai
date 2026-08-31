@@ -144,4 +144,86 @@ describe("OpenAI Responses direct runtime integration", () => {
       content: [{ type: "text", text: "Invoice invoice-1 is paid." }],
     });
   });
+
+  it("durably rejects an OpenAI batch that exceeds Spartan's four-call budget before execution", async () => {
+    const adapter = createOpenAIResponsesProviderAdapter({
+      model: "gpt-test",
+      request: async function* () {
+        for (let index = 1; index <= 5; index += 1) {
+          yield {
+            type: "response.function_call_arguments.done",
+            call_id: `call_invoice_${index}`,
+            name: "lookup_invoice",
+            arguments: JSON.stringify({ id: `invoice-${index}` }),
+          };
+        }
+        yield {
+          type: "response.completed",
+          response: {
+            output: [],
+            usage: { input_tokens: 5, output_tokens: 5, total_tokens: 10 },
+          },
+        };
+      },
+    });
+    const transport = createDirectProviderTransport({
+      adapter,
+      createContext: (input): DirectProviderTurnContext => ({
+        request_id: "openai-budget-request",
+        trace_id: "openai-budget-trace",
+        turn_id: input.conversationTurnId,
+        attribution,
+        correlation_hints: input.request.correlation_hints,
+        usage: {
+          usage_receipt_id: "openai-budget-usage",
+          logical_request_id: "logical-openai-budget",
+          attempt: { id: "attempt-budget", index: 0 },
+          continuation: { id: "continuation-budget", index: 0 },
+          source: "provider",
+          quality: "reported",
+        },
+      }),
+    });
+    const runtime = await createConversationRuntime({
+      conversationId: "conversation_openai_budget" as ConversationId,
+      clientId: "client_openai_budget" as ConversationClientId,
+      eventStore: new InMemoryConversationEventStore(),
+      transport,
+    });
+    const registry = new ToolRegistry<ApplicationToolExecutor, undefined>();
+    const execute = vi.fn<ApplicationToolExecutor>(async ({ id }) => ({ id: String(id ?? "") }));
+    registry.register({ definition: lookup, executor: execute });
+    const discoveredTools = registry.discover({ context: undefined });
+    const executor = new BoundedToolExecutor({
+      registry,
+      policy: () => ({ outcome: "allow" }),
+      limits: { maxConcurrency: 1 },
+    });
+    const request = parseChatRequest({
+      protocol_version: AI_RUNTIME_PROTOCOL_VERSION,
+      continuation_of: null,
+      messages: [{ role: "user", content: [{ type: "text", text: "Check five invoices" }] }],
+      tools: discoveredTools,
+      tool_results: [],
+      generation: { max_output_tokens: 256, temperature: 0 },
+      correlation_hints: {},
+      metadata: {},
+    });
+
+    const result = await runToolLoop({
+      runtime,
+      initialTurn: runtime.sendMessage({ content: "Check five invoices", request }),
+      request,
+      discoveredTools,
+      executor,
+      applicationContext: undefined,
+      limits: { maxTotalToolCalls: 4 },
+    });
+
+    expect(result).toMatchObject({ status: "budget_exhausted", budget: "total_tool_calls", limit: 4 });
+    expect(execute).not.toHaveBeenCalled();
+    expect(runtime.getSnapshot().tool_loop_budget_exhaustions).toEqual([
+      expect.objectContaining({ budget: "total_tool_calls", limit: 4 }),
+    ]);
+  });
 });

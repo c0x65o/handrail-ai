@@ -40,7 +40,7 @@ test("declares request protection as an explicit trusted-server boundary", () =>
 
 test("isolates the new client, UI, gateway, MCP, and Postgres boundaries", () => {
   for (const subpath of [
-    "./client", "./react/styled", "./server/application-gateway",
+    "./client", "./react/headless", "./react/styled", "./server/application-gateway",
     "./connectors/mcp", "./persistence/postgres",
   ]) {
     assert.ok(packageJson.exports[subpath], `missing explicit export ${subpath}`);
@@ -49,6 +49,13 @@ test("isolates the new client, UI, gateway, MCP, and Postgres boundaries", () =>
     assert.equal(packageJson.dependencies[dependency], undefined);
     assert.equal(packageJson.peerDependencies[dependency], undefined);
   }
+});
+
+test("keeps the React Native headless entry free of DOM and react-dom dependencies", () => {
+  const source = readFileSync(path.join(packageRoot, "dist/react-headless/index.js"), "utf8");
+  const declarations = readFileSync(path.join(packageRoot, "dist/react-headless/index.d.ts"), "utf8");
+  assert.doesNotMatch(source, /["']react-dom["']|["']\.\.\/react\/(?:dialog|drawer|launcher)\.js["']/);
+  assert.doesNotMatch(declarations, /HTMLElement|HTMLInputElement|HTMLTextAreaElement|Document|Window/);
 });
 
 test("declares OpenAI as an explicit opt-in provider boundary", () => {
