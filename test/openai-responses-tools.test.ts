@@ -180,4 +180,28 @@ describe("OpenAI Responses deferred tool projection", () => {
       type: "input_file", filename: "invoice.pdf", file_data: "data:application/pdf;base64,AQID",
     })] }] });
   });
+
+  it("normalizes cancellation and retryable rate limits without leaking provider errors", async () => {
+    const invocation = (signal: AbortSignal) => ({
+      messages: [{ role: "user" as const, content: [{ type: "text" as const, text: "Check" }] }],
+      tools: [], tool_results: [], generation: { max_output_tokens: 100, temperature: 0 }, signal,
+      context: { request_id: "r", trace_id: "t", attribution: {} as never, correlation_hints: {} },
+    });
+    const collect = async (adapter: ReturnType<typeof createOpenAIResponsesProviderAdapter>, signal: AbortSignal) => {
+      const stream = adapter.invoke(invocation(signal)); const events = [];
+      for (;;) { const item = await stream.next(); if (item.done) return { events, result: item.value }; events.push(item.value); }
+    };
+    const controller = new AbortController(); controller.abort("deadline_exceeded");
+    const cancelled = await collect(createOpenAIResponsesProviderAdapter({ model: "gpt-example", request: async function* () {
+      yield { type: "response.completed", response: { output: [], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } };
+    } }), controller.signal);
+    expect(cancelled.events.at(-1)).toMatchObject({ type: "response.cancelled", reason: "deadline_exceeded" });
+    expect(cancelled.result).toMatchObject({ status: "cancelled" });
+
+    const limited = await collect(createOpenAIResponsesProviderAdapter({ model: "gpt-example", request: async function* () {
+      throw Object.assign(new Error("private provider detail"), { status: 429 });
+    } }), new AbortController().signal);
+    expect(limited.events.at(-1)).toMatchObject({ type: "response.error", error: { code: "rate_limited", retryable: true } });
+    expect(JSON.stringify(limited)).not.toContain("private provider detail");
+  });
 });
