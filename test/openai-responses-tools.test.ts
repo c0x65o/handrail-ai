@@ -35,13 +35,16 @@ describe("OpenAI Responses deferred tool projection", () => {
     const plan = createDeferredToolDiscoveryPlan({ tools: definitions.slice(0, 2), namespaces: [{ name: "aegis", description: "ERP", toolNames: definitions.slice(0, 2).map((tool) => tool.name) }] });
     const request = buildOpenAIResponsesRequest({
       model: "gpt-example", plan, supportsToolSearch: true,
+      toolChoice: "required", includeReasoningEncryptedContent: true, reasoningEffort: "low",
       invocation: {
         messages: [{ role: "user", content: [{ type: "text", text: "List assets" }] }], tools: definitions.slice(0, 2), tool_results: [],
         generation: { max_output_tokens: 1000, temperature: 0 }, signal: new AbortController().signal,
         context: { request_id: "r", trace_id: "t", attribution: {} as never, correlation_hints: {} },
       },
     });
-    expect(request).toMatchObject({ stream: true, store: false, parallel_tool_calls: false, max_output_tokens: 1000 });
+    expect(request).toMatchObject({ stream: true, store: false, parallel_tool_calls: false,
+      max_output_tokens: 1000, tool_choice: "required", include: ["reasoning.encrypted_content"],
+      reasoning: { effort: "low" } });
     expect(request.input[0]).toMatchObject({ role: "user" });
   });
 
@@ -82,6 +85,9 @@ describe("OpenAI Responses deferred tool projection", () => {
       model: "gpt-example",
       namespaces: [{ name: "aegis", description: "ERP", toolNames: ["aegis_tool_0"] }],
       hosted: { webSearch: { search_context_size: "low" } },
+      includeReasoningEncryptedContent: true,
+      reasoningEffort: "low",
+      toolChoice: (invocation) => invocation.continuation_of ? "auto" : "required",
       request: async function* (request) {
         nativeRequests.push(request);
         if (nativeRequests.length === 1) {
@@ -132,7 +138,8 @@ describe("OpenAI Responses deferred tool projection", () => {
       expect.objectContaining({ type: "reasoning", encrypted_content: "opaque" }),
       expect.objectContaining({ type: "function_call", call_id: "call-1" }),
       expect.objectContaining({ type: "function_call_output", call_id: "call-1", output: "ok" }),
-    ]) });
+    ]), tool_choice: "auto", include: ["reasoning.encrypted_content"], reasoning: { effort: "low" } });
+    expect(nativeRequests[0]).toMatchObject({ tool_choice: "required" });
   });
 
   it("rejects a namespaced function call that does not match the advertised identity", async () => {

@@ -52,6 +52,9 @@ export interface OpenAIResponsesRequest {
   readonly parallel_tool_calls: false;
   readonly max_output_tokens: number;
   readonly instructions?: string;
+  readonly tool_choice?: "auto" | "required";
+  readonly include?: readonly ["reasoning.encrypted_content"];
+  readonly reasoning?: { readonly effort: "minimal" | "low" | "medium" | "high" | "xhigh" };
 }
 
 export interface BuildOpenAIResponsesRequestOptions {
@@ -61,6 +64,9 @@ export interface BuildOpenAIResponsesRequestOptions {
   readonly supportsToolSearch: boolean;
   readonly hosted?: OpenAIResponsesHostedToolsOptions;
   readonly instructions?: string;
+  readonly toolChoice?: "auto" | "required";
+  readonly includeReasoningEncryptedContent?: boolean;
+  readonly reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh";
   /** Trusted, bounded provider-native items retained for a store:false continuation. */
   readonly continuationItems?: readonly JsonObject[];
   /** Trusted host projection for opaque image/document references. */
@@ -133,5 +139,8 @@ export function buildOpenAIResponsesRequest(options: BuildOpenAIResponsesRequest
     stream: true, store: false, parallel_tool_calls: false,
     max_output_tokens: options.invocation.generation.max_output_tokens,
     ...(options.instructions ? { instructions: options.instructions } : {}),
+    ...(options.toolChoice ? { tool_choice: options.toolChoice } : {}),
+    ...(options.includeReasoningEncryptedContent ? { include: ["reasoning.encrypted_content"] as const } : {}),
+    ...(options.reasoningEffort ? { reasoning: { effort: options.reasoningEffort } } : {}),
   });
 }

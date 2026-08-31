@@ -35,6 +35,11 @@ export interface OpenAIResponsesProviderOptions {
   readonly hosted?: OpenAIResponsesHostedToolsOptions;
   readonly supportsToolSearch?: boolean;
   readonly instructions?: string;
+  /** Provider-native tool selection. A resolver can force grounding only on the initial invocation. */
+  readonly toolChoice?: "auto" | "required" | ((invocation: ProviderAdapterInvocation) => "auto" | "required");
+  /** Requests the encrypted reasoning item required for store:false tool continuations. */
+  readonly includeReasoningEncryptedContent?: boolean;
+  readonly reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh";
   readonly contextWindowTokens?: number | null;
   readonly maxOutputTokens?: number | null;
   /** Optional host transcript policy; Spartan configures this to 30. */
@@ -341,6 +346,10 @@ export class OpenAIResponsesProviderAdapter implements ProviderAdapter {
         continuationItems: parent?.inputItems ?? [],
         ...(this.options.hosted ? { hosted: this.options.hosted } : {}),
         ...(this.options.instructions ? { instructions: this.options.instructions } : {}),
+        ...(this.options.toolChoice ? { toolChoice: typeof this.options.toolChoice === "function"
+          ? this.options.toolChoice(effectiveInvocation) : this.options.toolChoice } : {}),
+        ...(this.options.includeReasoningEncryptedContent ? { includeReasoningEncryptedContent: true } : {}),
+        ...(this.options.reasoningEffort ? { reasoningEffort: this.options.reasoningEffort } : {}),
         ...(resolved.size > 0 || this.options.resolveAttachment ? { resolveAttachment } : {}) });
       const source = await this.options.request(request, { signal: invocation.signal });
       let finalUsage: ProviderUsage | null = null;
