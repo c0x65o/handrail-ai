@@ -4,6 +4,8 @@ import {
   createApplicationGatewayTransport,
   negotiateApplicationGatewayCapabilities,
   type ApplicationGatewayCapabilities,
+  type ApplicationGatewayAttachmentSource,
+  type ApplicationGatewayPresenceClient,
   type ApplicationGatewayResourceClient,
   type ApplicationGatewayTransportOptions,
 } from "../transports/application-gateway.js";
@@ -16,6 +18,7 @@ import type { ConversationCatalog } from "../conversation/catalog.js";
 import type { ConversationEventStore } from "../conversation/event-store.js";
 import type { ConversationClientId, ConversationDeviceId } from "../conversation/events.js";
 import { createConversationRuntime } from "../runtime.js";
+import type { AttachmentUploadAdapter } from "../attachments/types.js";
 
 export interface HandrailAiClientBootstrapOptions<TEvent, TRequest, TAuthorizationContext, TSynchronization = unknown>
 extends ApplicationGatewayTransportOptions<TEvent, TSynchronization> {
@@ -39,11 +42,11 @@ export interface HandrailAiClient<TEvent, TRequest, TAuthorizationContext> {
   readonly transport: ConversationTransport<TEvent, TRequest>;
   readonly resources: ApplicationGatewayResourceClient;
   readonly activity: PollingConversationActivity | null;
-  readonly catalog: ConversationCatalog<unknown>;
+  readonly catalog: ConversationCatalog<TAuthorizationContext>;
   readonly registry: ConversationRuntimeRegistry<TRequest, TAuthorizationContext> | null;
   readonly workspace: ConversationWorkspace<TRequest, TAuthorizationContext> | null;
-  readonly attachmentUpload: unknown | null;
-  readonly presence: unknown | null;
+  readonly attachmentUpload: AttachmentUploadAdapter<ApplicationGatewayAttachmentSource> | null;
+  readonly presence: ApplicationGatewayPresenceClient | null;
   buildRequest(input: { readonly content: string; readonly attachments?: readonly unknown[] }): TRequest;
   markActivityRead(conversationId: string): Promise<void>;
   dispose(): Promise<void>;
@@ -71,7 +74,7 @@ export async function createHandrailAiClient<TEvent = unknown, TRequest = unknow
       }),
       ...(options.activityPollingMilliseconds === undefined ? {} : { intervalMilliseconds: options.activityPollingMilliseconds }) }) : null;
   if (activity && options.startActivityPolling !== false) activity.start();
-  const catalog = createApplicationGatewayConversationCatalog(resources, capabilities);
+  const catalog = createApplicationGatewayConversationCatalog<TAuthorizationContext>(resources, capabilities);
   const runtimeFactory = options.runtime ? (async (input: Parameters<ConversationRuntimeFactory<TRequest, TAuthorizationContext>>[0]) =>
     createConversationRuntime<TRequest>({ conversationId: input.conversationId, clientId: options.runtime!.clientId,
       ...(options.runtime!.deviceId === undefined ? {} : { deviceId: options.runtime!.deviceId }), transport,

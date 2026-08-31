@@ -6,6 +6,7 @@ import {
   InMemoryConversationEventStore,
   type ApplicationGatewayCapabilities,
 } from "../src/client/index.js";
+import type { AttachmentUploadAdapter, ConversationCatalog } from "../src/index.js";
 
 const capabilities: ApplicationGatewayCapabilities = Object.freeze({
   protocolVersion: APPLICATION_GATEWAY_PROTOCOL_VERSION,
@@ -48,6 +49,10 @@ describe("createHandrailAiClient", () => {
     expect(client.activity).toBeNull();
     expect(client.attachmentUpload).toBeNull();
     expect(client.presence).toBeNull();
+    const typedCatalog: ConversationCatalog<{ readonly actorId: string }> = client.catalog;
+    const typedUpload: AttachmentUploadAdapter<Blob> | null = client.attachmentUpload;
+    expect(typedCatalog).toBe(client.catalog);
+    expect(typedUpload).toBeNull();
     expect(client.buildRequest({ content: "hello", attachments: [{ id: "a" }] }))
       .toEqual({ prompt: "hello", attachmentCount: 1 });
     expect(eventStoreFor).not.toHaveBeenCalled();

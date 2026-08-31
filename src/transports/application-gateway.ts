@@ -634,31 +634,31 @@ function withoutAuthorization<T extends { readonly authorizationContext: unknown
  * The authorization context is intentionally ignored: the gateway derives it
  * from the protected request and never trusts a client-supplied identity.
  */
-export function createApplicationGatewayConversationCatalog(
+export function createApplicationGatewayConversationCatalog<TAuthorizationContext = unknown>(
   client: ApplicationGatewayResourceClient,
   capabilities?: ApplicationGatewayCapabilities,
-): ConversationCatalog<unknown> {
+): ConversationCatalog<TAuthorizationContext> {
   const negotiated = capabilities?.resources?.conversations;
   const catalogCapabilities = negotiated && typeof negotiated === "object"
     ? negotiated
     : fallbackCatalogCapabilities();
   return Object.freeze({
     capabilities: catalogCapabilities,
-    list: (input: ListConversationsInput<unknown>) => catalogOperation("list",
+    list: (input: ListConversationsInput<TAuthorizationContext>) => catalogOperation("list",
       () => client.listConversations(withoutAuthorization(input))),
-    create: (input: CreateConversationInput<unknown>) => catalogOperation("create",
+    create: (input: CreateConversationInput<TAuthorizationContext>) => catalogOperation("create",
       () => client.createConversation(withoutAuthorization(input))),
-    get: (input: GetConversationInput<unknown>) => catalogOperation("get",
+    get: (input: GetConversationInput<TAuthorizationContext>) => catalogOperation("get",
       () => client.getConversation(withoutAuthorization(input))),
-    rename: (input: RenameConversationInput<unknown>) => catalogOperation("rename",
+    rename: (input: RenameConversationInput<TAuthorizationContext>) => catalogOperation("rename",
       () => client.renameConversation(withoutAuthorization(input))),
-    clear: (input: ClearConversationInput<unknown>) => catalogOperation("clear",
+    clear: (input: ClearConversationInput<TAuthorizationContext>) => catalogOperation("clear",
       () => client.clearConversation(withoutAuthorization(input))),
-    archive: (input: ArchiveConversationInput<unknown>) => catalogOperation("archive",
+    archive: (input: ArchiveConversationInput<TAuthorizationContext>) => catalogOperation("archive",
       () => client.archiveConversation(withoutAuthorization(input))),
-    restore: (input: RestoreConversationInput<unknown>) => catalogOperation("restore",
+    restore: (input: RestoreConversationInput<TAuthorizationContext>) => catalogOperation("restore",
       () => client.restoreConversation(withoutAuthorization(input))),
-    permanentlyDelete: (input: PermanentlyDeleteConversationInput<unknown>) => catalogOperation(
+    permanentlyDelete: (input: PermanentlyDeleteConversationInput<TAuthorizationContext>) => catalogOperation(
       "permanent_delete",
       () => client.permanentlyDeleteConversation(withoutAuthorization(input)),
     ),

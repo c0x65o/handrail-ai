@@ -1,5 +1,6 @@
 /** Cross-platform client entry point: no React, Node, database, or provider dependencies. */
 export * from "./bootstrap.js";
+export * from "./presence.js";
 export {
   APPLICATION_GATEWAY_PROTOCOL_VERSION,
   ApplicationGatewayResourceError,

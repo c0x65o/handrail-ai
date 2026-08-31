@@ -50,6 +50,13 @@ Registration conversion must retain the Zod parser as the execution trust bounda
 
 The existing provider sends `web_search`, deferred `namespace` function tools, and `tool_search`, uses `store:false`, retains reasoning items, permits no parallel calls, and validates the returned namespace/name against its advertised set. Preserve all of those properties. `projectOpenAIResponsesTools` produces the same deferred layout from the actor-filtered plan and includes hosted web search when configured. For a model without tool search, it intentionally exposes only the plan's bounded eager tools; it does not silently send all 89 schemas. OpenAI documents namespace tools, `defer_loading`, hosted/client tool search, and web search in the [Responses API reference](https://developers.openai.com/api/reference/cli/resources/beta/subresources/responses).
 
+Configure `createOpenAIResponsesProviderAdapter` with
+`toolChoice: (invocation) => invocation.continuation_of ? "auto" : "required"`,
+`includeReasoningEncryptedContent: true`, and the application-selected
+`reasoningEffort`. This preserves Spartan's first-turn grounding rule while
+allowing a continuation to finish in prose, and retains the encrypted reasoning
+item required by a `store:false` tool continuation.
+
 ## Suggested cutover
 
 1. Wrap existing descriptors as one plugin and assert that the discovered name set is identical for representative roles.
@@ -73,6 +80,26 @@ Spartan's service remains authoritative for its Zod validation, actor/company
 scope, role-filtered tools, system prompt, proposals, confirmation side effects,
 hosted search/citations, and legacy records.
 
+Spartan can now opt into the drop-in browser workspace with
+`AEGIS_HANDRAIL_AI_CLIENT=handrail_ai`. The default remains `legacy`, and the
+server refuses to advertise the new client unless dual-write persistence and
+the protected application gateway are both available. The opt-in client uses
+IndexedDB scoped to the signed-in principal, keeps background threads alive,
+shows Running/Done/Error on the launcher, supports image/PDF upload, copy
+actions, streamed typing state, and protected proposal confirmation. Failure
+to load or negotiate the SDK leaves the legacy assistant available as the
+explicit fallback. A host can inject shared activity and presence delivery
+(Redis, NATS, Postgres NOTIFY, and similar) instead of the process-local
+default.
+
+This is deliberately a new-client qualification mode, not a multi-device
+history cutover. Spartan legacy rows still mint message/event identities that
+do not match browser-authored SDK event identities. Until the server owns one
+canonical mutation/event envelope for both paths, browser transcript state is
+durable on the local device only and the runtime config reports
+`synchronization: "local_device"`. Do not market or enable cross-device history
+convergence before that identity migration and its reconciliation tests land.
+
 Do not remove `provider.ts`, current Aegis routes, or old persistence during these steps. Cut reads over independently after the matching reconciliation report is converged. Binary attachment authorization/resolution, Zod schemas, company/actor construction, system instructions, proposal confirmation side effects, retention, and rollout flags remain Spartan-owned boundaries.
 
-Git dependencies require the package `prepare` script because public exports point at generated `dist` files. Production should pin an immutable tag or package integrity. Spartan's qualification seam currently pins `0.1.56`; the prior vendored artifact and legacy transport remain available for rollback. A temporary vendored tarball is acceptable for pre-release cross-repository qualification when its source version and lockfile integrity are reviewed together.
+Git dependencies require the package `prepare` script because public exports point at generated `dist` files. Production should pin an immutable tag or package integrity. Spartan's qualification seam currently pins `0.1.56`; the prior vendored artifact and legacy transport remain available for rollback. A temporary vendored tarball is acceptable for pre-release cross-repository qualification when its source version and lockfile integrity are reviewed together. Provider-loop cutover must consume a package containing the Responses grounding/reasoning request options documented above; the client opt-in itself is compatible with the current pinned artifact.
