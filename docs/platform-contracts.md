@@ -15,11 +15,17 @@ The stable contract versions introduced by this platform layer are `handrail.too
 
 ## Capability negotiation
 
-Clients call `/capabilities` before enabling cancellation, PDF/document input, attachments, presence, synchronization, conversation resources, approvals, or title generation. Unsupported capabilities must not expose callable adapters. Attachment media types and byte/file limits are server authority; client checks are only UX. A protocol version mismatch fails closed.
+Clients call `/capabilities` before enabling cancellation, PDF/document input, attachments, presence, activity, synchronization, conversation resources, approvals, or title generation. Unsupported capabilities must not expose callable adapters. Attachment media types and byte/file limits are server authority; client checks are only UX. A protocol version mismatch fails closed.
 
 ## Security and privacy
 
 Applications own authentication, conversation/tenant authorization, CSRF/origin checks, rate/concurrency limits, and idempotency fingerprints. Authorize discovery before revealing tool names and authorize execution immediately before the side effect. Treat schemas, tool output, web content, attachments, and persisted JSON as untrusted data. Provider keys and MCP credentials remain server-only.
+
+Application-hosted provider turns should wrap their low-level transport with `createDurableApplicationTransport`. Store `DurableApplicationTurnStore` records in `PostgresDurableApplicationTurnStore`, use an opaque request codec when prompts must not be retained, run a bounded `recoverPending` scan from one or more workers, and expose the result through the ordinary application gateway. Lease ownership, CAS writes, event checkpoints, replay, and cancellation are authoritative across processes; SSE connections are only observers.
+
+Binary attachments belong in application-owned object/blob storage through `createAttachmentStagingService`. Durable records contain authorization scope, expiry, byte/media metadata, and opaque references—not base64 payloads. Resolve immediately before provider use, consume/delete after use when the workflow permits it, and schedule bounded expiry cleanup.
+
+For principal- or session-dependent MCP connections, use `createRequestScopedMcpSession` per message. It authorizes before connecting or listing, authorizes again before every call, forwards the tool-call identity as the idempotency key, bounds the connection lifetime, and provides idempotent cleanup.
 
 Disconnecting a stream is not cancellation. Cancellation uses its own authorized, idempotent mutation. Resume only from a checkpoint durably applied on that device. Presence/typing is expiring and non-authoritative and must not enter transcripts, checkpoints, retention exports, or audit claims. Durable events, proposals, and execution results require tenant-scoped keys, atomic optimistic concurrency, defensive parsing, bounded reads, and encrypted transport/storage supplied by the host.
 

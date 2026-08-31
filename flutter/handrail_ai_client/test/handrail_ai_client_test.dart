@@ -179,4 +179,31 @@ void main() {
     expect(diagnostics.last, containsPair('retryable', true));
     client.close();
   });
+
+  test('loads typed cross-device activity records', () async {
+    final client = HandrailAiClient(
+      baseUri: Uri.parse('https://app.example/api/ai'),
+      httpClient: MockClient(
+        (request) async => http.Response(
+          jsonEncode({
+            'ok': true,
+            'value': [
+              {
+                'conversationId': 'remote-1',
+                'turnStatus': 'completed',
+                'unread': true,
+                'updatedAt': '2026-01-01T00:00:00.000Z',
+              },
+            ],
+          }),
+          200,
+        ),
+      ),
+    );
+    final activity = await client.listActivity();
+    expect(activity.single.conversationId, 'remote-1');
+    expect(activity.single.status, HandrailTurnStatus.completed);
+    expect(activity.single.unread, isTrue);
+    client.close();
+  });
 }

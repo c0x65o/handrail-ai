@@ -1,5 +1,6 @@
 export type AiDiagnosticDomain =
-  | "provider" | "gateway" | "retry" | "tool" | "mcp" | "approval" | "upstream";
+  | "provider" | "gateway" | "retry" | "tool" | "mcp" | "approval" | "presence" | "activity"
+  | "persistence" | "attachment" | "policy" | "validation" | "upstream";
 export type AiDiagnosticPhase = "started" | "succeeded" | "failed" | "retrying" | "cancelled";
 
 export interface AiDiagnosticEvent {

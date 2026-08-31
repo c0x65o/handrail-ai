@@ -39,6 +39,21 @@ import {
   type ToolRegistration,
 } from "../tools/registry.js";
 
+export {
+  createApplicationTurnTransport,
+  type ApplicationTurnExecutionContext,
+  type ApplicationTurnTransportOptions,
+} from "../transports/application-turn.js";
+export {
+  createDurableApplicationTransport,
+  InMemoryDurableApplicationTurnStore,
+  type DurableApplicationTransport,
+  type DurableApplicationTurnStore,
+  type DurableApplicationTurnRequestCodec,
+} from "../transports/durable.js";
+export { createAttachmentStagingService, type AttachmentBlobStore,
+  type AttachmentStagingMetadataStore } from "../attachments/staging.js";
+
 export const AI_APPLICATION_ASSEMBLY_VERSION = "handrail.ai-application.v1" as const;
 
 export interface AiApplicationPublicApproval {

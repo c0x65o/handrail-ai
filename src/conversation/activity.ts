@@ -21,6 +21,32 @@ export interface ConversationActivityStore extends ConversationActivityReadable 
   markRead(conversationId: ConversationId | string): void;
 }
 
+/** Server persistence contract for a principal/workspace-scoped activity index. */
+export interface DurableConversationActivityStore {
+  list(): Promise<readonly ConversationActivityRecord[]>;
+  upsert(record: ConversationActivityRecord): Promise<ConversationActivityRecord>;
+  markRead(conversationId: ConversationId | string): Promise<ConversationActivityRecord | null>;
+}
+
+/** Protected gateway handler. Authorization and scope selection happen before this handler is resolved. */
+export function createConversationActivityHttpHandler(store: DurableConversationActivityStore) {
+  return async (request: Request): Promise<Response> => {
+    if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
+    try {
+      const input = await request.json() as { readonly operation?: unknown; readonly conversationId?: unknown };
+      const value = input.operation === "list" ? await store.list()
+        : input.operation === "mark_read" && typeof input.conversationId === "string"
+          ? await store.markRead(input.conversationId) : undefined;
+      if (value === undefined) return new Response(null, { status: 400 });
+      return new Response(JSON.stringify({ ok: true, value }), { headers: { "content-type": "application/json; charset=utf-8" } });
+    } catch {
+      return new Response(JSON.stringify({ ok: false, error: { code: "unavailable",
+        message: "Conversation activity is unavailable.", retryable: true } }),
+      { status: 503, headers: { "content-type": "application/json; charset=utf-8" } });
+    }
+  };
+}
+
 const ACTIVITY_STATUSES = new Set<ConversationActivityTurnStatus>([
   "idle", "running", "completed", "error",
 ]);

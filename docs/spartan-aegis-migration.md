@@ -17,11 +17,11 @@ This is a migration seam, not a rewrite of Spartan's business domain. It was der
 | `provider.ts` Responses loop and normalized stream | `createOpenAIResponsesProviderAdapter` plus `runToolLoop({ limits: { maxTotalToolCalls: 75 } })`; configure `maximumInputMessages: 30` |
 | `tool-catalog.ts` namespace projection | `createDeferredToolDiscoveryPlan`; Spartan supplies stable namespace membership |
 | `handrail-bridge.ts` MCP discovery/execution glue | `@handrail/ai/connectors/mcp` |
-| routes, protected request plumbing, cancellation, replay | `createApplicationGateway` plus `@handrail/ai/server/application-gateway` |
-| thread/event/catalog persistence | `PostgresConversationEventStore`, `PostgresConversationCatalog`, `PostgresManagedRuntimeTurnStateStore`, and `PostgresConversationSyncStateStore` |
+| routes, protected request plumbing, cancellation, replay | `createDurableApplicationTransport` behind `createApplicationGateway` plus `@handrail/ai/server/application-gateway` |
+| thread/event/catalog persistence | `PostgresConversationEventStore`, `PostgresConversationCatalog`, `PostgresDurableApplicationTurnStore`, `PostgresConversationActivityStore`, and `PostgresConversationSyncStateStore` |
 | action request persistence and confirmation UI | approval proposal store and plugin approval presentation |
 | bespoke launcher/dialog/transcript/composer | unstyled `@handrail/ai/react` or optional `@handrail/ai/react/styled` |
-| typing animation and multi-device state | ephemeral live presence delivery; never the durable event log |
+| typing animation and multi-device state | `createAssistantActivityTransport`, live presence delivery/pub-sub, and protected activity; never the durable event log |
 | browser API wrappers | `@handrail/ai/client`; Flutter uses `flutter/handrail_ai_client` |
 
 ## Minimal plugin mapping
@@ -54,7 +54,7 @@ The existing provider sends `web_search`, deferred `namespace` function tools, a
 
 1. Wrap existing descriptors as one plugin and assert that the discovered name set is identical for representative roles.
 2. Replace only namespace projection, preserving provider code and golden request tests.
-3. Put the current routes behind the gateway transport. Use `DualWriteConversationEventStore` and `DualWriteApprovalProposalStore`; their primary stores remain authoritative and their reconciliation methods never overwrite divergence.
+3. Put the current routes behind the gateway transport. Wrap the application/provider transport with `createDurableApplicationTransport`; use an opaque request codec backed by Spartan-owned messages rather than storing prompt text in the turn document. Use `DualWriteConversationEventStore` and `DualWriteApprovalProposalStore`; their primary stores remain authoritative and their reconciliation methods never overwrite divergence.
 4. Migrate the client to the headless runtime, then the styled preset or a Spartan-owned UI. Keep old routes during rollback.
 5. Cut persistence reads over after event/revision, proposal, attachment, and catalog reconciliation. Remove duplicated generic code only after parity tests.
 
@@ -64,4 +64,4 @@ Required parity tests cover every role's discovered tools, denied cross-company 
 
 Do not remove `provider.ts`, current Aegis routes, or old persistence during these steps. Cut reads over independently after the matching reconciliation report is converged. Binary attachment authorization/resolution, Zod schemas, company/actor construction, system instructions, proposal confirmation side effects, retention, and rollout flags remain Spartan-owned boundaries.
 
-Git dependencies require the package `prepare` script because public exports point at generated `dist` files. Production should pin an immutable tag or package integrity. A temporary vendored tarball is acceptable for pre-release cross-repository qualification when its source version and lockfile integrity are reviewed together.
+Git dependencies require the package `prepare` script because public exports point at generated `dist` files. Production should pin an immutable tag or package integrity. Spartan's qualification seam currently pins `0.1.55-integration.0`; the previous `0.1.53-integration.0` tarball and legacy-only runtime flag remain available for rollback. A temporary vendored tarball is acceptable for pre-release cross-repository qualification when its source version and lockfile integrity are reviewed together.

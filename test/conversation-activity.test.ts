@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { InMemoryConversationActivityStore, PollingConversationActivity } from "../src/index.js";
+import { createConversationActivityHttpHandler, InMemoryConversationActivityStore, PollingConversationActivity } from "../src/index.js";
 
 describe("conversation activity", () => {
   it("tracks remote running, unread completion, errors, and read state", () => {
@@ -27,5 +27,20 @@ describe("conversation activity", () => {
     expect(activity.getSnapshot()).toEqual([expect.objectContaining({ conversationId: "remote", turnStatus: "running" })]);
     expect(load).toHaveBeenCalledOnce();
     activity.stop();
+  });
+
+  it("serves protected list and read operations through a scope-bound handler", async () => {
+    const markRead = vi.fn(async () => ({ conversationId: "remote", turnStatus: "completed" as const, unread: false }));
+    const handler = createConversationActivityHttpHandler({
+      async list() { return [{ conversationId: "remote", turnStatus: "completed", unread: true }]; },
+      async upsert(record) { return record; }, markRead,
+    });
+    const listed = await handler(new Request("https://app.example/activity", { method: "POST",
+      body: JSON.stringify({ operation: "list" }) }));
+    expect((await listed.json()).value).toEqual([expect.objectContaining({ conversationId: "remote", unread: true })]);
+    const read = await handler(new Request("https://app.example/activity", { method: "POST",
+      body: JSON.stringify({ operation: "mark_read", conversationId: "remote" }) }));
+    expect((await read.json()).value.unread).toBe(false);
+    expect(markRead).toHaveBeenCalledWith("remote");
   });
 });

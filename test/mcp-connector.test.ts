@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createMcpConnectorAdapter } from "../src/mcp/index.js";
+import { createMcpConnectorAdapter, createRequestScopedMcpSession } from "../src/mcp/index.js";
 
 describe("MCP connector adapter", () => {
   it("authorizes discovery and execution and forwards tool-call idempotency", async () => {
@@ -56,5 +56,27 @@ describe("MCP connector adapter", () => {
     for await (const registration of registrations) values.push(registration);
     expect(values[0]?.discover?.({ companyId: "company-a" })).toBe(true);
     expect(values[0]?.discover?.({ companyId: "company-b" })).toBe(false);
+  });
+
+  it("creates an authorized per-request connection and closes it idempotently", async () => {
+    const close = vi.fn(), callTool = vi.fn(async () => ({ accepted: true }));
+    const connect = vi.fn(async () => ({ close, callTool,
+      async listTools() { return { tools: [{ name: "create_invoice", inputSchema: { type: "object" as const } }] }; } }));
+    const authorize = vi.fn(async () => "allow" as const);
+    const session = await createRequestScopedMcpSession({ connectorId: "spartan", namespace: "erp", connect, authorize },
+      { actorId: "actor-1", companyId: "company-1" });
+    expect(session.tools.map((tool) => tool.name)).toEqual(["erp.create_invoice"]);
+    await session.callTool({ name: "erp.create_invoice", arguments: {}, toolCallId: "call-1" });
+    expect(callTool).toHaveBeenCalledWith(expect.objectContaining({ name: "create_invoice", idempotencyKey: "call-1" }));
+    await session.close(); await session.close();
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(authorize).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not connect when scoped discovery is denied", async () => {
+    const connect = vi.fn();
+    await expect(createRequestScopedMcpSession({ connectorId: "private", connect,
+      authorize: async () => "deny" as const }, {})).rejects.toThrow("not authorized");
+    expect(connect).not.toHaveBeenCalled();
   });
 });

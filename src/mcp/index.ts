@@ -22,6 +22,24 @@ export interface McpConnectorClient {
     readonly idempotencyKey: string;
     readonly signal: AbortSignal;
   }): Promise<JsonValue>;
+  close?(): void | Promise<void>;
+}
+
+export interface RequestScopedMcpConnectorOptions<TContext> {
+  readonly connectorId: string;
+  /** Creates a connection only after discovery authorization succeeds. */
+  readonly connect: (context: TContext, signal: AbortSignal) => McpConnectorClient | Promise<McpConnectorClient>;
+  readonly authorize: (request: McpAuthorizationRequest<TContext>) => "allow" | "deny" | Promise<"allow" | "deny">;
+  readonly namespace?: string;
+  readonly timeoutMilliseconds?: number;
+  readonly diagnostics?: AiDiagnosticSink;
+}
+
+export interface RequestScopedMcpSession {
+  readonly tools: readonly McpListedTool[];
+  callTool(input: { readonly name: string; readonly arguments: JsonObject; readonly toolCallId: string;
+    readonly signal?: AbortSignal }): Promise<JsonValue>;
+  close(): Promise<void>;
 }
 
 export interface McpAuthorizationRequest<TContext> {
@@ -55,6 +73,57 @@ export interface McpConnectorAdapterOptions<TContext, TAdapterContext = TContext
 function identifier(value: string, field: string): string {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,127}$/.test(value)) throw new TypeError(`${field} is invalid`);
   return value;
+}
+
+/**
+ * Principal/session-dependent MCP lifecycle for per-message connector lists.
+ * Authorization precedes both connection/disclosure and every execution;
+ * close is idempotent and all remote work is time bounded.
+ */
+export async function createRequestScopedMcpSession<TContext>(
+  options: RequestScopedMcpConnectorOptions<TContext>, context: TContext, signal?: AbortSignal,
+): Promise<RequestScopedMcpSession> {
+  const connectorId = identifier(options.connectorId, "connectorId");
+  const timeoutMilliseconds = options.timeoutMilliseconds ?? 30_000;
+  if (!Number.isSafeInteger(timeoutMilliseconds) || timeoutMilliseconds < 100 || timeoutMilliseconds > 300_000) {
+    throw new TypeError("timeoutMilliseconds is invalid");
+  }
+  if (await options.authorize({ operation: "discover", context }) !== "allow") throw new TypeError("MCP discovery is not authorized");
+  const controller = new AbortController();
+  const abort = () => controller.abort(signal?.reason);
+  signal?.addEventListener("abort", abort, { once: true });
+  const timer = setTimeout(() => controller.abort(new Error("MCP operation timed out")), timeoutMilliseconds);
+  let client: McpConnectorClient | null = null, closed = false;
+  const close = async () => {
+    if (closed) return; closed = true; clearTimeout(timer); signal?.removeEventListener("abort", abort); controller.abort();
+    await client?.close?.();
+  };
+  try {
+    client = await options.connect(context, controller.signal);
+    const listed = await diagnoseAiOperation(options.diagnostics,
+      { domain: "mcp", operation: "scoped_list_tools", requestId: connectorId },
+      () => client!.listTools({ signal: controller.signal }));
+    const namespace = options.namespace === undefined ? "" : `${identifier(options.namespace, "namespace")}.`;
+    const remoteByPublic = new Map<string, string>();
+    const tools = Object.freeze(listed.tools.map((tool) => {
+      const remote = identifier(tool.name, "MCP tool name"), name = `${namespace}${remote}`;
+      if (remoteByPublic.has(name)) throw new TypeError("MCP server returned duplicate tool names");
+      remoteByPublic.set(name, remote); return Object.freeze({ ...tool, name });
+    }));
+    return Object.freeze({ tools,
+      async callTool(input: { readonly name: string; readonly arguments: JsonObject; readonly toolCallId: string;
+        readonly signal?: AbortSignal }) {
+        if (closed) throw new TypeError("MCP session is closed");
+        const remoteName = remoteByPublic.get(input.name); if (!remoteName) throw new TypeError("MCP tool is not disclosed");
+        if (await options.authorize({ operation: "execute", toolName: remoteName, context,
+          arguments: input.arguments, toolCallId: input.toolCallId }) !== "allow") throw new TypeError("MCP tool execution is not authorized");
+        if (input.signal?.aborted) throw input.signal.reason;
+        return diagnoseAiOperation(options.diagnostics,
+          { domain: "mcp", operation: "scoped_call_tool", toolName: remoteName, requestId: connectorId },
+          () => client!.callTool({ name: remoteName, arguments: input.arguments,
+            idempotencyKey: identifier(input.toolCallId, "toolCallId"), signal: input.signal ?? controller.signal }));
+      }, close });
+  } catch (error) { await close(); throw error; }
 }
 
 /**

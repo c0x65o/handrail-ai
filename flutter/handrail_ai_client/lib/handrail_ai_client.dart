@@ -14,6 +14,7 @@ class HandrailGatewayCapabilities {
   final Map<String, Object?>? attachments;
   final Map<String, Object?>? documentInput;
   final bool presence;
+  final bool activity;
   final bool synchronization;
   final Map<String, Object?> resources;
   const HandrailGatewayCapabilities({
@@ -21,6 +22,7 @@ class HandrailGatewayCapabilities {
     this.attachments,
     this.documentInput,
     required this.presence,
+    this.activity = false,
     required this.synchronization,
     this.resources = const {},
   });
@@ -34,6 +36,7 @@ class HandrailGatewayCapabilities {
             ? Map<String, Object?>.unmodifiable(json['documentInput'] as Map)
             : null,
         presence: json['presence'] == true,
+        activity: json['activity'] == true,
         synchronization: json['synchronization'] == true,
         resources: json['resources'] is Map
             ? Map<String, Object?>.unmodifiable(json['resources'] as Map)
@@ -136,6 +139,24 @@ class HandrailConversationActivityRecord {
     required this.unread,
     this.updatedAt,
   });
+  factory HandrailConversationActivityRecord.fromJson(
+    Map<String, Object?> json,
+  ) {
+    final status = switch (json['turnStatus']) {
+      'running' => HandrailTurnStatus.running,
+      'completed' => HandrailTurnStatus.completed,
+      'error' => HandrailTurnStatus.failed,
+      _ => HandrailTurnStatus.idle,
+    };
+    return HandrailConversationActivityRecord(
+      conversationId: json['conversationId'] as String,
+      status: status,
+      unread: json['unread'] == true,
+      updatedAt: json['updatedAt'] is String
+          ? DateTime.parse(json['updatedAt'] as String).toUtc()
+          : null,
+    );
+  }
 }
 
 class HandrailConversationWorkspaceSnapshot {
@@ -416,6 +437,32 @@ class HandrailAiClient {
 
   Future<Map<String, Object?>> synchronize(Map<String, Object?> input) =>
       _post('/synchronization', input);
+
+  Future<List<HandrailConversationActivityRecord>> listActivity() async {
+    final result = await _post('/activity', {'operation': 'list'});
+    final values = result['value'] as List? ?? const [];
+    return List.unmodifiable(
+      values.map(
+        (value) => HandrailConversationActivityRecord.fromJson(
+          Map<String, Object?>.from(value as Map),
+        ),
+      ),
+    );
+  }
+
+  Future<HandrailConversationActivityRecord?> markActivityRead(
+    String conversationId,
+  ) async {
+    final result = await _post('/activity', {
+      'operation': 'mark_read',
+      'conversationId': conversationId,
+    });
+    return result['value'] is Map
+        ? HandrailConversationActivityRecord.fromJson(
+            Map<String, Object?>.from(result['value'] as Map),
+          )
+        : null;
+  }
 
   Stream<HandrailStreamFrame> presence(String conversationId) => _streamRequest(
     http.Request(

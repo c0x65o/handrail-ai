@@ -3,6 +3,7 @@ import type { AttachmentReference } from "../protocol.js";
 import type { AttachmentUploadAdapter } from "../attachments/types.js";
 import type { LivePresenceEnvelope } from "../presence/live-delivery.js";
 import type { PresenceRecord } from "../presence/types.js";
+import type { ConversationActivityRecord } from "../conversation/activity.js";
 import {
   ConversationCatalogError,
   type ConversationCatalogAuthorizationAction,
@@ -54,6 +55,7 @@ export interface ApplicationGatewayCapabilities {
   readonly documentInput?: false | DocumentInputCapabilityDescriptor;
   readonly presence: boolean;
   readonly synchronization: boolean;
+  readonly activity?: boolean;
   readonly resources?: {
     /** Detailed lifecycle capabilities are returned by v1 servers when available. */
     readonly conversations: boolean | ConversationCatalogCapabilities;
@@ -76,7 +78,7 @@ export interface ApplicationGatewayRequestAuthorizer<TContext extends Applicatio
 }
 
 export type ApplicationGatewayAction = "capabilities" | "start" | "resume" | "cancel" |
-  "conversations" | "approvals" | "attachments" | "presence" | "synchronization" | "title_generation";
+  "conversations" | "approvals" | "attachments" | "presence" | "activity" | "synchronization" | "title_generation";
 
 export interface ApplicationGatewayTitleGeneration<TContext> {
   generate(input: { readonly conversationId: string; readonly idempotencyKey: string }, context: TContext, signal: AbortSignal): Promise<string>;
@@ -85,6 +87,7 @@ export interface ApplicationGatewayTitleGeneration<TContext> {
 export interface ApplicationGatewayResourceHandlers<TContext> {
   readonly attachments?: (request: Request, context: TContext) => Response | Promise<Response>;
   readonly presence?: (request: Request, context: TContext) => Response | Promise<Response>;
+  readonly activity?: (request: Request, context: TContext) => Response | Promise<Response>;
   readonly synchronization?: (request: Request, context: TContext) => Response | Promise<Response>;
 }
 
@@ -131,6 +134,10 @@ const EMPTY_CHECKPOINT: TurnResumePoint = {
 
 function json(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), { status, headers: JSON_HEADERS });
+}
+function diagnosticHeader(request: Request, name: string): string | undefined {
+  const value = request.headers.get(name);
+  return value && /^[A-Za-z0-9._:@/-]{1,256}$/u.test(value) ? value : undefined;
 }
 
 function transportStatus(error: TransportError): number {
@@ -240,6 +247,7 @@ export function createApplicationGateway<TEvent, TRequest, TContext extends Appl
     authoritativeCancellation: transport.capabilities.authoritativeCancellation.supported,
     attachments: options.capabilities?.attachments ?? false,
     presence: options.capabilities?.presence ?? false,
+    activity: options.capabilities?.activity ?? false,
     synchronization: options.capabilities?.synchronization ?? false,
     ...(options.capabilities?.documentInput === undefined ? {} : { documentInput: options.capabilities.documentInput }),
     resources: Object.freeze({ conversations: options.conversations?.capabilities ?? false,
@@ -248,6 +256,11 @@ export function createApplicationGateway<TEvent, TRequest, TContext extends Appl
   return Object.freeze({
     async handle(request: Request): Promise<Response> {
       let diagnosticAction: ApplicationGatewayAction | "route" = "route";
+      const requestStartedAt = Date.now();
+      const requestId = diagnosticHeader(request, "x-request-id"), traceId = diagnosticHeader(request, "traceparent");
+      const diagnosticCorrelation = {
+        ...(requestId ? { requestId } : {}), ...(traceId ? { traceId } : {}),
+      };
       try {
         const pathname = new URL(request.url).pathname.replace(/\/+$/, "");
         const action: ApplicationGatewayAction | null = pathname.endsWith("/capabilities") ? "capabilities"
@@ -258,6 +271,7 @@ export function createApplicationGateway<TEvent, TRequest, TContext extends Appl
           : pathname.includes("/approvals/") ? "approvals"
           : pathname.endsWith("/attachments") ? "attachments"
           : pathname.endsWith("/presence") ? "presence"
+          : pathname.endsWith("/activity") ? "activity"
           : pathname.endsWith("/synchronization") ? "synchronization"
           : pathname.endsWith("/titles/generate") ? "title_generation" : null;
         if (action === null) return new Response(null, { status: 404 });
@@ -270,7 +284,7 @@ export function createApplicationGateway<TEvent, TRequest, TContext extends Appl
         if (action === "capabilities") {
           return json({ ok: true, value: capabilitiesFor(await resolveTransport(authorizationContext)) });
         }
-        if (action === "attachments" || action === "presence" || action === "synchronization") {
+        if (action === "attachments" || action === "presence" || action === "activity" || action === "synchronization") {
           const handler = options.handlers?.[action];
           return handler ? handler(request, authorizationContext) : new Response(null, { status: 501 });
         }
@@ -309,16 +323,18 @@ export function createApplicationGateway<TEvent, TRequest, TContext extends Appl
           const transport = await resolveTransport(authorizationContext);
           const input = await body<StartTurnInput<TRequest>>(request, maximumBytes);
           emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: "start", phase: "started",
-            conversationId: input.conversationId, turnId: input.conversationTurnId });
+            conversationId: input.conversationId, turnId: input.conversationTurnId, ...diagnosticCorrelation });
           const result = await transport.startTurn(input);
           if (!result.ok) {
             emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: "start", phase: "failed",
               conversationId: input.conversationId, turnId: input.conversationTurnId,
-              code: result.error.code, retryable: result.error.retryable });
+              code: result.error.code, retryable: result.error.retryable, durationMs: Date.now() - requestStartedAt,
+              ...diagnosticCorrelation });
             return failure(result.error);
           }
           emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: "start", phase: "succeeded",
-            conversationId: result.value.conversationId, turnId: result.value.turnId });
+            conversationId: result.value.conversationId, turnId: result.value.turnId,
+            durationMs: Date.now() - requestStartedAt, ...diagnosticCorrelation });
           return sse(result.value.observation, options.checkpointForEvent, {
             type: "started", conversationId: result.value.conversationId,
             turnId: result.value.turnId, mutationId: result.value.mutationId,
@@ -328,10 +344,11 @@ export function createApplicationGateway<TEvent, TRequest, TContext extends Appl
           const transport = await resolveTransport(authorizationContext);
           const input = await body<ResumeTurnInput>(request, maximumBytes);
           emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: "resume", phase: "started",
-            conversationId: input.conversationId, turnId: input.turnId });
+            conversationId: input.conversationId, turnId: input.turnId, ...diagnosticCorrelation });
           const result = await transport.resumeTurn(input);
           emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: "resume",
             phase: result.ok ? "succeeded" : "failed", conversationId: input.conversationId, turnId: input.turnId,
+            durationMs: Date.now() - requestStartedAt, ...diagnosticCorrelation,
             ...(!result.ok ? { code: result.error.code, retryable: result.error.retryable } : {}) });
           return result.ok ? sse(result.value, options.checkpointForEvent) : failure(result.error);
         }
@@ -340,15 +357,17 @@ export function createApplicationGateway<TEvent, TRequest, TContext extends Appl
         if (!cancel.supported) return new Response(null, { status: 501 });
         const input = await body<CancelTurnInput>(request, maximumBytes);
         emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: "cancel", phase: "started",
-          conversationId: input.conversationId, turnId: input.turnId });
+          conversationId: input.conversationId, turnId: input.turnId, ...diagnosticCorrelation });
         const result = await cancel.capability.cancelTurn(input);
         emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: "cancel",
           phase: result.ok ? "succeeded" : "failed", conversationId: input.conversationId, turnId: input.turnId,
+          durationMs: Date.now() - requestStartedAt, ...diagnosticCorrelation,
           ...(!result.ok ? { code: result.error.code, retryable: result.error.retryable } : {}) });
         return result.ok ? json(result) : failure(result.error);
       } catch (error) {
         emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: diagnosticAction,
-          phase: "failed", code: error instanceof Error ? error.name : "unknown", cause: error });
+          phase: "failed", code: error instanceof Error ? error.name : "unknown", retryable: false,
+          durationMs: Date.now() - requestStartedAt, ...diagnosticCorrelation, cause: error });
         return publicFailure(error);
       }
     },
@@ -456,6 +475,10 @@ export async function negotiateApplicationGatewayCapabilities(
 type WithoutAuthorization<T> = Omit<T, "authorizationContext" | "permissionContext">;
 
 export interface ApplicationGatewayResourceClient {
+  /** Available when the negotiated gateway reports `activity: true`. */
+  listActivity?(): Promise<readonly ConversationActivityRecord[]>;
+  /** Available when the negotiated gateway reports `activity: true`. */
+  markActivityRead?(input: { readonly conversationId: string }): Promise<ConversationActivityRecord | null>;
   listConversations(input: WithoutAuthorization<ListConversationsInput<unknown>>): Promise<ListConversationsResult>;
   createConversation(input: WithoutAuthorization<CreateConversationInput<unknown>>): Promise<CreateConversationResult>;
   getConversation(input: WithoutAuthorization<GetConversationInput<unknown>>): Promise<GetConversationResult>;
@@ -629,6 +652,8 @@ export function createApplicationGatewayResourceClient(
     }
   };
   const client: ApplicationGatewayResourceClient = {
+    listActivity: () => invoke<readonly ConversationActivityRecord[]>("/activity", { operation: "list" }),
+    markActivityRead: (input) => invoke<ConversationActivityRecord | null>("/activity", { operation: "mark_read", ...input }),
     listConversations: (input) => invoke<ListConversationsResult>("/conversations/list", input),
     createConversation: (input) => invoke<CreateConversationResult>("/conversations/create", input),
     getConversation: (input) => invoke<GetConversationResult>("/conversations/get", input),

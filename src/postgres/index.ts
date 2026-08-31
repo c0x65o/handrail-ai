@@ -14,6 +14,12 @@ import {
   type ManagedRuntimeTurnStateStore,
 } from "../transports/managed-runtime-state.js";
 import {
+  durableApplicationTurnStartMatches,
+  type DurableApplicationTurnDocument,
+  type DurableApplicationTurnRecord,
+  type DurableApplicationTurnStore,
+} from "../transports/durable.js";
+import {
   CONVERSATION_SYNC_STATE_SCHEMA_VERSION,
   ConversationSyncStateStoreConflictError,
   type ConversationSyncStateRecord,
@@ -50,6 +56,12 @@ import type {
   OpenAIResponsesContinuationStore,
 } from "../providers/openai-responses.js";
 import { jsonValuesEqual } from "../json-equality.js";
+import {
+  parseConversationActivityRecord,
+  type ConversationActivityRecord,
+  type DurableConversationActivityStore,
+} from "../conversation/activity.js";
+import type { AttachmentBlobStore, AttachmentStagingMetadataStore, StagedAttachmentRecord } from "../attachments/staging.js";
 
 export const POSTGRES_PERSISTENCE_SCHEMA_VERSION = 1 as const;
 
@@ -76,9 +88,11 @@ export const handrailPostgresSchemaV1 = Object.freeze([
   `CREATE INDEX IF NOT EXISTS handrail_ai_conversations_updated ON handrail_ai_conversations (tenant_id, scope_id, lifecycle, updated_at DESC, conversation_id)`,
   `CREATE TABLE IF NOT EXISTS handrail_ai_approvals (tenant_id text NOT NULL, scope_id text NOT NULL, proposal_id text NOT NULL, group_id text, version bigint NOT NULL, payload jsonb NOT NULL, updated_at timestamptz NOT NULL, PRIMARY KEY (tenant_id, scope_id, proposal_id))`,
   `CREATE INDEX IF NOT EXISTS handrail_ai_approvals_group ON handrail_ai_approvals (tenant_id, scope_id, group_id, updated_at, proposal_id)`,
+  `CREATE TABLE IF NOT EXISTS handrail_ai_attachment_blobs (tenant_id text NOT NULL, blob_key text NOT NULL, payload bytea NOT NULL, media_type text NOT NULL, expires_at timestamptz NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (tenant_id, blob_key))`,
+  `CREATE INDEX IF NOT EXISTS handrail_ai_attachment_blobs_expiry ON handrail_ai_attachment_blobs (tenant_id, expires_at)`,
 ] as const);
 
-export type PostgresDocumentKind = "checkpoint" | "catalog" | "approval" | "turn_state" | "sync_state" | "openai_continuation" | "attachment";
+export type PostgresDocumentKind = "checkpoint" | "catalog" | "approval" | "turn_state" | "durable_turn" | "activity" | "sync_state" | "openai_continuation" | "attachment";
 
 export interface PostgresVersionedDocument<T = unknown> {
   readonly tenantId: string;
@@ -358,6 +372,172 @@ export class PostgresManagedRuntimeTurnStateStore implements ManagedRuntimeTurnS
         code: "replay_identity_conflict", conversationId: record.conversationId, turnId: record.turnId,
       });
     }
+  }
+}
+
+/** Tenant-scoped CAS store for application-hosted durable turn coordination. */
+export class PostgresDurableApplicationTurnStore<TStoredRequest = unknown, TEvent = unknown>
+implements DurableApplicationTurnStore<TStoredRequest, TEvent> {
+  constructor(readonly persistence: PostgresAiPersistence, readonly tenantId: string) { id(tenantId, "tenantId"); }
+
+  async load(conversationId: string, turnId: string): Promise<DurableApplicationTurnDocument<TStoredRequest, TEvent> | null> {
+    const document = await this.persistence.getDocument<DurableApplicationTurnRecord<TStoredRequest, TEvent>>(
+      this.tenantId, "durable_turn", conversationId, turnId,
+    );
+    return document ? { version: document.version, record: jsonClone(document.value) } : null;
+  }
+
+  async create(record: DurableApplicationTurnRecord<TStoredRequest, TEvent>) {
+    try {
+      const saved = await this.persistence.compareAndSetDocument({ tenantId: this.tenantId, kind: "durable_turn",
+        scopeId: record.conversationId, recordId: record.turnId, expectedVersion: null, value: record });
+      return { status: "created" as const, document: { version: saved.version, record: jsonClone(saved.value) } };
+    } catch (error) {
+      if (!(error instanceof PostgresPersistenceConflictError)) throw error;
+      const current = await this.load(record.conversationId, record.turnId);
+      return current && durableApplicationTurnStartMatches(current.record, record)
+        ? { status: "idempotent" as const, document: current }
+        : { status: "conflict" as const, document: current };
+    }
+  }
+
+  async compareAndSet(input: { readonly conversationId: string; readonly turnId: string; readonly expectedVersion: number;
+    readonly record: DurableApplicationTurnRecord<TStoredRequest, TEvent> }) {
+    try {
+      const saved = await this.persistence.compareAndSetDocument({ tenantId: this.tenantId, kind: "durable_turn",
+        scopeId: input.conversationId, recordId: input.turnId, expectedVersion: input.expectedVersion, value: input.record });
+      return { status: "updated" as const, document: { version: saved.version, record: jsonClone(saved.value) } };
+    } catch (error) {
+      if (!(error instanceof PostgresPersistenceConflictError)) throw error;
+      return { status: "conflict" as const, document: await this.load(input.conversationId, input.turnId) };
+    }
+  }
+
+  async listRecoverable(limit: number): Promise<readonly DurableApplicationTurnDocument<TStoredRequest, TEvent>[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) throw new TypeError("limit is invalid");
+    const result = await this.persistence.client.query<{ version: string; payload: DurableApplicationTurnRecord<TStoredRequest, TEvent> }>(
+      "SELECT version::text AS version,payload FROM handrail_ai_documents WHERE tenant_id=$1 AND kind='durable_turn' AND payload->>'status' IN ('pending','running') ORDER BY updated_at,record_id LIMIT $2",
+      [this.tenantId, limit],
+    );
+    return Object.freeze(result.rows.map((row) => Object.freeze({ version: Number(row.version), record: jsonClone(row.payload) })));
+  }
+}
+
+/** Durable cross-device activity index scoped to one authorized workspace/principal. */
+export class PostgresConversationActivityStore implements DurableConversationActivityStore {
+  constructor(readonly persistence: PostgresAiPersistence, readonly tenantId: string, readonly scopeId: string) {
+    id(tenantId, "tenantId"); id(scopeId, "scopeId");
+  }
+  async list(): Promise<readonly ConversationActivityRecord[]> {
+    const documents = await this.persistence.listDocuments<ConversationActivityRecord>(this.tenantId, "activity", this.scopeId, 1_000);
+    return Object.freeze(documents.map((document) => parseConversationActivityRecord(document.value)));
+  }
+  async upsert(input: ConversationActivityRecord): Promise<ConversationActivityRecord> {
+    const record = parseConversationActivityRecord(input);
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const current = await this.persistence.getDocument<ConversationActivityRecord>(this.tenantId, "activity", this.scopeId,
+        String(record.conversationId));
+      try {
+        const saved = await this.persistence.compareAndSetDocument({ tenantId: this.tenantId, kind: "activity",
+          scopeId: this.scopeId, recordId: String(record.conversationId), expectedVersion: current?.version ?? null, value: record });
+        return parseConversationActivityRecord(saved.value);
+      } catch (error) { if (!(error instanceof PostgresPersistenceConflictError)) throw error; }
+    }
+    throw new PostgresPersistenceConflictError();
+  }
+  async markRead(conversationId: string): Promise<ConversationActivityRecord | null> {
+    id(conversationId, "conversationId");
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const current = await this.persistence.getDocument<ConversationActivityRecord>(this.tenantId, "activity", this.scopeId, conversationId);
+      if (!current) return null;
+      const record = parseConversationActivityRecord(current.value);
+      if (!record.unread) return record;
+      try {
+        const saved = await this.persistence.compareAndSetDocument({ tenantId: this.tenantId, kind: "activity",
+          scopeId: this.scopeId, recordId: conversationId, expectedVersion: current.version, value: { ...record, unread: false } });
+        return parseConversationActivityRecord(saved.value);
+      } catch (error) { if (!(error instanceof PostgresPersistenceConflictError)) throw error; }
+    }
+    throw new PostgresPersistenceConflictError();
+  }
+}
+
+/** Application-owned Postgres bytea staging. Binary payloads never enter JSON documents. */
+export class PostgresAttachmentBlobStore implements AttachmentBlobStore {
+  constructor(readonly persistence: PostgresAiPersistence, readonly tenantId: string) { id(tenantId, "tenantId"); }
+  async put(input: { readonly key: string; readonly bytes: Uint8Array; readonly mediaType: string; readonly expiresAt: string }) {
+    await this.persistence.client.query(
+      "INSERT INTO handrail_ai_attachment_blobs (tenant_id,blob_key,payload,media_type,expires_at) VALUES ($1,$2,$3,$4,$5)",
+      [this.tenantId, id(input.key, "blobKey"), input.bytes, id(input.mediaType, "mediaType"), input.expiresAt],
+    );
+  }
+  async get(key: string): Promise<Uint8Array | null> {
+    const result = await this.persistence.client.query<{ payload: Uint8Array }>(
+      "SELECT payload FROM handrail_ai_attachment_blobs WHERE tenant_id=$1 AND blob_key=$2 AND expires_at>now()",
+      [this.tenantId, id(key, "blobKey")],
+    );
+    return result.rows[0] ? new Uint8Array(result.rows[0].payload) : null;
+  }
+  async delete(key: string): Promise<void> {
+    await this.persistence.client.query("DELETE FROM handrail_ai_attachment_blobs WHERE tenant_id=$1 AND blob_key=$2",
+      [this.tenantId, id(key, "blobKey")]);
+  }
+}
+
+/** Principal/workspace-scoped metadata index paired with PostgresAttachmentBlobStore. */
+export class PostgresAttachmentStagingMetadataStore implements AttachmentStagingMetadataStore {
+  constructor(readonly persistence: PostgresAiPersistence, readonly tenantId: string, readonly scopeId: string) {
+    id(tenantId, "tenantId"); id(scopeId, "scopeId");
+  }
+  async getByIdempotency(ownerScopeId: string, conversationId: string, idempotencyKey: string) {
+    if (ownerScopeId !== this.scopeId) return null;
+    const result = await this.persistence.client.query<{ payload: StagedAttachmentRecord }>(
+      "SELECT payload FROM handrail_ai_documents WHERE tenant_id=$1 AND kind='attachment' AND scope_id=$2 AND payload->>'conversationId'=$3 AND payload->>'idempotencyKey'=$4 LIMIT 1",
+      [this.tenantId, this.scopeId, id(conversationId, "conversationId"), id(idempotencyKey, "idempotencyKey")],
+    );
+    return result.rows[0] ? jsonClone(result.rows[0].payload) : null;
+  }
+  async getByContentRef(contentRef: string) {
+    const value = await this.persistence.getDocument<StagedAttachmentRecord>(this.tenantId, "attachment", this.scopeId,
+      id(contentRef, "contentRef"));
+    return value ? jsonClone(value.value) : null;
+  }
+  async create(record: StagedAttachmentRecord): Promise<"created" | "conflict"> {
+    return this.persistence.client.transaction(async (tx) => {
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        [advisoryLockKey(this.tenantId, "attachment", this.scopeId, record.conversationId, record.idempotencyKey)]);
+      const existing = await tx.query(
+        "SELECT 1 FROM handrail_ai_documents WHERE tenant_id=$1 AND kind='attachment' AND scope_id=$2 AND (record_id=$3 OR (payload->>'conversationId'=$4 AND payload->>'idempotencyKey'=$5)) LIMIT 1",
+        [this.tenantId, this.scopeId, record.contentRef, record.conversationId, record.idempotencyKey],
+      );
+      if (existing.rowCount > 0) return "conflict";
+      await tx.query("INSERT INTO handrail_ai_documents (tenant_id,kind,scope_id,record_id,version,payload) VALUES ($1,'attachment',$2,$3,1,$4::jsonb)",
+        [this.tenantId, this.scopeId, record.contentRef, JSON.stringify(record)]);
+      return "created";
+    });
+  }
+  async markConsumed(contentRef: string, consumedAt: string): Promise<void> {
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const current = await this.persistence.getDocument<StagedAttachmentRecord>(this.tenantId, "attachment", this.scopeId, contentRef);
+      if (!current || current.value.consumedAt) return;
+      try { await this.persistence.compareAndSetDocument({ ...current, expectedVersion: current.version,
+        value: { ...current.value, consumedAt } }); return;
+      } catch (error) { if (!(error instanceof PostgresPersistenceConflictError)) throw error; }
+    }
+    throw new PostgresPersistenceConflictError();
+  }
+  async listExpired(before: string, limit: number) {
+    const result = await this.persistence.client.query<{ payload: StagedAttachmentRecord }>(
+      "SELECT payload FROM handrail_ai_documents WHERE tenant_id=$1 AND kind='attachment' AND scope_id=$2 AND payload->>'expiresAt'<=$3 ORDER BY payload->>'expiresAt' LIMIT $4",
+      [this.tenantId, this.scopeId, before, limit],
+    );
+    return Object.freeze(result.rows.map((row) => jsonClone(row.payload)));
+  }
+  async delete(contentRef: string): Promise<void> {
+    const recordId = id(contentRef, "contentRef");
+    const current = await this.persistence.getDocument<StagedAttachmentRecord>(this.tenantId, "attachment", this.scopeId, recordId);
+    if (current) await this.persistence.deleteDocument({ tenantId: this.tenantId, kind: "attachment", scopeId: this.scopeId,
+      recordId, expectedVersion: current.version });
   }
 }
 
