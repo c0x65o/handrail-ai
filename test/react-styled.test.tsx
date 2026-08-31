@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
-import { StyledChatLauncher, StyledChatPreset, StyledChatPresetStyles, installToolRendererPlugins } from "../src/react-styled/index.js";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { StyledChatLauncher, StyledChatPreset, StyledChatPresetStyles, WorkspaceThreadPicker, installToolRendererPlugins } from "../src/react-styled/index.js";
 
 describe("styled React preset", () => {
   it("installs renderer plugins by stable keys without exposing server executors", () => {
@@ -55,5 +55,19 @@ describe("styled React preset", () => {
     const trigger = container.querySelector<HTMLButtonElement>(".hr-chat__launcher-trigger")!;
     expect(trigger.dataset.turnStatus).toBe("busy");
     expect(trigger.textContent).toContain("Running");
+  });
+  it("keeps New available while another conversation is running", async () => {
+    const open = vi.fn(async () => ({} as never));
+    const running = { selectedConversationId: "running", runningCount: 1, errorCount: 0,
+      unreadCount: 0, threads: [{ conversationId: "running", runtime: {}, turnStatus: "running",
+        unread: false, revision: 2 }] } as never;
+    render(<WorkspaceThreadPicker workspace={{ getSnapshot: () => running,
+      subscribe: () => () => undefined, open, select: vi.fn() }}
+      createConversation={async () => ({ authorizationContext: {}, conversationId: "new" as never })}/>);
+    const create = screen.getByRole("button", { name: "New" });
+    expect((create as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByText("Threads (1 running)")).toBeTruthy();
+    fireEvent.click(create);
+    await waitFor(() => expect(open).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "new" })));
   });
 });

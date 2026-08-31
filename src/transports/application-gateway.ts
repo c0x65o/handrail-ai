@@ -554,28 +554,39 @@ export function createApplicationGatewayResourceClient(
     emitAiDiagnostic(options.diagnostics, { domain, operation: path, phase: "started" });
     const url = `${base}${path}`;
     const initial: RequestInit = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) };
-    const response = await fetcher(url, await options.protectedRequest?.({ url, ...initial }) ?? initial);
-    const result = await response.json() as {
-      readonly ok?: boolean;
-      readonly value?: T;
-      readonly error?: Partial<TransportError>;
-      readonly resourceError?: ApplicationGatewayResourceFailure;
-    };
-    if (!response.ok || !result.ok) {
-      const resourceError = new ApplicationGatewayResourceError({
-      message: result.error?.message ?? "Application gateway request failed",
-      transportCode: result.error?.code ?? "unavailable",
-      retryable: result.error?.retryable ?? response.status >= 500,
-      ...(result.resourceError === undefined ? {} : { resourceError: result.resourceError }),
+    let statusCode: number | undefined;
+    try {
+      const response = await fetcher(url, await options.protectedRequest?.({ url, ...initial }) ?? initial);
+      statusCode = response.status;
+      const result = await response.json() as {
+        readonly ok?: boolean;
+        readonly value?: T;
+        readonly error?: Partial<TransportError>;
+        readonly resourceError?: ApplicationGatewayResourceFailure;
+      };
+      if (!response.ok || !result.ok) {
+        throw new ApplicationGatewayResourceError({
+          message: result.error?.message ?? "Application gateway request failed",
+          transportCode: result.error?.code ?? "unavailable",
+          retryable: result.error?.retryable ?? response.status >= 500,
+          ...(result.resourceError === undefined ? {} : { resourceError: result.resourceError }),
+        });
+      }
+      emitAiDiagnostic(options.diagnostics, { domain, operation: path, phase: "succeeded",
+        durationMs: Date.now() - startedAt, statusCode: response.status });
+      return result.value as T;
+    } catch (cause) {
+      const resourceError = cause instanceof ApplicationGatewayResourceError ? cause : undefined;
+      emitAiDiagnostic(options.diagnostics, {
+        domain: resourceError?.resourceDomain === "approval_proposals" ? "approval" : domain,
+        operation: path, phase: "failed", durationMs: Date.now() - startedAt,
+        code: resourceError?.resourceCode ?? resourceError?.transportCode ??
+          (cause instanceof Error ? cause.name : "unknown"),
+        retryable: resourceError?.retryable ?? true,
+        ...(statusCode === undefined ? {} : { statusCode }), cause,
       });
-      emitAiDiagnostic(options.diagnostics, { domain: result.resourceError?.domain === "approval_proposals" ? "approval" : "gateway",
-        operation: path, phase: "failed", code: resourceError.resourceCode ?? resourceError.transportCode,
-        retryable: resourceError.retryable, cause: resourceError });
-      throw resourceError;
+      throw cause;
     }
-    emitAiDiagnostic(options.diagnostics, { domain, operation: path, phase: "succeeded",
-      durationMs: Date.now() - startedAt, statusCode: response.status });
-    return result.value as T;
   };
   const client: ApplicationGatewayResourceClient = {
     listConversations: (input) => invoke<ListConversationsResult>("/conversations/list", input),

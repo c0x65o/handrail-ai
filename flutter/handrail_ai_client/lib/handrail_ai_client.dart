@@ -278,15 +278,28 @@ class HandrailAiClient {
   );
 
   Future<HandrailGatewayCapabilities> capabilities() async {
-    final response = await _http.get(
-      _uri('/capabilities'),
-      headers: await _headers(),
-    );
-    final body = _success(response);
-    final value = Map<String, Object?>.from(body['value'] as Map);
-    if (value['protocolVersion'] != applicationGatewayProtocolVersion)
-      throw StateError('Incompatible Handrail gateway protocol');
-    return HandrailGatewayCapabilities.fromJson(value);
+    final started = DateTime.now();
+    _diagnose('/capabilities', 'started');
+    try {
+      final response = await _http.get(
+        _uri('/capabilities'),
+        headers: await _headers(),
+      );
+      final body = _success(response);
+      final value = Map<String, Object?>.from(body['value'] as Map);
+      if (value['protocolVersion'] != applicationGatewayProtocolVersion)
+        throw StateError('Incompatible Handrail gateway protocol');
+      _diagnose(
+        '/capabilities',
+        'succeeded',
+        started: started,
+        statusCode: response.statusCode,
+      );
+      return HandrailGatewayCapabilities.fromJson(value);
+    } catch (error) {
+      _diagnoseFailure('/capabilities', started, error);
+      rethrow;
+    }
   }
 
   Stream<HandrailStreamFrame> startTurn(Map<String, Object?> request) =>
@@ -419,6 +432,7 @@ class HandrailAiClient {
             ? error.code
             : error.runtimeType.toString(),
         retryable: error is HandrailGatewayException && error.retryable,
+        statusCode: error is HandrailGatewayException ? error.statusCode : null,
       );
       rethrow;
     }
@@ -524,6 +538,19 @@ class HandrailAiClient {
     } catch (_) {
       // Observability is non-authoritative.
     }
+  }
+
+  void _diagnoseFailure(String operation, DateTime started, Object error) {
+    _diagnose(
+      operation,
+      'failed',
+      started: started,
+      code: error is HandrailGatewayException
+          ? error.code
+          : error.runtimeType.toString(),
+      retryable: error is HandrailGatewayException && error.retryable,
+      statusCode: error is HandrailGatewayException ? error.statusCode : null,
+    );
   }
 
   Map<String, Object?> _success(http.Response response) {

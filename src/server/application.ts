@@ -237,11 +237,10 @@ export async function createAiApplication<
     createGateway<TEvent, TRequest, TContext extends ApplicationGatewayAuthorizationContext>(
       gatewayOptions: ApplicationGatewayOptions<TEvent, TRequest, TContext>,
     ) {
+      const diagnostics = gatewayOptions.diagnostics ?? options.diagnostics;
       return createApplicationGateway({
         ...gatewayOptions,
-        ...(gatewayOptions.diagnostics ?? options.diagnostics
-          ? { diagnostics: gatewayOptions.diagnostics ?? options.diagnostics }
-          : {}),
+        ...(diagnostics ? { diagnostics } : {}),
       });
     },
   });

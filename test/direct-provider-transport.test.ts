@@ -186,6 +186,30 @@ async function collect(events: AsyncIterable<StreamEvent>): Promise<StreamEvent[
 }
 
 describe("createDirectProviderTransport", () => {
+  it("emits correlated provider lifecycle diagnostics without request payloads", async () => {
+    const diagnostics: import("../src/index.js").AiDiagnosticEvent[] = [];
+    const adapter = new FakeAdapter(async function* (invocation) {
+      yield { ...envelope(invocation, "response.started", 0), type: "response.started",
+        attribution: invocation.context.attribution };
+      yield { ...envelope(invocation, "response.completed", 1), type: "response.completed", outcome: "stop" };
+      return { status: "completed", outcome: "stop", usage };
+    });
+    const transport = createDirectProviderTransport({ adapter, createContext: () => context(),
+      diagnostics: (event) => diagnostics.push(event) });
+    const started = await transport.startTurn({ conversationId: "conversation_direct", conversationTurnId,
+      mutationId: "mutation_diagnostics", idempotencyKey: "idempotency_diagnostics", request });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    await collect(started.value.observation.events);
+    await started.value.observation.result;
+
+    expect(diagnostics.map((event) => event.phase)).toEqual(["started", "succeeded"]);
+    expect(diagnostics[1]).toEqual(expect.objectContaining({ providerId: "fake-direct",
+      modelId: "fake-model-v1", requestId: "request_direct", traceId: "trace_direct",
+      durationMs: expect.any(Number) }));
+    expect(JSON.stringify(diagnostics)).not.toContain("Hello");
+  });
+
   it("negotiates unsupported provider context and preserves long canonical input", async () => {
     const callbackAccess = vi.fn();
     const unsupportedProviderContext = new Proxy(

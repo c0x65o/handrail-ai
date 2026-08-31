@@ -29,6 +29,19 @@ function point(event: Event): TurnResumePoint {
 }
 
 describe("application-owned gateway transport", () => {
+  it("diagnoses network failures from typed resource calls", async () => {
+    const diagnostics: import("../src/index.js").AiDiagnosticEvent[] = [];
+    const failure = new Error("network unavailable");
+    const client = createApplicationGatewayResourceClient({ baseUrl: "https://app.test/ai",
+      fetch: vi.fn(async () => { throw failure; }), diagnostics: (event) => diagnostics.push(event) });
+    await expect(client.getConversation({ conversationId: "conversation-1" } as never)).rejects.toBe(failure);
+    expect(diagnostics).toEqual([
+      expect.objectContaining({ operation: "/conversations/get", phase: "started" }),
+      expect.objectContaining({ operation: "/conversations/get", phase: "failed", retryable: true,
+        durationMs: expect.any(Number), cause: failure }),
+    ]);
+  });
+
   it("injects server authorization into typed conversation resources", async () => {
     const create = vi.fn(async (input: { authorizationContext: { companyId: string }; title?: string }) => ({
       operation: "create" as const, status: "created" as const,
@@ -89,6 +102,7 @@ describe("application-owned gateway transport", () => {
   });
 
   it("negotiates capabilities, streams events, resumes, and cancels authoritatively", async () => {
+    const diagnostics: import("../src/index.js").AiDiagnosticEvent[] = [];
     const cancelTurn = vi.fn(async () => ({ ok: true as const, value: { status: "cancellation_requested" as const } }));
     const serverTransport: ConversationTransport<Event, { prompt: string }> = {
       capabilities: {
@@ -119,10 +133,14 @@ describe("application-owned gateway transport", () => {
       return gateway.handle(request);
     };
     const protectedRequest = (input: RequestInit & { url: string }) => ({ ...input, headers: { ...input.headers, authorization: "Bearer app" } });
-    const capabilities = await negotiateApplicationGatewayCapabilities({ baseUrl: "https://app.test/ai", fetch, protectedRequest });
+    const capabilities = await negotiateApplicationGatewayCapabilities({ baseUrl: "https://app.test/ai", fetch,
+      protectedRequest, diagnostics: (event) => diagnostics.push(event) });
     expect(capabilities.attachments).toMatchObject({ maximumFiles: 3 });
     const synchronization = { kind: "application-sync" };
-    const client = createApplicationGatewayTransport<Event, { prompt: string }, typeof synchronization>({ baseUrl: "https://app.test/ai", fetch, protectedRequest, capabilities, synchronization });
+    const client = createApplicationGatewayTransport<Event, { prompt: string }, typeof synchronization>({
+      baseUrl: "https://app.test/ai", fetch, protectedRequest, capabilities, synchronization,
+      diagnostics: (event) => diagnostics.push(event),
+    });
     expect(client.capabilities.presence.supported).toBe(true);
     expect(client.capabilities.synchronization).toEqual({ supported: true, capability: synchronization });
     const started = await client.startTurn({ conversationId: "c1", conversationTurnId: "client-turn" as never, mutationId: "m1", idempotencyKey: "i1", request: { prompt: "hi" } });
@@ -147,6 +165,12 @@ describe("application-owned gateway transport", () => {
       metadata: { mediaType: "image/png", byteSize: 3, filename: "a.png" }, idempotencyKey: "upload-1",
       signal: new AbortController().signal, onProgress() {},
     })).resolves.toMatchObject({ attachment_id: "attachment-1" });
+    expect(diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ operation: "capabilities", phase: "succeeded" }),
+      expect.objectContaining({ operation: "start", phase: "succeeded", conversationId: "c1" }),
+      expect.objectContaining({ operation: "resume", phase: "succeeded", conversationId: "c1" }),
+      expect.objectContaining({ operation: "cancel", phase: "succeeded", conversationId: "c1" }),
+    ]));
   });
 
   it("does not expose arbitrary authorization failures", async () => {

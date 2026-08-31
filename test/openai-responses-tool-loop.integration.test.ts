@@ -145,7 +145,7 @@ describe("OpenAI Responses direct runtime integration", () => {
     });
   });
 
-  it("durably rejects an OpenAI batch that exceeds Spartan's eight-call budget before execution", async () => {
+  it("durably rejects an OpenAI batch that exceeds the configured eight-call budget before execution", async () => {
     const adapter = createOpenAIResponsesProviderAdapter({
       model: "gpt-test",
       request: async function* () {
