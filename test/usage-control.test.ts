@@ -1,9 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import {
-  AIRuntimePreflightDeniedError,
-  createAIRuntimeUsageClient,
-} from "../src/server/usage-control.js";
+import { createAIRuntimeUsageClient } from "../src/server/usage-control.js";
+import { createAIRuntimeQuotaLeaseClient } from "../src/server/usage-control.js";
 import { parseNormalizedUsageReceipt } from "../src/usage.js";
 
 function receipt(id = "receipt-1") {
@@ -31,35 +29,42 @@ function receipt(id = "receipt-1") {
 }
 
 describe("AI Runtime usage-control client", () => {
-  it("injects only the server binding and normalized admission metadata", async () => {
-    const fetcher = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body));
-      expect(body).toEqual({ service_env_id: "service-env-1", idempotency_key: "logical-1", provider: "openai", model: "gpt-5.1", credential_mode: "customer_provided" });
-      return new Response(JSON.stringify({ contract_version: "v1", replayed: false,
-        request: { id: "request-1" }, policy_decision: { decision: "allow", reason_code: "within_policy" }, reservation: null }), { status: 201 });
-    });
-    const client = createAIRuntimeUsageClient({ apiUrl: "https://handrail.example/api/ai-runtime/v1", token: "server-token", serviceEnvId: "service-env-1", fetch: fetcher });
+  it("keeps admission local and observe-only so Handrail availability cannot block a provider call", async () => {
+    const fetcher = vi.fn();
+    const client = createAIRuntimeUsageClient({ apiUrl: "https://telemetry.example", token: "server-token", serviceEnvId: "service-env-1", fetch: fetcher });
     const result = await client.admit({ idempotency_key: "logical-1", provider: "openai", model: "gpt-5.1" });
-    expect(result.request.id).toBe("request-1");
-    expect(fetcher).toHaveBeenCalledOnce();
+    expect(result.request.id).toBe("logical-1");
+    expect(result.policy_decision).toMatchObject({ enforcement_mode: "observe", decision: "allow", reason_code: "telemetry_observe_only" });
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
-  it("turns an authoritative pre-request denial into a typed hard stop", async () => {
-    const fetcher = vi.fn(async () => new Response(JSON.stringify({ contract_version: "v1", replayed: false,
-      request: { id: "request-denied" }, policy_decision: { decision: "deny", reason_code: "period_token_ceiling_exceeded" }, reservation: null }), { status: 200 }));
-    const client = createAIRuntimeUsageClient({ apiUrl: "https://handrail.example/api/ai-runtime/v1", token: "server-token", serviceEnvId: "service-env-1", fetch: fetcher });
-    await expect(client.admit({ idempotency_key: "logical-1", provider: "openai", model: "gpt-5.1" })).rejects.toBeInstanceOf(AIRuntimePreflightDeniedError);
+  it("deduplicates local admission identities", async () => {
+    const client = createAIRuntimeUsageClient({ apiUrl: "https://telemetry.example", token: "server-token", serviceEnvId: "service-env-1", fetch: vi.fn() });
+    await client.admit({ idempotency_key: "logical-1", provider: "openai", model: "gpt-5.1" });
+    expect((await client.admit({ idempotency_key: "logical-1", provider: "openai", model: "gpt-5.1" })).replayed).toBe(true);
   });
 
   it("submits validated per-invocation receipts and a terminal request status", async () => {
     const fetcher = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body));
+      expect(String(_url)).toBe("https://telemetry.example/api/ai-usage/v1/receipts");
+      expect(body).toMatchObject({ service_env_id: "service-env-1" });
       expect(body.receipts.map((item: { usage_receipt_id: string }) => item.usage_receipt_id)).toEqual(["receipt-1", "receipt-2"]);
-      expect(body.request_status).toBe("cancelled");
-      return new Response(JSON.stringify({ contract_version: "v1", request: { id: "request-1" }, reservation: null, accepted_receipts: 2, replayed_receipts: 0 }), { status: 200 });
+      expect(body).not.toHaveProperty("request_status");
+      return new Response(JSON.stringify({ accepted_count: 2, duplicate_count: 0 }), { status: 202 });
     });
-    const client = createAIRuntimeUsageClient({ apiUrl: "https://handrail.example/api/ai-runtime/v1", token: "server-token", serviceEnvId: "service-env-1", fetch: fetcher });
+    const client = createAIRuntimeUsageClient({ apiUrl: "https://telemetry.example", token: "server-token", serviceEnvId: "service-env-1", fetch: fetcher });
     const result = await client.settle({ requestId: "request-1", receipts: [receipt("receipt-1"), receipt("receipt-2")], requestStatus: "cancelled" });
     expect(result.accepted_receipts).toBe(2);
+  });
+});
+
+describe("AI Runtime quota lease foundation", () => {
+  it("hard-stops before the next invocation only for an explicit strict deny lease", async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ lease_id: "lease-1", logical_request_id: "logical-1", enforcement_mode: "deny", decision: "deny", reason_code: "period_token_ceiling_exceeded", reserved_tokens: 0, output_token_limit: 100, strict: true, expires_at: new Date().toISOString() }), { status: 429 }));
+    const client = createAIRuntimeQuotaLeaseClient({ apiUrl: "https://telemetry.example", token: "server-token", serviceEnvId: "service-env-1", fetch: fetcher });
+    const lease = await client.acquire({ logicalRequestId: "logical-1", requestedTokens: 10 });
+    expect(() => client.assertCanInvoke(lease)).toThrow(/preflight denied/i);
+    expect(fetcher).toHaveBeenCalledWith("https://telemetry.example/api/ai-usage/v1/leases", expect.any(Object));
   });
 });
