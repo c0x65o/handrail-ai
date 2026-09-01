@@ -47,6 +47,28 @@ extends ApplicationGatewayTransportOptions<TEvent, TSynchronization> {
       ConversationEventStore | Promise<ConversationEventStore>;
     readonly authorize: ConversationRuntimeRegistryPolicy<TAuthorizationContext>;
   };
+  /**
+   * Recommended high-level conversation ownership. `single` creates exactly
+   * one runtime and no catalog registry/workspace; `multiple` owns the full
+   * registry/workspace graph. Mutually exclusive with the legacy runtime and
+   * createRuntime/authorizeRuntime options.
+   */
+  readonly conversations?:
+    | {
+        readonly mode: "single";
+        readonly conversationId: ConversationId;
+        readonly clientId: ConversationClientId;
+        readonly deviceId?: ConversationDeviceId;
+        readonly eventStore: ConversationEventStore | (() => ConversationEventStore | Promise<ConversationEventStore>);
+      }
+    | {
+        readonly mode: "multiple";
+        readonly clientId: ConversationClientId;
+        readonly deviceId?: ConversationDeviceId;
+        readonly eventStoreFor?: (input: Parameters<ConversationRuntimeFactory<TRequest, TAuthorizationContext>>[0]) =>
+          ConversationEventStore | Promise<ConversationEventStore>;
+        readonly authorize: ConversationRuntimeRegistryPolicy<TAuthorizationContext>;
+      };
   readonly buildRequest?: (input: { readonly content: string; readonly attachments: readonly unknown[] }) => TRequest;
   readonly activityPollingMilliseconds?: number;
   readonly startActivityPolling?: boolean;
@@ -64,6 +86,9 @@ extends ApplicationGatewayTransportOptions<TEvent, TSynchronization> {
 }
 
 export interface HandrailAiClient<TEvent, TRequest, TAuthorizationContext> {
+  readonly conversationMode: "none" | "single" | "multiple";
+  /** Present only in single-conversation mode. */
+  readonly conversation: ConversationRuntime<TRequest> | null;
   readonly capabilities: ApplicationGatewayCapabilities;
   readonly transport: ConversationTransport<TEvent, TRequest>;
   readonly resources: ApplicationGatewayResourceClient;
@@ -89,8 +114,10 @@ export async function createHandrailAiClient<TEvent = unknown, TRequest = unknow
   TAuthorizationContext = unknown, TSynchronization = unknown>(
   options: HandrailAiClientBootstrapOptions<TEvent, TRequest, TAuthorizationContext, TSynchronization>,
 ): Promise<HandrailAiClient<TEvent, TRequest, TAuthorizationContext>> {
+  const highLevel = options.conversations;
   if ((options.createRuntime === undefined) !== (options.authorizeRuntime === undefined) ||
-    options.runtime !== undefined && options.createRuntime !== undefined) {
+    options.runtime !== undefined && options.createRuntime !== undefined ||
+    highLevel !== undefined && (options.runtime !== undefined || options.createRuntime !== undefined)) {
     throw new TypeError("createRuntime and authorizeRuntime must be configured together");
   }
   const capabilities = options.capabilities ?? await negotiateApplicationGatewayCapabilities(options);
@@ -113,16 +140,17 @@ export async function createHandrailAiClient<TEvent = unknown, TRequest = unknow
   const presenceAdapter = presence === null ? null
     : synchronization ?? createApplicationGatewayPresenceAdapter(presence);
   const presenceControllers = new Map<ConversationId, PresenceController>();
-  if (options.runtime && options.runtime.eventStoreFor === undefined && synchronization === null) {
+  const multiple = highLevel?.mode === "multiple" ? highLevel : options.runtime;
+  if (multiple && multiple.eventStoreFor === undefined && synchronization === null) {
     throw new TypeError("A standard runtime requires eventStoreFor or negotiated synchronization");
   }
-  const runtimeFactory = options.runtime ? (async (input: Parameters<ConversationRuntimeFactory<TRequest, TAuthorizationContext>>[0]) =>
-    createConversationRuntime<TRequest>({ conversationId: input.conversationId, clientId: options.runtime!.clientId,
-      ...(options.runtime!.deviceId === undefined ? {} : { deviceId: options.runtime!.deviceId }), transport,
-      eventStore: options.runtime!.eventStoreFor
-        ? await options.runtime!.eventStoreFor(input)
+  const runtimeFactory = multiple ? (async (input: Parameters<ConversationRuntimeFactory<TRequest, TAuthorizationContext>>[0]) =>
+    createConversationRuntime<TRequest>({ conversationId: input.conversationId, clientId: multiple.clientId,
+      ...(multiple.deviceId === undefined ? {} : { deviceId: multiple.deviceId }), transport,
+      eventStore: multiple.eventStoreFor
+        ? await multiple.eventStoreFor(input)
         : createSynchronizedConversationEventStore({ adapter: synchronization! }) })) : options.createRuntime;
-  const runtimeAuthorization = options.runtime?.authorize ?? options.authorizeRuntime;
+  const runtimeAuthorization = multiple?.authorize ?? options.authorizeRuntime;
   const registry = runtimeFactory && runtimeAuthorization
     ? new ConversationRuntimeRegistry<TRequest, TAuthorizationContext>({
       catalog,
@@ -137,7 +165,29 @@ export async function createHandrailAiClient<TEvent = unknown, TRequest = unknow
       });
     },
   }) : null;
-  return Object.freeze({ capabilities, transport, resources, activity, catalog, registry, workspace,
+  const singleConfiguration = highLevel?.mode === "single" ? highLevel : null;
+  const conversation = singleConfiguration === null ? null : await createConversationRuntime<TRequest>({
+    conversationId: singleConfiguration.conversationId,
+    clientId: singleConfiguration.clientId,
+    ...(singleConfiguration.deviceId === undefined ? {} : { deviceId: singleConfiguration.deviceId }),
+    transport,
+    eventStore: typeof singleConfiguration.eventStore === "function"
+      ? await singleConfiguration.eventStore()
+      : singleConfiguration.eventStore,
+  });
+  if (conversation !== null && options.restoreActiveTurns !== false) {
+    try {
+      await conversation.restoreActiveTurn();
+    } catch (cause) {
+      emitAiDiagnostic(options.diagnostics, {
+        domain: "persistence", operation: "startup_recovery", phase: "failed",
+        conversationId: singleConfiguration!.conversationId,
+        code: "active_turn_recovery_failed", retryable: true, cause,
+      });
+    }
+  }
+  const conversationMode = singleConfiguration !== null ? "single" : multiple ? "multiple" : "none";
+  return Object.freeze({ conversationMode, conversation, capabilities, transport, resources, activity, catalog, registry, workspace,
     attachmentUpload, presence, synchronization,
     presenceControllerFor(conversationId: ConversationId) {
       if (presenceAdapter === null || options.presenceIdentity === undefined) return null;
@@ -168,6 +218,7 @@ export async function createHandrailAiClient<TEvent = unknown, TRequest = unknow
       activity?.stop();
       for (const controller of presenceControllers.values()) controller.destroy();
       presenceControllers.clear();
+      conversation?.destroy();
       await workspace?.dispose();
     } });
 }

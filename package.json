@@ -1,6 +1,6 @@
 {
   "name": "@handrail/ai",
-  "version": "0.1.78",
+  "version": "0.1.79",
   "description": "Provider-neutral TypeScript primitives and runtime tooling for building AI applications with Handrail.",
   "license": "UNLICENSED",
   "type": "module",
@@ -56,6 +56,11 @@
       "types": "./dist/server/trusted-server.d.ts",
       "import": "./dist/server/trusted-server.js",
       "default": "./dist/server/trusted-server.js"
+    },
+    "./server/assistant-context": {
+      "types": "./dist/server/assistant-context.d.ts",
+      "import": "./dist/server/assistant-context.js",
+      "default": "./dist/server/assistant-context.js"
     },
     "./server/usage-control": {
       "types": "./dist/server/usage-control.d.ts",
