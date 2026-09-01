@@ -22,6 +22,7 @@ Node.js 20 or newer is required for package tooling and trusted-server use.
 | `@handrail/ai/server/application-gateway` | Express-compatible adapter for the web-standard streaming gateway | Trusted application server only |
 | `@handrail/ai/server/application` | One-call trusted assembly for plugins, MCP connectors, policy, approvals, bounded tools, runtime, and gateway routing | Trusted application server only |
 | `@handrail/ai/server/managed` | Optional Handrail AI Runtime v1 streaming transport | Trusted server only |
+| `@handrail/ai/server/usage-control` | Server-only AI Runtime admission, hard-denial, and idempotent receipt-settlement client | Trusted server only |
 | `@handrail/ai/server/trusted-server` | Framework-neutral request protection contracts | Trusted server only |
 | `@handrail/ai/connectors/mcp` | Injected-client MCP tool-plugin/discovery adapter | Optional connector boundary |
 | `@handrail/ai/adapters/spartan-aegis` | Supported proposal-only adapter for Spartan's existing Aegis definitions and action registry | Trusted Spartan application server only |
@@ -539,9 +540,18 @@ and exact base-10 cost fields distinguish `reported`, `estimated`, and
 converted to floating point.
 
 Receipts are telemetry and attribution outputs, not settlement. Pricing,
-metering settlement, credits, billing, ledgers, databases, and Handrail
-control-plane policy remain owned by a later Handrail convergence loop and are
-not implemented as authoritative behavior in this package.
+metering settlement, credits, billing, ledgers, databases, and authoritative
+control-plane policy remain owned by Handrail and are not implemented in this
+package.
+
+`createAIRuntimeUsageClient` from `@handrail/ai/server/usage-control` submits
+preflight reservations and normalized receipt batches from a trusted
+application server. Its token and exact service-environment binding are
+server-only. Admission and settlement retry safely because request and receipt
+identities are idempotent; a typed `AIRuntimePreflightDeniedError` is the hard
+stop before any provider call. Empty receipt batches are accepted only when a
+request is finalized before provider usage. The helper never accepts prompts,
+credentials, or raw provider payloads and does not become settlement authority.
 
 ## Host-supplied boundaries
 
@@ -550,8 +560,9 @@ credentials, external-service operation, databases, application-specific
 authorization/retention policy, cross-device delivery, and production side
 effect ledgers remain host-owned and outside this package. The SDK does not
 mandate a web framework or infrastructure. It also does not supply a managed
-token issuer, pricing catalog, billing system, or Handrail control-plane
-client. MCP tools may be adapted through a separately versioned connector; this
+token issuer, pricing catalog, or billing system. Its narrow usage-control
+client consumes those Handrail-owned services without owning them. MCP tools
+may be adapted through a separately versioned connector; this
 package does not absorb ownership of that connector.
 
 Durable metadata, checkpoints, catalog rows, approval/audit records, usage
