@@ -29,6 +29,7 @@ import {
   type PresenceControllerTimingOptions,
 } from "../presence/controller.js";
 import type { PresenceParticipantKind } from "../presence/types.js";
+import { emitAiDiagnostic } from "../diagnostics.js";
 
 export interface HandrailAiClientBootstrapOptions<TEvent, TRequest, TAuthorizationContext, TSynchronization = unknown>
 extends ApplicationGatewayTransportOptions<TEvent, TSynchronization> {
@@ -49,6 +50,8 @@ extends ApplicationGatewayTransportOptions<TEvent, TSynchronization> {
   readonly buildRequest?: (input: { readonly content: string; readonly attachments: readonly unknown[] }) => TRequest;
   readonly activityPollingMilliseconds?: number;
   readonly startActivityPolling?: boolean;
+  /** Resume durably recorded active turns whenever a conversation is first opened. Defaults true. */
+  readonly restoreActiveTurns?: boolean;
   /** Optional high-level identity used to own one connected presence controller per conversation. */
   readonly presenceIdentity?: PresenceControllerTimingOptions & {
     readonly participantId: string;
@@ -125,7 +128,15 @@ export async function createHandrailAiClient<TEvent = unknown, TRequest = unknow
       catalog,
       createRuntime: runtimeFactory, authorize: runtimeAuthorization,
     }) : null;
-  const workspace = registry ? new ConversationWorkspace(registry) : null;
+  const workspace = registry ? new ConversationWorkspace(registry, {
+    restoreActiveTurns: options.restoreActiveTurns !== false,
+    onRecoveryError(conversationId, cause) {
+      emitAiDiagnostic(options.diagnostics, {
+        domain: "persistence", operation: "startup_recovery", phase: "failed",
+        conversationId, code: "active_turn_recovery_failed", retryable: true, cause,
+      });
+    },
+  }) : null;
   return Object.freeze({ capabilities, transport, resources, activity, catalog, registry, workspace,
     attachmentUpload, presence, synchronization,
     presenceControllerFor(conversationId: ConversationId) {

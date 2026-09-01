@@ -48,3 +48,19 @@ Read outcomes become application-tool outputs with normalized citations. Supply 
 - Correlated diagnostics for gateway, provider/upstream/retry, tool/MCP, approval, persistence, attachment, activity, and presence failures without prompts, credentials, or private proposal data.
 
 Record the legacy files and lines retired in the rollout report. Count only code made unreachable after the rollback observation period; shared adapters and retained Mills domain/security code are not removal. The Mills qualification seam must pin one immutable reviewed artifact and record its exact lockfile integrity; preserve the preceding reviewed artifact and the legacy routes for rollback until parity converges.
+
+## 0.1.74 rollout record
+
+Mills' production provider now wraps every non-empty request tool catalog in a
+real `createAiApplication` plus `createMillsFamilyPlugin` runtime. The existing
+runtime remains authoritative for Zod validation, session/household scope,
+domain reads, proposal creation, citations, and confirmed mutation execution.
+The application now honors the server's `legacy`/`handrail_ai` client selector;
+the selected headless client owns presence, durable recovery, concurrent
+conversation state, activity, attachments, and the embedded custom UI.
+
+Legacy generic code retired in this rollout: **0 lines**. Both the legacy client
+surface and legacy conversation transport remain reachable rollback paths.
+Removal is blocked until the production observation window proves the full
+reconciliation, multi-device, cancellation/reconnect, multi-instance failover,
+proposal exactly-once, attachment, citation, and error matrix above.

@@ -36,6 +36,11 @@ interface WorkspaceEntry<TRequest> {
   revision: number | null;
 }
 
+export interface ConversationWorkspaceOptions {
+  readonly restoreActiveTurns?: boolean;
+  readonly onRecoveryError?: (conversationId: ConversationId, error: unknown) => void;
+}
+
 function statusOf(runtime: ConversationRuntime<unknown>): ConversationWorkspaceTurnStatus {
   const state = runtime.store.getSnapshot();
   if (state.active_turn_id !== null) return "running";
@@ -53,6 +58,7 @@ function statusOf(runtime: ConversationRuntime<unknown>): ConversationWorkspaceT
  */
 export class ConversationWorkspace<TRequest, TAuthorizationContext = unknown> {
   readonly #registry: ConversationRuntimeRegistry<TRequest, TAuthorizationContext>;
+  readonly #options: ConversationWorkspaceOptions;
   readonly #entries = new Map<ConversationId, WorkspaceEntry<TRequest>>();
   readonly #listeners = new Set<Listener>();
   #selectedConversationId: ConversationId | null = null;
@@ -61,8 +67,9 @@ export class ConversationWorkspace<TRequest, TAuthorizationContext = unknown> {
     threads: Object.freeze([]),
   });
 
-  constructor(registry: ConversationRuntimeRegistry<TRequest, TAuthorizationContext>) {
+  constructor(registry: ConversationRuntimeRegistry<TRequest, TAuthorizationContext>, options: ConversationWorkspaceOptions = {}) {
     this.#registry = registry;
+    this.#options = options;
   }
 
   getSnapshot = (): ConversationWorkspaceSnapshot => this.#snapshot;
@@ -76,6 +83,13 @@ export class ConversationWorkspace<TRequest, TAuthorizationContext = unknown> {
     let entry = this.#entries.get(input.conversationId);
     if (entry === undefined) {
       const runtime = await this.#registry.open(input);
+      if (this.#options.restoreActiveTurns === true) {
+        try {
+          await runtime.restoreActiveTurn();
+        } catch (error) {
+          this.#options.onRecoveryError?.(input.conversationId, error);
+        }
+      }
       entry = {
         runtime, unsubscribe: () => undefined, turnStatus: statusOf(runtime), unread: false,
         revision: runtime.store.getSnapshot().revision,

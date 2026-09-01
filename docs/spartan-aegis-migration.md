@@ -121,3 +121,18 @@ business-side-effect authority until reconciliation reports are converged.
 Do not remove `provider.ts`, current Aegis routes, or old persistence during these steps. Cut reads over independently after the matching reconciliation report is converged. Binary attachment authorization/resolution, Zod schemas, company/actor construction, system instructions, proposal confirmation side effects, retention, and rollout flags remain Spartan-owned boundaries.
 
 Git dependencies require the package `prepare` script because public exports point at generated `dist` files. Production should pin an immutable tag or package integrity. Spartan's qualification seam pins one reviewed artifact while retaining its preceding artifact and the legacy transport for rollback. A temporary vendored tarball is acceptable for cross-repository qualification when its source revision, package version, and lockfile integrity are reviewed together. This artifact contains the Responses grounding/reasoning request options documented above, although removal of the legacy provider/persistence path remains independently gated by reconciliation and parity evidence.
+
+## 0.1.74 rollout record
+
+Spartan's production `AegisService` now constructs an actor-scoped
+`createAiApplication` with `createSpartanAegisPlugin` for every live request.
+ERP reads and proposal staging pass through SDK discovery, AJV plus Spartan Zod
+validation, host/plugin policy, bounded execution, cancellation, diagnostics,
+and call-id deduplication. The independently authenticated request-scoped MCP
+bridge remains isolated and confirmation still exclusively invokes Spartan's
+existing exactly-once business executor.
+
+Legacy generic code retired in this rollout: **0 lines**. The legacy provider,
+routes, and persistence remain reachable rollback paths. They must not be
+removed until the production observation window proves reconciliation,
+multi-instance delivery/failover, and all qualification cases above.
