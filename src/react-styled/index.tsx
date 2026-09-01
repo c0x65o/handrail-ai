@@ -1,5 +1,4 @@
-import { useState, type CSSProperties, type ReactNode } from "react";
-import ReactMarkdown from "react-markdown";
+import { Fragment, createElement, useState, type CSSProperties, type ReactNode } from "react";
 import type { ConversationAttachmentReference } from "../conversation/events.js";
 import type { ConversationMessageRecord, ConversationState, ConversationToolResultRecord } from "../conversation/state.js";
 import type { PresenceController } from "../presence/controller.js";
@@ -26,6 +25,23 @@ import { ChatDrawerContent, ChatDrawerOverlay, ChatDrawerPortal, ChatDrawerRoot,
 export const HANDRAIL_CHAT_PRESET_VERSION = "handrail.react-preset.v1" as const;
 
 export type StyledChatLayout = "launcher" | "dialog" | "drawer" | "page";
+export type HandrailChatThemeMode = "light" | "dark" | "system";
+
+export interface HandrailChatTheme {
+  readonly mode?: HandrailChatThemeMode;
+  readonly colors?: Partial<{
+    accent: string;
+    background: string;
+    panel: string;
+    text: string;
+    muted: string;
+    border: string;
+    danger: string;
+    activity: string;
+  }>;
+  readonly radii?: Partial<{ panel: string; message: string; control: string }>;
+  readonly fontFamily?: string;
+}
 
 export interface ToolResultRendererRegistry {
   readonly [rendererKey: string]: (result: ConversationToolResultRecord) => ReactNode;
@@ -121,6 +137,8 @@ export interface StyledChatPresetProps {
   readonly toolResultRenderers?: ToolResultRendererRegistry;
   readonly className?: string;
   readonly style?: CSSProperties;
+  /** Typed tokens layered over the selected light, dark, or system preset. */
+  readonly theme?: HandrailChatTheme;
   readonly labels?: Partial<{ attach: string; send: string; stop: string; retry: string; placeholder: string }>;
 }
 
@@ -138,15 +156,37 @@ const DEFAULT_LABELS = { attach: "Attach", send: "Send", stop: "Stop", retry: "R
 
 /** A zero-runtime-dependency stylesheet; copy or override every custom property. */
 export const handrailChatPresetCss = `
-.hr-chat{--hr-accent:#635bff;--hr-bg:#fff;--hr-panel:#f6f7fb;--hr-text:#171927;--hr-muted:#687083;--hr-border:#dfe3eb;color:var(--hr-text);background:var(--hr-bg);border:1px solid var(--hr-border);border-radius:16px;display:grid;grid-template-rows:auto minmax(12rem,1fr) auto;inline-size:min(100%,48rem);block-size:min(80dvh,48rem);font:400 14px/1.5 ui-sans-serif,system-ui,sans-serif;overflow:hidden;box-shadow:0 16px 50px #17192720}
-.hr-chat[data-layout=page]{inline-size:100%;block-size:100dvh;border:0;border-radius:0}.hr-chat[data-layout=drawer]{border-radius:16px 0 0 16px;max-inline-size:30rem}.hr-chat__sr{block-size:1px;clip:rect(0 0 0 0);clip-path:inset(50%);inline-size:1px;overflow:hidden;position:absolute;white-space:nowrap}.hr-chat__header{align-items:center;border-block-end:1px solid var(--hr-border);display:flex;gap:.75rem;padding:.85rem 1rem}.hr-chat__header h2{font-size:1rem;margin:0}.hr-chat__picker{margin-inline-start:auto}.hr-chat__body{display:grid;grid-template-columns:minmax(0,1fr);min-block-size:0}.hr-chat__transcript{overflow:auto;padding:1rem;scrollbar-gutter:stable}.hr-chat [role=listitem]{background:var(--hr-panel);border-radius:12px;margin:.5rem 0;max-inline-size:85%;padding:.7rem .85rem;white-space:pre-wrap}.hr-chat [aria-label='user message']{background:var(--hr-accent);color:white;margin-inline-start:auto}.hr-chat__message-actions{display:flex;justify-content:flex-end;margin-block-start:.25rem}.hr-chat__message-actions button{font-size:.75rem;padding:.25rem .45rem}.hr-message-action-status:not(:empty){margin-inline-start:.4rem}.hr-chat__status{align-items:center;color:var(--hr-muted);display:flex;gap:.75rem;min-block-size:1.5rem;padding-inline:1rem}.hr-chat__composer{border-block-start:1px solid var(--hr-border);padding:.75rem}.hr-chat__attachments{display:flex;gap:.5rem;list-style:none;margin:0 0 .5rem;padding:0}.hr-chat__form{display:grid;gap:.5rem;grid-template-columns:auto minmax(0,1fr) auto auto}.hr-chat textarea{background:var(--hr-panel);border:1px solid var(--hr-border);border-radius:10px;color:inherit;min-block-size:2.75rem;padding:.65rem;resize:none}.hr-chat button,.hr-chat__file{align-items:center;background:var(--hr-panel);border:1px solid var(--hr-border);border-radius:9px;color:inherit;cursor:pointer;display:inline-flex;padding:.6rem .75rem}.hr-chat button[type=submit]{background:var(--hr-accent);color:#fff}.hr-chat button:focus-visible,.hr-chat textarea:focus-visible,.hr-chat input:focus-visible{outline:3px solid color-mix(in srgb,var(--hr-accent),transparent 55%);outline-offset:2px}.hr-chat button:disabled{cursor:not-allowed;opacity:.5}.hr-chat__errors{color:#a32020;grid-column:1/-1}.hr-chat__aux{border-block-start:1px solid var(--hr-border);padding:.75rem 1rem}@media(max-width:520px){.hr-chat{block-size:100dvh;border:0;border-radius:0;inline-size:100%}.hr-chat__form{grid-template-columns:auto minmax(0,1fr) auto}.hr-chat__retry{display:none}}@media(prefers-reduced-motion:reduce){.hr-chat *{scroll-behavior:auto!important;transition:none!important}}
+.hr-chat{--hr-accent:#635bff;--hr-bg:#fff;--hr-panel:#f6f7fb;--hr-text:#171927;--hr-muted:#687083;--hr-border:#dfe3eb;--hr-danger:#a32020;--hr-activity:#6750a4;--hr-radius-panel:16px;--hr-radius-message:12px;--hr-radius-control:9px;--hr-font:ui-sans-serif,system-ui,sans-serif;color:var(--hr-text);background:var(--hr-bg);border:1px solid var(--hr-border);border-radius:var(--hr-radius-panel);display:grid;grid-template-rows:auto minmax(12rem,1fr) auto;inline-size:min(100%,48rem);block-size:min(80dvh,48rem);font:400 14px/1.5 var(--hr-font);overflow:hidden;box-shadow:0 16px 50px #17192720}
+.hr-chat[data-theme=dark]{--hr-accent:#9f9aff;--hr-bg:#171927;--hr-panel:#242735;--hr-text:#f4f5fa;--hr-muted:#aeb5c4;--hr-border:#3b4051;--hr-danger:#ff8c8c;--hr-activity:#c7b8ff}@media(prefers-color-scheme:dark){.hr-chat[data-theme=system]{--hr-accent:#9f9aff;--hr-bg:#171927;--hr-panel:#242735;--hr-text:#f4f5fa;--hr-muted:#aeb5c4;--hr-border:#3b4051;--hr-danger:#ff8c8c;--hr-activity:#c7b8ff}}
+.hr-chat[data-layout=page]{inline-size:100%;block-size:100dvh;border:0;border-radius:0}.hr-chat[data-layout=drawer]{border-radius:var(--hr-radius-panel) 0 0 var(--hr-radius-panel);max-inline-size:30rem}.hr-chat__sr{block-size:1px;clip:rect(0 0 0 0);clip-path:inset(50%);inline-size:1px;overflow:hidden;position:absolute;white-space:nowrap}.hr-chat__header{align-items:center;border-block-end:1px solid var(--hr-border);display:flex;gap:.75rem;padding:.85rem 1rem}.hr-chat__header h2{font-size:1rem;margin:0}.hr-chat__picker{margin-inline-start:auto}.hr-chat__body{display:grid;grid-template-columns:minmax(0,1fr);min-block-size:0}.hr-chat__transcript{overflow:auto;padding:1rem;scrollbar-gutter:stable}.hr-chat [role=listitem]{background:var(--hr-panel);border-radius:var(--hr-radius-message);margin:.5rem 0;max-inline-size:85%;padding:.7rem .85rem;white-space:pre-wrap}.hr-chat [aria-label='user message']{background:var(--hr-accent);color:white;margin-inline-start:auto}.hr-chat__message-actions{display:flex;justify-content:flex-end;margin-block-start:.25rem}.hr-chat__message-actions button{font-size:.75rem;padding:.25rem .45rem}.hr-message-action-status:not(:empty){margin-inline-start:.4rem}.hr-chat__status{align-items:center;color:var(--hr-muted);display:flex;gap:.75rem;min-block-size:1.5rem;padding-inline:1rem}.hr-chat__composer{border-block-start:1px solid var(--hr-border);padding:.75rem}.hr-chat__attachments{display:flex;gap:.5rem;list-style:none;margin:0 0 .5rem;padding:0}.hr-chat__form{display:grid;gap:.5rem;grid-template-columns:auto minmax(0,1fr) auto auto}.hr-chat textarea{background:var(--hr-panel);border:1px solid var(--hr-border);border-radius:var(--hr-radius-control);color:inherit;min-block-size:2.75rem;padding:.65rem;resize:none}.hr-chat button,.hr-chat__file{align-items:center;background:var(--hr-panel);border:1px solid var(--hr-border);border-radius:var(--hr-radius-control);color:inherit;cursor:pointer;display:inline-flex;padding:.6rem .75rem}.hr-chat button[type=submit]{background:var(--hr-accent);color:#fff}.hr-chat button:focus-visible,.hr-chat textarea:focus-visible,.hr-chat input:focus-visible{outline:3px solid color-mix(in srgb,var(--hr-accent),transparent 55%);outline-offset:2px}.hr-chat button:disabled{cursor:not-allowed;opacity:.5}.hr-chat__errors{color:var(--hr-danger);grid-column:1/-1}.hr-chat__aux{border-block-start:1px solid var(--hr-border);padding:.75rem 1rem}@media(max-width:520px){.hr-chat{block-size:100dvh;border:0;border-radius:0;inline-size:100%}.hr-chat__form{grid-template-columns:auto minmax(0,1fr) auto}.hr-chat__retry{display:none}}@media(prefers-reduced-motion:reduce){.hr-chat *{scroll-behavior:auto!important;transition:none!important}}
 .hr-chat__markdown{overflow-wrap:anywhere;white-space:normal}.hr-chat__markdown>:first-child{margin-block-start:0}.hr-chat__markdown>:last-child{margin-block-end:0}.hr-chat__markdown pre{max-inline-size:100%;overflow:auto;white-space:pre}.hr-chat__markdown code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.hr-chat__markdown a{color:inherit;text-decoration:underline}.hr-chat__message-citations{font-size:.78rem;margin:.5rem 0 0;padding-inline-start:1.25rem}.hr-chat__message-citations li{background:transparent;margin:.15rem 0;max-inline-size:none;padding:0}.hr-chat__message-citations li>span:last-child{color:var(--hr-muted);margin-inline-start:.35rem}.hr-chat__attachment-card{align-items:center;border:1px solid var(--hr-border);border-radius:10px;color:inherit;display:flex;gap:.65rem;min-inline-size:11rem;overflow:hidden;padding:.5rem;text-decoration:none}.hr-chat__attachment-card img{block-size:5rem;inline-size:7rem;object-fit:cover}.hr-chat__attachment-copy{display:flex;min-inline-size:0;flex-direction:column}.hr-chat__attachment-copy strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.hr-chat__attachment-copy small{color:var(--hr-muted)}.hr-chat__voice{align-items:center;display:flex}
-.hr-chat__launcher-trigger{align-items:center;display:inline-flex;gap:.45rem}.hr-chat__launcher-status{font-size:.75rem;font-weight:600}.hr-chat__launcher-trigger[data-busy=true] .hr-chat__launcher-status{color:#6750a4}.hr-chat__launcher-trigger[data-error=true] .hr-chat__launcher-status{color:#a32020}.hr-chat__launcher-badge:empty{display:none}.hr-chat__launcher-badge{align-items:center;background:#a32020;border-radius:999px;color:#fff;display:inline-flex;font-size:.7rem;justify-content:center;min-block-size:1.2rem;min-inline-size:1.2rem;padding-inline:.25rem}
+.hr-chat__launcher-trigger{align-items:center;display:inline-flex;gap:.45rem}.hr-chat__launcher-status{font-size:.75rem;font-weight:600}.hr-chat__launcher-trigger[data-busy=true] .hr-chat__launcher-status{color:var(--hr-activity)}.hr-chat__launcher-trigger[data-error=true] .hr-chat__launcher-status{color:var(--hr-danger)}.hr-chat__launcher-badge:empty{display:none}.hr-chat__launcher-badge{align-items:center;background:var(--hr-danger);border-radius:999px;color:#fff;display:inline-flex;font-size:.7rem;justify-content:center;min-block-size:1.2rem;min-inline-size:1.2rem;padding-inline:.25rem}
 .hr-chat__workspace-picker{align-items:flex-start;display:flex;gap:.4rem;position:relative}.hr-chat__workspace-picker summary{background:var(--hr-panel,#f6f7fb);border:1px solid var(--hr-border,#dfe3eb);border-radius:9px;cursor:pointer;list-style:none;padding:.6rem .75rem}.hr-chat__workspace-picker summary::-webkit-details-marker{display:none}.hr-chat__workspace-picker ul{background:var(--hr-bg,#fff);border:1px solid var(--hr-border,#dfe3eb);display:grid;gap:.25rem;inset-block-start:100%;inset-inline-end:0;list-style:none;margin:0;max-block-size:16rem;min-inline-size:14rem;overflow:auto;padding:.35rem;position:absolute;z-index:10}.hr-chat__workspace-picker li{margin:0;padding:0}.hr-chat__workspace-picker li button{align-items:center;display:flex;inline-size:100%;justify-content:space-between;max-inline-size:none;text-align:start}.hr-chat__workspace-picker small{color:var(--hr-muted,#687083);margin-inline-start:.5rem}.hr-chat__workspace-picker [data-turn-status=running] small{color:#6750a4}.hr-chat__empty{display:grid;min-block-size:12rem;place-items:center;padding:1rem}
 `;
 
 export function StyledChatPresetStyles(): ReactNode {
   return <style data-handrail-ai-preset={HANDRAIL_CHAT_PRESET_VERSION}>{handrailChatPresetCss}</style>;
+}
+
+type HandrailThemeStyle = CSSProperties & Record<`--hr-${string}`, string>;
+
+/** Convert typed theme tokens to the stable CSS custom-property contract. */
+export function createHandrailChatThemeStyle(theme: HandrailChatTheme = {}): HandrailThemeStyle {
+  const style: HandrailThemeStyle = {};
+  const colors = theme.colors;
+  if (colors?.accent !== undefined) style["--hr-accent"] = colors.accent;
+  if (colors?.background !== undefined) style["--hr-bg"] = colors.background;
+  if (colors?.panel !== undefined) style["--hr-panel"] = colors.panel;
+  if (colors?.text !== undefined) style["--hr-text"] = colors.text;
+  if (colors?.muted !== undefined) style["--hr-muted"] = colors.muted;
+  if (colors?.border !== undefined) style["--hr-border"] = colors.border;
+  if (colors?.danger !== undefined) style["--hr-danger"] = colors.danger;
+  if (colors?.activity !== undefined) style["--hr-activity"] = colors.activity;
+  if (theme.radii?.panel !== undefined) style["--hr-radius-panel"] = theme.radii.panel;
+  if (theme.radii?.message !== undefined) style["--hr-radius-message"] = theme.radii.message;
+  if (theme.radii?.control !== undefined) style["--hr-radius-control"] = theme.radii.control;
+  if (theme.fontFamily !== undefined) style["--hr-font"] = theme.fontFamily;
+  return style;
 }
 
 /** Accessible responsive drop-in surface; all headless primitives remain independently usable. */
@@ -166,7 +206,8 @@ export function StyledChatPreset(props: StyledChatPresetProps): ReactNode {
   return <ChatRoot
     className={["hr-chat", props.className].filter(Boolean).join(" ")}
     data-layout={props.layout ?? "page"}
-    style={props.style}
+    data-theme={props.theme?.mode ?? "light"}
+    style={{ ...createHandrailChatThemeStyle(props.theme), ...props.style }}
     {...(props.composer ? { composer: props.composer } : {})}
     {...(props.state ? { state: props.state } : {})}
     {...(props.presence ? { presence: props.presence } : {})}
@@ -223,21 +264,86 @@ function safeMarkdownUrl(value: string): string {
 const renderSafeMessageMarkdown: MessageContentRenderer = (parts, message) => {
   const text = messageText(parts);
   if (message?.role === "user") return <span>{text}</span>;
-  return <div className="hr-chat__markdown"><ReactMarkdown
-    skipHtml
-    urlTransform={safeMarkdownUrl}
-    components={{
-      a: ({ href, children, node: _node, ...props }) => {
-        void _node;
-        if (!href) return <span>{children}</span>;
-        const external = href?.startsWith("http://") || href?.startsWith("https://");
-        return <a {...props} href={href} {...(external
-          ? { target: "_blank", rel: "noopener noreferrer" }
-          : {})}>{children}</a>;
-      },
-    }}
-  >{text}</ReactMarkdown></div>;
+  return <div className="hr-chat__markdown">{safeMarkdownBlocks(text)}</div>;
 };
+
+function safeMarkdownInline(text: string, blockKey: string): ReactNode[] {
+  const output: ReactNode[] = [];
+  const pattern = /\[([^\]]+)\]\(([^)]+)\)|`([^`]+)`/gu;
+  let cursor = 0;
+  let index = 0;
+  for (const match of text.matchAll(pattern)) {
+    const offset = match.index;
+    if (offset > cursor) output.push(text.slice(cursor, offset));
+    const label = match[1];
+    const destination = match[2];
+    const code = match[3];
+    if (code !== undefined) {
+      output.push(<code key={`${blockKey}-code-${index}`}>{code}</code>);
+    } else if (label !== undefined && destination !== undefined) {
+      const href = safeMarkdownUrl(destination);
+      const external = href.startsWith("http://") || href.startsWith("https://");
+      output.push(href === ""
+        ? <span key={`${blockKey}-link-${index}`}>{label}</span>
+        : <a key={`${blockKey}-link-${index}`} href={href} {...(external
+          ? { target: "_blank", rel: "noopener noreferrer" }
+          : {})}>{label}</a>);
+    }
+    cursor = offset + match[0].length;
+    index += 1;
+  }
+  if (cursor < text.length) output.push(text.slice(cursor));
+  return output;
+}
+
+/** A deliberately small safe Markdown presentation with no parser/runtime dependency. */
+function safeMarkdownBlocks(text: string): ReactNode[] {
+  const lines = text.replaceAll("\r\n", "\n").split("\n");
+  const output: ReactNode[] = [];
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index] ?? "";
+    if (line.trim() === "") { index += 1; continue; }
+    if (line.startsWith("```")) {
+      const code: string[] = [];
+      index += 1;
+      while (index < lines.length && !(lines[index] ?? "").startsWith("```")) {
+        code.push(lines[index] ?? ""); index += 1;
+      }
+      if (index < lines.length) index += 1;
+      output.push(<pre key={`pre-${index}`}><code>{code.join("\n")}</code></pre>);
+      continue;
+    }
+    const heading = /^(#{1,6})\s+(.+)$/u.exec(line);
+    if (heading !== null) {
+      const level = heading[1]!.length;
+      output.push(createElement(`h${level}`, { key: `heading-${index}` },
+        ...safeMarkdownInline(heading[2]!, `heading-${index}`)));
+      index += 1;
+      continue;
+    }
+    if (/^[-*]\s+/u.test(line)) {
+      const items: ReactNode[] = [];
+      while (index < lines.length && /^[-*]\s+/u.test(lines[index] ?? "")) {
+        const item = (lines[index] ?? "").replace(/^[-*]\s+/u, "");
+        items.push(<li key={`item-${index}`}>{safeMarkdownInline(item, `item-${index}`)}</li>);
+        index += 1;
+      }
+      output.push(<ul key={`list-${index}`}>{items}</ul>);
+      continue;
+    }
+    const paragraph: string[] = [line];
+    index += 1;
+    while (index < lines.length && (lines[index] ?? "").trim() !== "" &&
+      !/^(?:#{1,6}\s+|[-*]\s+|```)/u.test(lines[index] ?? "")) {
+      paragraph.push(lines[index] ?? ""); index += 1;
+    }
+    output.push(<p key={`paragraph-${index}`}>{paragraph.map((value, lineIndex) =>
+      <Fragment key={`line-${lineIndex}`}>{lineIndex === 0 ? null : <br/>}
+        {safeMarkdownInline(value, `paragraph-${index}-${lineIndex}`)}</Fragment>)}</p>);
+  }
+  return output;
+}
 
 function safeAttachmentUrl(value: string | undefined): string | undefined {
   if (!value) return undefined;

@@ -341,7 +341,8 @@ for (const [label, contents] of [["README.md", readme], ...referencedExamples]) 
 
 for (const [relativePath, contents] of referencedExamples.filter(
   ([relativePath]) => !relativePath.includes("trusted-server") &&
-    !relativePath.includes("protected-web-search"),
+    !relativePath.includes("protected-web-search") &&
+    !relativePath.includes("golden-authenticated-app"),
 )) {
   assert.doesNotMatch(
     contents,

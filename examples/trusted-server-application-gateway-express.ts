@@ -4,7 +4,7 @@ import { createApplicationGatewayExpressMiddleware } from "@handrail/ai/server/a
 // `transport` is the trusted server's provider/managed transport. Authentication
 // remains application-owned. Mount after express.json({limit:"1mb"}) and the
 // application's session/auth middleware:
-declare const transport: Parameters<typeof createApplicationGateway>[0]["transport"];
+declare const transport: NonNullable<Parameters<typeof createApplicationGateway>[0]["transport"]>;
 declare const app: { use(path: string, middleware: unknown): void };
 
 const gateway = createApplicationGateway({
@@ -19,4 +19,3 @@ const gateway = createApplicationGateway({
 });
 
 app.use("/api/ai", createApplicationGatewayExpressMiddleware(gateway, { origin: "https://app.example.com" }));
-

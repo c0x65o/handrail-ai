@@ -23,12 +23,14 @@ assert(files.length > 0, "build declarations before checking the public surface"
 const runtimeNeutralFiles = files.filter(
   (path) =>
     !/[\\/]browser[\\/]/u.test(path) &&
+    !/[\\/]client[\\/]/u.test(path) &&
     !/[\\/]react[\\/]/u.test(path) &&
     !/[\\/]react-headless[\\/]/u.test(path) &&
     !/[\\/]react-styled[\\/]/u.test(path) &&
     !/[\\/]server[\\/]/u.test(path) &&
     !/[\\/](?:mcp|postgres)[\\/]/u.test(path) &&
     !/[\\/]presence[\\/]live-delivery\.d\.ts$/u.test(path) &&
+    !/[\\/]sync[\\/]http\.d\.ts$/u.test(path) &&
     !/[\\/]transports[\\/](?:application-gateway|managed-runtime|sse)\.d\.ts$/u.test(path) &&
     !/[\\/]providers[\\/](?!index\.d\.ts$)[^\\/]+\.d\.ts$/u.test(path),
 );

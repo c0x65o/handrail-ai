@@ -2,9 +2,29 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { createInitialConversationState } from "../src/conversation/state.js";
-import { StyledChatLauncher, StyledChatPreset, StyledChatPresetStyles, WorkspaceThreadPicker, installToolRendererPlugins } from "../src/react-styled/index.js";
+import { StyledChatLauncher, StyledChatPreset, StyledChatPresetStyles, WorkspaceThreadPicker, createHandrailChatThemeStyle, installToolRendererPlugins } from "../src/react-styled/index.js";
 
 describe("styled React preset", () => {
+  it("maps typed theme tokens and mode to stable CSS properties", () => {
+    expect(createHandrailChatThemeStyle({
+      mode: "dark",
+      colors: { accent: "#123456", danger: "crimson" },
+      radii: { panel: "24px" },
+      fontFamily: "Inter, sans-serif",
+    })).toEqual({
+      "--hr-accent": "#123456",
+      "--hr-danger": "crimson",
+      "--hr-radius-panel": "24px",
+      "--hr-font": "Inter, sans-serif",
+    });
+    const { container, unmount } = render(<StyledChatPreset theme={{
+      mode: "system", colors: { accent: "rebeccapurple" },
+    }}/>);
+    const root = container.querySelector<HTMLElement>(".hr-chat")!;
+    expect(root.dataset.theme).toBe("system");
+    expect(root.style.getPropertyValue("--hr-accent")).toBe("rebeccapurple");
+    unmount();
+  });
   it("installs renderer plugins by stable keys without exposing server executors", () => {
     const renderer = () => <span>Invoice</span>;
     expect(installToolRendererPlugins([{

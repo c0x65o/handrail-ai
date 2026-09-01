@@ -21,6 +21,7 @@ Node.js 20 or newer is required for package tooling and trusted-server use.
 | `@handrail/ai/react/styled` | Optional responsive styled launcher/dialog/drawer/page preset | Browser/React; theme variables and renderers are application-owned |
 | `@handrail/ai/server/application-gateway` | Express-compatible adapter for the web-standard streaming gateway | Trusted application server only |
 | `@handrail/ai/server/application` | One-call trusted assembly for plugins, MCP connectors, policy, approvals, bounded tools, runtime, and gateway routing | Trusted application server only |
+| `@handrail/ai/server/assistant-context` | Server-owned principal, attribution, model-profile, tool-context, presence, and untrusted-correlation separation | Trusted application server only |
 | `@handrail/ai/server/managed` | Optional Handrail AI Runtime v1 streaming transport | Trusted server only |
 | `@handrail/ai/server/usage-control` | Server-only AI Runtime admission, hard-denial, and idempotent receipt-settlement client | Trusted server only |
 | `@handrail/ai/server/trusted-server` | Framework-neutral request protection contracts | Trusted server only |
@@ -38,6 +39,26 @@ Node.js 20 or newer is required for package tooling and trusted-server use.
 The provider subpaths accept application-injected request functions rather than
 installing provider SDKs. This keeps the application in control of provider SDK
 versions, server configuration, and credential resolution.
+
+## Recommended integration paths
+
+Start with the focused [`docs/integration-guide.md`](./docs/integration-guide.md).
+Its checked golden path connects an authenticated application gateway to a
+headless browser client, the styled single-conversation surface, and the styled
+multi-conversation workspace. Use
+`createHandrailAiClient({ conversations: { mode: "single", ... } })` when an
+application has one fixed chat, or `mode: "multiple"` for catalog lifecycle,
+background turns, and unread/error state. The legacy low-level assembly remains
+available for custom ownership.
+
+On the trusted server, `createAssistantGatewayAuthorizer` produces one cohesive
+context while keeping authentication identity, authoritative attribution,
+explicitly model-visible profile data, tool policy context, presence, and
+untrusted client correlation hints separate. See the checked
+[`examples/golden-authenticated-app.ts`](./examples/golden-authenticated-app.ts),
+[`examples/golden-headless-client.ts`](./examples/golden-headless-client.ts),
+[`examples/golden-styled-single.tsx`](./examples/golden-styled-single.tsx), and
+[`examples/golden-styled-multiple.tsx`](./examples/golden-styled-multiple.tsx).
 
 ## Headless quickstart
 

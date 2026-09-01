@@ -7,6 +7,7 @@ import type {
   ApplicationGatewayAction,
   ApplicationGatewayAuthorizationContext,
 } from "../transports/application-gateway.js";
+import type { PresenceParticipantKind } from "../presence/types.js";
 
 export const SERVER_ASSISTANT_CONTEXT_VERSION =
   "handrail.server-assistant-context.v1" as const;
@@ -43,7 +44,7 @@ export interface ServerAssistantPresenceIdentity {
   readonly participantId: string;
   readonly sessionId: string;
   readonly deviceId?: string;
-  readonly participantKind?: "human" | "automation";
+  readonly participantKind?: PresenceParticipantKind;
 }
 
 export interface CreateServerAssistantContextInput<

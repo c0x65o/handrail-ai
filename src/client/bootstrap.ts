@@ -17,7 +17,7 @@ import type { ConversationTransport } from "../transports/types.js";
 import type { ConversationCatalog } from "../conversation/catalog.js";
 import type { ConversationEventStore } from "../conversation/event-store.js";
 import type { ConversationClientId, ConversationDeviceId, ConversationId } from "../conversation/events.js";
-import { createConversationRuntime } from "../runtime.js";
+import { createConversationRuntime, type ConversationRuntime } from "../runtime.js";
 import type { AttachmentUploadAdapter } from "../attachments/types.js";
 import { createApplicationGatewaySyncAdapter } from "./synchronization.js";
 import { createApplicationGatewayPresenceAdapter } from "./presence.js";
@@ -115,10 +115,14 @@ export async function createHandrailAiClient<TEvent = unknown, TRequest = unknow
   options: HandrailAiClientBootstrapOptions<TEvent, TRequest, TAuthorizationContext, TSynchronization>,
 ): Promise<HandrailAiClient<TEvent, TRequest, TAuthorizationContext>> {
   const highLevel = options.conversations;
-  if ((options.createRuntime === undefined) !== (options.authorizeRuntime === undefined) ||
-    options.runtime !== undefined && options.createRuntime !== undefined ||
-    highLevel !== undefined && (options.runtime !== undefined || options.createRuntime !== undefined)) {
+  if ((options.createRuntime === undefined) !== (options.authorizeRuntime === undefined)) {
     throw new TypeError("createRuntime and authorizeRuntime must be configured together");
+  }
+  if (options.runtime !== undefined && options.createRuntime !== undefined) {
+    throw new TypeError("runtime cannot be combined with createRuntime/authorizeRuntime");
+  }
+  if (highLevel !== undefined && (options.runtime !== undefined || options.createRuntime !== undefined)) {
+    throw new TypeError("conversations cannot be combined with legacy runtime ownership options");
   }
   const capabilities = options.capabilities ?? await negotiateApplicationGatewayCapabilities(options);
   const transport = createApplicationGatewayTransport<TEvent, TRequest, TSynchronization>({ ...options, capabilities });

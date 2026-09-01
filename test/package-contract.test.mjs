@@ -24,6 +24,12 @@ test("declares the React subpath as an optional peer boundary", () => {
   assert.equal(packageJson.peerDependencies.react, ">=18");
   assert.deepEqual(packageJson.peerDependenciesMeta.react, { optional: true });
   assert.equal(packageJson.sideEffects, false);
+  assert.equal(packageJson.dependencies["react-markdown"], undefined);
+});
+
+test("keeps styled-only Markdown dependencies out of headless installs", () => {
+  assert.equal(packageJson.dependencies["react-markdown"], undefined);
+  assert.equal(packageJson.optionalDependencies?.["react-markdown"], undefined);
 });
 
 test("declares managed runtime support as an explicit trusted-server boundary", () => {
@@ -45,6 +51,7 @@ test("declares request protection as an explicit trusted-server boundary", () =>
 test("isolates the new client, UI, gateway, MCP, and Postgres boundaries", () => {
   for (const subpath of [
     "./client", "./react/headless", "./react/styled", "./server/application-gateway",
+    "./server/assistant-context",
     "./connectors/mcp", "./adapters/spartan-aegis", "./adapters/mills-family", "./persistence/postgres",
   ]) {
     assert.ok(packageJson.exports[subpath], `missing explicit export ${subpath}`);

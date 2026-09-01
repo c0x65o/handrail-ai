@@ -23,6 +23,48 @@ const capabilities: ApplicationGatewayCapabilities = Object.freeze({
 });
 
 describe("createHandrailAiClient", () => {
+  it("creates a single conversation without assembling catalog runtime ownership", async () => {
+    const eventStore = new InMemoryConversationEventStore();
+    const client = await createHandrailAiClient({
+      baseUrl: "https://app.test/ai",
+      capabilities,
+      conversations: {
+        mode: "single",
+        conversationId: "conversation_single" as never,
+        clientId: "client_web" as never,
+        eventStore,
+      },
+      buildRequest: ({ content }) => ({ prompt: content }),
+      startActivityPolling: false,
+    });
+
+    expect(client.conversationMode).toBe("single");
+    expect(client.conversation?.getSnapshot().conversation_id).toBe("conversation_single");
+    expect(client.registry).toBeNull();
+    expect(client.workspace).toBeNull();
+    await client.dispose();
+  });
+
+  it("creates the full workspace only for explicit multiple-conversation mode", async () => {
+    const client = await createHandrailAiClient({
+      baseUrl: "https://app.test/ai",
+      capabilities,
+      conversations: {
+        mode: "multiple",
+        clientId: "client_web" as never,
+        eventStoreFor: () => new InMemoryConversationEventStore(),
+        authorize: () => "allow",
+      },
+      startActivityPolling: false,
+    });
+
+    expect(client.conversationMode).toBe("multiple");
+    expect(client.conversation).toBeNull();
+    expect(client.registry).not.toBeNull();
+    expect(client.workspace).not.toBeNull();
+    await client.dispose();
+  });
+
   it("assembles the standard headless client graph and application request builder", async () => {
     const eventStoreFor = vi.fn(() => new InMemoryConversationEventStore());
     const client = await createHandrailAiClient<unknown, {
@@ -45,6 +87,8 @@ describe("createHandrailAiClient", () => {
     });
 
     expect(client.registry).not.toBeNull();
+    expect(client.conversationMode).toBe("multiple");
+    expect(client.conversation).toBeNull();
     expect(client.workspace).not.toBeNull();
     expect(client.activity).toBeNull();
     expect(client.attachmentUpload).toBeNull();
@@ -72,7 +116,25 @@ describe("createHandrailAiClient", () => {
         eventStoreFor: () => new InMemoryConversationEventStore(),
         authorize: () => "allow",
       },
-    })).rejects.toThrow("createRuntime and authorizeRuntime must be configured together");
+    })).rejects.toThrow("runtime cannot be combined with createRuntime/authorizeRuntime");
+  });
+
+  it("rejects mixing recommended and legacy conversation ownership", async () => {
+    await expect(createHandrailAiClient({
+      baseUrl: "https://app.test/ai",
+      capabilities,
+      conversations: {
+        mode: "single",
+        conversationId: "conversation" as never,
+        clientId: "client" as never,
+        eventStore: new InMemoryConversationEventStore(),
+      },
+      runtime: {
+        clientId: "client" as never,
+        eventStoreFor: () => new InMemoryConversationEventStore(),
+        authorize: () => "allow",
+      },
+    })).rejects.toThrow("conversations cannot be combined with legacy runtime ownership options");
   });
 
   it("requires either a local event store or negotiated server synchronization", async () => {
