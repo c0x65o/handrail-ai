@@ -85,4 +85,33 @@ describe("createHandrailAiClient", () => {
       },
     })).rejects.toThrow("eventStoreFor or negotiated synchronization");
   });
+
+  it("owns stable per-conversation presence controllers and destroys them with the client", async () => {
+    const presenceCapabilities: ApplicationGatewayCapabilities = Object.freeze({
+      ...capabilities,
+      presence: true,
+    });
+    const client = await createHandrailAiClient({
+      baseUrl: "https://app.test/ai",
+      capabilities: presenceCapabilities,
+      runtime: {
+        clientId: "client_web" as never,
+        deviceId: "device_browser" as never,
+        eventStoreFor: () => new InMemoryConversationEventStore(),
+        authorize: () => "allow",
+      },
+      presenceIdentity: {
+        participantId: "person_1",
+        deviceId: "device_browser",
+        sessionId: "session_1",
+        autoConnect: false,
+      },
+    });
+    const first = client.presenceControllerFor("conversation-1" as never);
+    expect(first).not.toBeNull();
+    expect(client.presenceControllerFor("conversation-1" as never)).toBe(first);
+    expect(client.presenceControllerFor("conversation-2" as never)).not.toBe(first);
+    await client.dispose();
+    expect(first?.getSnapshot().connected).toBe(false);
+  });
 });

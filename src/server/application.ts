@@ -17,7 +17,9 @@ import {
   type ApplicationToolExecutor,
   type ApplicationToolPolicy,
   type ApplicationToolPolicyDecision,
+  type BoundedToolExecutionOutcome,
   type BoundedToolExecutorLimits,
+  type BoundedToolExecutionRequest,
 } from "../tools/executor.js";
 import type { ApprovalExecutionCoordinator } from "../tools/approval-execution.js";
 import type { AiDiagnosticSink } from "../diagnostics.js";
@@ -117,6 +119,20 @@ export interface AiApplicationRunOptions<
   readonly limits?: Partial<ToolLoopLimits>;
 }
 
+/**
+ * Executes one provider-requested call through the exact discovery, policy,
+ * approval, validation, diagnostics, and bounded-execution boundary owned by
+ * this application. This is the migration seam for hosts that retain their
+ * provider continuation loop while adopting Handrail's tool infrastructure.
+ */
+export interface AiApplicationToolExecutionOptions<
+  TApplicationContext,
+  TDiscoveryContext,
+  TApprovalPermissionContext,
+> extends Omit<BoundedToolExecutionRequest<TApplicationContext, TApprovalPermissionContext>, "discoveredTools"> {
+  readonly discovery: ToolDiscoveryQuery<TDiscoveryContext>;
+}
+
 export interface AiApplication<
   TApplicationContext,
   TDiscoveryContext,
@@ -130,6 +146,11 @@ export interface AiApplication<
     readonly namespaces?: readonly ToolNamespaceDefinition[];
     readonly maximumEagerTools?: number;
   }): DeferredToolDiscoveryPlan;
+  executeTool(options: AiApplicationToolExecutionOptions<
+    TApplicationContext,
+    TDiscoveryContext,
+    TApprovalPermissionContext
+  >): Promise<BoundedToolExecutionOutcome>;
   run(options: AiApplicationRunOptions<TApplicationContext, TDiscoveryContext, TApprovalPermissionContext>): Promise<ToolLoopResult>;
   createRuntime<TRequest>(options: ConversationRuntimeOptions<TRequest>): Promise<ConversationRuntime<TRequest>>;
   createGateway<TEvent, TRequest, TContext extends ApplicationGatewayAuthorizationContext>(
@@ -235,6 +256,17 @@ export async function createAiApplication<
         tools: discover(input.discovery),
         namespaces: input.namespaces ?? [],
         ...(input.maximumEagerTools === undefined ? {} : { maximumEagerTools: input.maximumEagerTools }),
+      });
+    },
+    executeTool(input: AiApplicationToolExecutionOptions<
+      TApplicationContext,
+      TDiscoveryContext,
+      TApprovalPermissionContext
+    >) {
+      const { discovery, ...request } = input;
+      return executor.executeDetailed({
+        ...request,
+        discoveredTools: discover(discovery),
       });
     },
     run(input: AiApplicationRunOptions<TApplicationContext, TDiscoveryContext, TApprovalPermissionContext>) {

@@ -16,12 +16,19 @@ import { ConversationWorkspace } from "../conversation/workspace.js";
 import type { ConversationTransport } from "../transports/types.js";
 import type { ConversationCatalog } from "../conversation/catalog.js";
 import type { ConversationEventStore } from "../conversation/event-store.js";
-import type { ConversationClientId, ConversationDeviceId } from "../conversation/events.js";
+import type { ConversationClientId, ConversationDeviceId, ConversationId } from "../conversation/events.js";
 import { createConversationRuntime } from "../runtime.js";
 import type { AttachmentUploadAdapter } from "../attachments/types.js";
 import { createApplicationGatewaySyncAdapter } from "./synchronization.js";
+import { createApplicationGatewayPresenceAdapter } from "./presence.js";
 import type { ConversationSyncAdapter } from "../sync/types.js";
 import { createSynchronizedConversationEventStore } from "../sync/conversation-event-store.js";
+import {
+  createPresenceController,
+  type PresenceController,
+  type PresenceControllerTimingOptions,
+} from "../presence/controller.js";
+import type { PresenceParticipantKind } from "../presence/types.js";
 
 export interface HandrailAiClientBootstrapOptions<TEvent, TRequest, TAuthorizationContext, TSynchronization = unknown>
 extends ApplicationGatewayTransportOptions<TEvent, TSynchronization> {
@@ -42,6 +49,15 @@ extends ApplicationGatewayTransportOptions<TEvent, TSynchronization> {
   readonly buildRequest?: (input: { readonly content: string; readonly attachments: readonly unknown[] }) => TRequest;
   readonly activityPollingMilliseconds?: number;
   readonly startActivityPolling?: boolean;
+  /** Optional high-level identity used to own one connected presence controller per conversation. */
+  readonly presenceIdentity?: PresenceControllerTimingOptions & {
+    readonly participantId: string;
+    readonly sessionId: string;
+    readonly participantKind?: PresenceParticipantKind;
+    readonly deviceId?: string;
+    /** Defaults true. Set false when the host wants to connect controllers explicitly. */
+    readonly autoConnect?: boolean;
+  };
 }
 
 export interface HandrailAiClient<TEvent, TRequest, TAuthorizationContext> {
@@ -55,6 +71,8 @@ export interface HandrailAiClient<TEvent, TRequest, TAuthorizationContext> {
   readonly attachmentUpload: AttachmentUploadAdapter<ApplicationGatewayAttachmentSource> | null;
   readonly presence: ApplicationGatewayPresenceClient | null;
   readonly synchronization: ConversationSyncAdapter | null;
+  /** Returns a stable, client-owned controller for the conversation when presence was negotiated/configured. */
+  presenceControllerFor(conversationId: ConversationId): PresenceController | null;
   buildRequest(input: { readonly content: string; readonly attachments?: readonly unknown[] }): TRequest;
   markActivityRead(conversationId: string): Promise<void>;
   dispose(): Promise<void>;
@@ -80,7 +98,8 @@ export async function createHandrailAiClient<TEvent = unknown, TRequest = unknow
       ...(resources.subscribeActivity === undefined ? {} : {
         subscribe: (signal: AbortSignal) => resources.subscribeActivity!(signal),
       }),
-      ...(options.activityPollingMilliseconds === undefined ? {} : { intervalMilliseconds: options.activityPollingMilliseconds }) }) : null;
+      ...(options.activityPollingMilliseconds === undefined ? {} : { intervalMilliseconds: options.activityPollingMilliseconds }),
+      ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }) }) : null;
   if (activity && options.startActivityPolling !== false) activity.start();
   const catalog = createApplicationGatewayConversationCatalog<TAuthorizationContext>(resources, capabilities);
   const attachmentUpload = transport.capabilities.attachmentUpload.supported
@@ -88,6 +107,9 @@ export async function createHandrailAiClient<TEvent = unknown, TRequest = unknow
   const presence = transport.capabilities.presence.supported ? transport.capabilities.presence.capability : null;
   const synchronization = capabilities.synchronization === true
     ? createApplicationGatewaySyncAdapter({ resources, ...(presence ? { presence } : {}) }) : null;
+  const presenceAdapter = presence === null ? null
+    : synchronization ?? createApplicationGatewayPresenceAdapter(presence);
+  const presenceControllers = new Map<ConversationId, PresenceController>();
   if (options.runtime && options.runtime.eventStoreFor === undefined && synchronization === null) {
     throw new TypeError("A standard runtime requires eventStoreFor or negotiated synchronization");
   }
@@ -106,6 +128,22 @@ export async function createHandrailAiClient<TEvent = unknown, TRequest = unknow
   const workspace = registry ? new ConversationWorkspace(registry) : null;
   return Object.freeze({ capabilities, transport, resources, activity, catalog, registry, workspace,
     attachmentUpload, presence, synchronization,
+    presenceControllerFor(conversationId: ConversationId) {
+      if (presenceAdapter === null || options.presenceIdentity === undefined) return null;
+      const existing = presenceControllers.get(conversationId);
+      if (existing) return existing;
+      const { autoConnect, ...identity } = options.presenceIdentity;
+      const controller = createPresenceController({
+        ...identity,
+        conversationId,
+        participantKind: identity.participantKind ?? "human",
+        adapter: presenceAdapter,
+        ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
+      });
+      presenceControllers.set(conversationId, controller);
+      if (autoConnect !== false) controller.connect();
+      return controller;
+    },
     buildRequest(input: { readonly content: string; readonly attachments?: readonly unknown[] }) {
       if (!options.buildRequest) throw new TypeError("No application request builder is configured");
       return options.buildRequest({ content: input.content, attachments: input.attachments ?? [] });
@@ -115,5 +153,10 @@ export async function createHandrailAiClient<TEvent = unknown, TRequest = unknow
       await resources.markActivityRead({ conversationId });
       await activity.refresh();
     },
-    async dispose() { activity?.stop(); await workspace?.dispose(); } });
+    async dispose() {
+      activity?.stop();
+      for (const controller of presenceControllers.values()) controller.destroy();
+      presenceControllers.clear();
+      await workspace?.dispose();
+    } });
 }

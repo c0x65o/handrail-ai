@@ -129,5 +129,29 @@ describe("trusted AI application assembly", () => {
       expect.objectContaining({ domain: "tool", phase: "started", toolName: "spartan.invoice.lookup" }),
       expect.objectContaining({ domain: "tool", phase: "succeeded", toolName: "spartan.invoice.lookup" }),
     ]));
+
+    const direct = await app.executeTool({
+      call: { tool_call_id: "direct-call", name: "spartan.invoice.lookup", arguments: { id: "invoice-2" } },
+      discovery: { context: { role: "finance" } },
+      applicationContext: { companyId: "company-2" },
+    });
+    expect(direct).toMatchObject({
+      status: "completed",
+      result: { tool_call_id: "direct-call", name: "spartan.invoice.lookup", is_error: false },
+    });
+    expect(execute).toHaveBeenLastCalledWith(
+      { id: "invoice-2" },
+      expect.objectContaining({ toolCallId: "direct-call", applicationContext: { companyId: "company-2" } }),
+    );
+
+    const undiscovered = await app.executeTool({
+      call: { tool_call_id: "hidden-call", name: "spartan.invoice.lookup", arguments: { id: "invoice-3" } },
+      discovery: { context: { role: "viewer" } },
+      applicationContext: { companyId: "company-2" },
+    });
+    expect(undiscovered).toMatchObject({
+      status: "completed",
+      result: { tool_call_id: "hidden-call", is_error: true },
+    });
   });
 });

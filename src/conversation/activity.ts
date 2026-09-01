@@ -1,4 +1,5 @@
 import type { ConversationId } from "./events.js";
+import { emitAiDiagnostic, type AiDiagnosticSink } from "../diagnostics.js";
 
 export type ConversationActivityTurnStatus = "idle" | "running" | "completed" | "error";
 
@@ -213,6 +214,8 @@ export interface PollingConversationActivityOptions {
   readonly store?: ConversationActivityStore;
   /** Optional protected live stream. Polling remains the convergence fallback. */
   readonly subscribe?: (signal: AbortSignal) => AsyncIterable<ConversationActivityRecord>;
+  /** Receives bounded lifecycle failures for both the live and polling paths. */
+  readonly diagnostics?: AiDiagnosticSink;
 }
 
 /** Cross-platform polling adapter for server-backed launcher activity indexes. */
@@ -221,6 +224,7 @@ export class PollingConversationActivity implements ConversationActivityReadable
   readonly #load: PollingConversationActivityOptions["load"];
   readonly #intervalMilliseconds: number;
   readonly #subscribe: PollingConversationActivityOptions["subscribe"];
+  readonly #diagnostics: AiDiagnosticSink | undefined;
   #timer: ReturnType<typeof setTimeout> | null = null;
   #controller: AbortController | null = null;
   #liveController: AbortController | null = null;
@@ -233,6 +237,7 @@ export class PollingConversationActivity implements ConversationActivityReadable
     this.#store = options.store ?? new InMemoryConversationActivityStore();
     this.#load = options.load;
     this.#subscribe = options.subscribe;
+    this.#diagnostics = options.diagnostics;
     this.#intervalMilliseconds = interval;
   }
   getSnapshot = () => this.#store.getSnapshot();
@@ -248,7 +253,11 @@ export class PollingConversationActivity implements ConversationActivityReadable
             if (controller.signal.aborted) break;
             this.#store.upsert(record);
           }
-        } catch {
+        } catch (cause) {
+          if (!controller.signal.aborted) emitAiDiagnostic(this.#diagnostics, {
+            domain: "activity", operation: "live_subscribe", phase: "failed",
+            code: "activity_stream_unavailable", retryable: true, cause,
+          });
           // The scheduled authoritative poll remains the recovery path.
         } finally {
           if (this.#liveController === controller) this.#liveController = null;
@@ -259,7 +268,14 @@ export class PollingConversationActivity implements ConversationActivityReadable
   async refresh(): Promise<void> {
     if (this.#controller) return;
     const controller = new AbortController(); this.#controller = controller;
-    try { this.#store.replace(await this.#load(controller.signal)); }
+    try {
+      this.#store.replace(await this.#load(controller.signal));
+    } catch (cause) {
+      if (!controller.signal.aborted) emitAiDiagnostic(this.#diagnostics, {
+        domain: "activity", operation: "poll", phase: "failed",
+        code: "activity_poll_unavailable", retryable: true, cause,
+      });
+    }
     finally {
       if (this.#controller === controller) this.#controller = null;
       if (!controller.signal.aborted) this.#timer = setTimeout(() => {

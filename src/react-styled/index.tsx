@@ -347,6 +347,8 @@ export interface HandrailChatWorkspaceProps<TRequest, TAuthorizationContext>
   readonly conversationPicker?: ReactNode;
   readonly getThreadLabel?: (conversationId: ConversationId) => ReactNode;
   readonly noConversation?: ReactNode;
+  /** Optional stable controller factory, normally `client.presenceControllerFor`. */
+  readonly presenceForConversation?: (conversationId: ConversationId) => PresenceController | null;
 }
 
 /** Complete selected-runtime binding for concurrent background conversations. */
@@ -366,11 +368,15 @@ export function HandrailChatWorkspace<TRequest, TAuthorizationContext>(
     <div className="hr-chat__empty">{props.noConversation ?? "Start or select a conversation."}</div>
   </section>;
   const { workspace: _workspace, composerForConversation: _composerFor, createConversation: _create,
-    getThreadLabel: _label, noConversation: _empty, conversationPicker: _picker, ...chat } = props;
-  void _workspace; void _composerFor; void _create; void _label; void _empty; void _picker;
+    getThreadLabel: _label, noConversation: _empty, conversationPicker: _picker,
+    presenceForConversation: _presenceFor, ...chat } = props;
+  void _workspace; void _composerFor; void _create; void _label; void _empty; void _picker; void _presenceFor;
   const runtime = selected.runtime as ConversationRuntime<TRequest>;
+  const presence = props.presenceForConversation?.(selected.conversationId) ?? props.presence;
+  const composer = props.composerForConversation(runtime, selected.conversationId);
   return <HandrailChat {...chat} key={selected.conversationId} runtime={runtime}
-    composer={props.composerForConversation(runtime, selected.conversationId)} conversationPicker={picker}/>;
+    composer={presence && composer.presence === undefined ? { ...composer, presence } : composer}
+    {...(presence ? { presence } : {})} conversationPicker={picker}/>;
 }
 
 export interface HandrailChatWorkspaceLauncherProps<TRequest, TAuthorizationContext>

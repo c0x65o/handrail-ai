@@ -34,6 +34,28 @@ describe("conversation activity", () => {
     activity.stop();
   });
 
+  it("diagnoses polling and live fallback failures without stopping convergence", async () => {
+    const diagnostics = vi.fn();
+    const activity = new PollingConversationActivity({
+      load: async () => { throw new Error("private poll failure"); },
+      subscribe: () => (async function* () {
+        throw new Error("private stream failure");
+        yield { conversationId: "unreachable", turnStatus: "idle" as const, unread: false };
+      })(),
+      intervalMilliseconds: 60_000,
+      diagnostics,
+    });
+    activity.start();
+    await vi.waitFor(() => expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({
+      domain: "activity", operation: "live_subscribe", code: "activity_stream_unavailable",
+    })));
+    await activity.refresh();
+    expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({
+      domain: "activity", operation: "poll", code: "activity_poll_unavailable",
+    }));
+    activity.stop();
+  });
+
   it("applies live activity immediately while retaining polling convergence", async () => {
     const delivery = createInMemoryLiveConversationActivityDelivery();
     const activity = new PollingConversationActivity({
