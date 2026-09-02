@@ -27,13 +27,21 @@ describe("createHandrailAssistant", () => {
       instructions: "Protect the customer.",
       authorize: (request): HandrailAssistantAuthorizationContext => ({
         principalId: request.headers.get("x-user")!, tenantId: "tenant-a", scopeId: request.headers.get("x-user")!,
+        attribution: {
+          organization: { id: "org", source: "server_derived", trust: "authoritative" },
+          project: { id: "project", source: "server_derived", trust: "authoritative" },
+          service_environment: { id: "env", source: "server_derived", trust: "authoritative" },
+          known_user: { id: request.headers.get("x-user")!, source: "server_derived", trust: "authoritative" },
+          session: { id: null, source: "server_derived", trust: "authoritative" },
+          automation: { id: null, source: "server_derived", trust: "authoritative" },
+        },
       }),
       persistence: postgres(pool),
       provider: {
         metadata: { provider_id: "test", model_id: "test-model", capabilities: {
           streaming: true, text: true, tool_calls: true, parallel_tool_calls: false, reasoning: false,
           document_input: { supported: false }, citation_projection: { supported: true },
-          provider_context: { supported: false }, context_window_tokens: null, max_output_tokens: null,
+          provider_context: { supported: false, reason: "provider_not_supported" }, context_window_tokens: null, max_output_tokens: null,
         } },
         createTransport(input) {
           scopes.push(`${input.context.tenantId}/${input.context.scopeId}`);

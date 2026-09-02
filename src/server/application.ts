@@ -20,6 +20,7 @@ import {
   type BoundedToolExecutionOutcome,
   type BoundedToolExecutorLimits,
   type BoundedToolExecutionRequest,
+  type ToolExecutionLedger,
 } from "../tools/executor.js";
 import type { ApprovalExecutionCoordinator } from "../tools/approval-execution.js";
 import type { AiDiagnosticSink } from "../diagnostics.js";
@@ -106,6 +107,8 @@ export interface CreateAiApplicationOptions<
   /** One host-only sink shared by bounded tool and approval execution. */
   readonly diagnostics?: AiDiagnosticSink;
   readonly executorLimits?: Partial<BoundedToolExecutorLimits>;
+  /** Durable exactly-once ledger. Production constructors attach the scoped persistence ledger. */
+  readonly toolExecutionLedger?: ToolExecutionLedger;
   readonly toolLoopLimits?: Partial<ToolLoopLimits>;
   /** Default durable usage sink automatically attached to runtimes created by this application. */
   readonly usageReceiptSink?: ConversationRuntimeOptions<unknown>["usageReceiptSink"];
@@ -219,6 +222,7 @@ export async function createAiApplication<
     registry,
     policy,
     ...(options.approvalCoordinator ? { approvalCoordinator: options.approvalCoordinator } : {}),
+    ...(options.toolExecutionLedger ? { ledger: options.toolExecutionLedger } : {}),
     ...(options.diagnostics ? { diagnostics: options.diagnostics } : {}),
     ...(options.executorLimits ? { limits: options.executorLimits } : {}),
   });

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type { AiDiagnosticSink } from "../diagnostics.js";
-import type { ChatRequest, StreamEvent } from "../protocol.js";
+import type { AuthoritativeAttribution, ChatRequest, StreamEvent } from "../protocol.js";
 import type { ProviderAdapterMetadata } from "../providers/index.js";
 import type { ToolLoopLimits } from "../tools/loop.js";
 import type { ConversationTransport, TurnResumePoint } from "../transports/types.js";
@@ -14,12 +14,20 @@ import { createDurableApplicationTransport, type DurableApplicationTransport } f
 import type { ConversationCatalog } from "../conversation/catalog.js";
 import type { ApprovalProposalStore } from "../conversation/approval-proposal-store.js";
 import type { PostgresAssistantPersistence, PostgresAssistantPersistenceBundle } from "../postgres/index.js";
+import { createAiApplication, type AiApplication } from "./application.js";
+import type { ApplicationToolExecutor, ApplicationToolPolicy, BoundedToolExecutionOutcome } from "../tools/executor.js";
+import type { ToolPlugin } from "../tools/plugin.js";
+import type { ResponseToolCallEvent, ToolDefinition } from "../protocol.js";
+
+export { openaiResponses, type HandrailOpenAIResponsesOptions } from "./openai-responses.js";
+export { createProviderToolLoopTransport, type ProviderToolLoopTransportOptions } from "./provider-tool-loop.js";
 
 export const HANDRAIL_ASSISTANT_VERSION = "handrail.assistant.v1" as const;
 
 export interface HandrailAssistantAuthorizationContext extends ApplicationGatewayAuthorizationContext {
   readonly tenantId: string;
   readonly scopeId: string;
+  readonly attribution: AuthoritativeAttribution;
 }
 
 export interface HandrailAssistantProvider<TContext extends HandrailAssistantAuthorizationContext> {
@@ -29,7 +37,11 @@ export interface HandrailAssistantProvider<TContext extends HandrailAssistantAut
     readonly context: TContext;
     readonly persistence: PostgresAssistantPersistenceBundle<TContext>;
     readonly instructions: readonly string[];
-    readonly tools: readonly unknown[];
+    readonly tools: {
+      readonly definitions: readonly ToolDefinition[];
+      execute(call: Pick<ResponseToolCallEvent, "tool_call_id" | "name" | "arguments">,
+        signal: AbortSignal): Promise<BoundedToolExecutionOutcome>;
+    };
     readonly limits: Readonly<ToolLoopLimits>;
     readonly diagnostics?: AiDiagnosticSink;
   }): ConversationTransport<StreamEvent, ChatRequest> | Promise<ConversationTransport<StreamEvent, ChatRequest>>;
@@ -41,7 +53,8 @@ export interface CreateHandrailAssistantOptions<TContext extends HandrailAssista
   readonly authorize: (request: Request, action: ApplicationGatewayAction) => TContext | Promise<TContext>;
   readonly provider: HandrailAssistantProvider<TContext>;
   readonly persistence: PostgresAssistantPersistence;
-  readonly tools?: readonly unknown[];
+  readonly tools?: readonly ToolPlugin<ApplicationToolExecutor<TContext>, TContext, TContext, TContext>[];
+  readonly toolPolicy?: ApplicationToolPolicy<TContext>;
   readonly diagnostics?: AiDiagnosticSink;
   readonly workerId?: string;
   readonly toolLoopLimits?: Partial<ToolLoopLimits>;
@@ -92,6 +105,7 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
   const limits = Object.freeze({ ...DEFAULT_LIMITS, ...options.toolLoopLimits });
   const workerId = identifier(options.workerId ?? `${assistantId}-${process.pid}`, "workerId");
   const bundles = new Map<string, PostgresAssistantPersistenceBundle<TContext>>();
+  const applications = new Map<string, Promise<AiApplication<TContext, TContext, unknown>>>();
   const transports = new Map<string, Promise<DurableApplicationTransport<StreamEvent, ChatRequest>>>();
   const keyFor = (context: TContext) => `${identifier(context.tenantId, "tenantId")}\0${identifier(context.scopeId, "scopeId")}`;
   const bundleFor = (context: TContext) => {
@@ -107,13 +121,33 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
     }
     return bundle;
   };
+  const applicationFor = (context: TContext) => {
+    const key = keyFor(context);
+    let application = applications.get(key);
+    if (!application) {
+      application = createAiApplication({
+        plugins: options.tools ?? [], installContext: context,
+        policy: options.toolPolicy ?? (() => ({ outcome: "allow" })),
+        toolExecutionLedger: bundleFor(context).toolLedger,
+        ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
+      });
+      applications.set(key, application);
+    }
+    return application;
+  };
   const transportFor = (context: TContext) => {
     const key = keyFor(context);
     let transport = transports.get(key);
     if (!transport) {
-      transport = Promise.resolve(options.provider.createTransport({ context, persistence: bundleFor(context), limits,
-        instructions, tools: Object.freeze([...(options.tools ?? [])]),
-        ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }) })).then((delegate) =>
+      transport = applicationFor(context).then((application) => options.provider.createTransport({
+        context, persistence: bundleFor(context), limits, instructions,
+        tools: Object.freeze({
+          definitions: application.discover({ context }),
+          execute: (call, signal) => application.executeTool({ discovery: { context }, applicationContext: context,
+            call, signal }),
+        }),
+        ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
+      })).then((delegate) =>
         createDurableApplicationTransport<StreamEvent, ChatRequest, ChatRequest>({
           delegate, store: bundleFor(context).durableTurns as never,
           requestCodec: {
