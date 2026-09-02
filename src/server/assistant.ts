@@ -71,6 +71,13 @@ export interface CreateHandrailAssistantOptions<TContext extends HandrailAssista
   readonly provider: HandrailAssistantProvider<TContext>;
   readonly persistence: PostgresAssistantPersistence;
   readonly usage?: AIRuntimeUsageConfiguration;
+  /** Durable usage-outbox startup drain and retry worker. Enabled when a usage client is configured. */
+  readonly usageDelivery?: {
+    readonly flushOnStartup?: boolean;
+    /** Set null to disable recurring delivery. Defaults to 30 seconds. */
+    readonly retryIntervalMilliseconds?: number | null;
+    readonly batchSize?: number;
+  };
   readonly tools?: readonly ToolPlugin<ApplicationToolExecutor<TContext>, TContext, TContext, TContext>[];
   readonly toolPolicy?: ApplicationToolPolicy<TContext>;
   readonly diagnostics?: AiDiagnosticSink;
@@ -100,6 +107,8 @@ export interface HandrailAssistant {
   ) => Promise<void>;
   recoverPending(limit?: number): Promise<number>;
   flushUsage(limit?: number): Promise<{ readonly delivered: number; readonly pending: number }>;
+  /** Stops the process-local usage retry worker without closing host-owned persistence. */
+  stopUsageWorker(): void;
 }
 
 const DEFAULT_LIMITS: Readonly<ToolLoopLimits> = Object.freeze({
@@ -522,6 +531,40 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
     if (source === undefined) return;
     for await (const context of source) await transportFor(context);
   };
+  const flushUsage = async (limit?: number) => {
+    await primeRecoveryContexts();
+    let delivered = 0, pending = 0;
+    for (const bundle of bundles.values()) {
+      if (!bundle.usageReceiptSink) continue;
+      const result = await bundle.usageReceiptSink.flush(limit);
+      delivered += result.delivered; pending += result.pending;
+    }
+    return Object.freeze({ delivered, pending });
+  };
+  const usageBatchSize = options.usageDelivery?.batchSize;
+  if (usageBatchSize !== undefined && (!Number.isSafeInteger(usageBatchSize) || usageBatchSize <= 0)) {
+    throw new TypeError("usageDelivery.batchSize must be a positive safe integer");
+  }
+  const retryIntervalMilliseconds = options.usageDelivery?.retryIntervalMilliseconds === undefined
+    ? 30_000 : options.usageDelivery.retryIntervalMilliseconds;
+  if (retryIntervalMilliseconds !== null &&
+    (!Number.isSafeInteger(retryIntervalMilliseconds) || retryIntervalMilliseconds <= 0)) {
+    throw new TypeError("usageDelivery.retryIntervalMilliseconds must be null or a positive safe integer");
+  }
+  let usageFlushRunning = false;
+  const runUsageFlush = async () => {
+    if (usageFlushRunning) return;
+    usageFlushRunning = true;
+    try { await flushUsage(usageBatchSize); }
+    catch (cause) { emitAiDiagnostic(options.diagnostics, { domain: "persistence", operation: "usage_outbox_flush",
+      phase: "failed", code: "usage_delivery_failed", retryable: true, cause }); }
+    finally { usageFlushRunning = false; }
+  };
+  if (options.usage?.client != null && options.usageDelivery?.flushOnStartup !== false) await runUsageFlush();
+  const usageTimer = options.usage?.client != null && retryIntervalMilliseconds !== null
+    ? setInterval(() => void runUsageFlush(), retryIntervalMilliseconds)
+    : null;
+  usageTimer?.unref?.();
   return Object.freeze({
     version: HANDRAIL_ASSISTANT_VERSION,
     id: assistantId,
@@ -535,15 +578,7 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
       for (const transport of durableTransports.values()) recovered += (await transport.recoverPending(limit)).length;
       return recovered;
     },
-    async flushUsage(limit?: number) {
-      await primeRecoveryContexts();
-      let delivered = 0, pending = 0;
-      for (const bundle of bundles.values()) {
-        if (!bundle.usageReceiptSink) continue;
-        const result = await bundle.usageReceiptSink.flush(limit);
-        delivered += result.delivered; pending += result.pending;
-      }
-      return Object.freeze({ delivered, pending });
-    },
+    flushUsage,
+    stopUsageWorker() { if (usageTimer !== null) clearInterval(usageTimer); },
   });
 }

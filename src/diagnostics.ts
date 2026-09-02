@@ -26,6 +26,12 @@ export interface AiDiagnosticEvent {
 }
 
 export type AiDiagnosticSink = (event: AiDiagnosticEvent) => void;
+export type PublicAiDiagnosticEvent = Omit<AiDiagnosticEvent, "cause">;
+export type AiDiagnosticSeverity = "debug" | "info" | "warning" | "error";
+
+export interface BrowserAiDiagnosticReporter {
+  capture(event: PublicAiDiagnosticEvent, severity: AiDiagnosticSeverity): void;
+}
 
 /** Structural subset supported by Pino and other structured application loggers. */
 export interface AiDiagnosticLogger {
@@ -42,10 +48,20 @@ export function emitAiDiagnostic(sink: AiDiagnosticSink | undefined, event: Omit
 }
 
 /** Removes the host-only cause before structured logging or transport. */
-export function publicAiDiagnostic(event: AiDiagnosticEvent): Omit<AiDiagnosticEvent, "cause"> {
+export function publicAiDiagnostic(event: AiDiagnosticEvent): PublicAiDiagnosticEvent {
   const safe = { ...event };
   Reflect.deleteProperty(safe, "cause");
   return Object.freeze(safe);
+}
+
+/** Safe browser seam for application telemetry/error reporters; private causes never cross it. */
+export function createBrowserAiDiagnosticSink(reporter: BrowserAiDiagnosticReporter): AiDiagnosticSink {
+  return (event) => {
+    const severity: AiDiagnosticSeverity = event.phase === "failed" ? "error"
+      : event.phase === "retrying" ? "warning"
+        : event.phase === "started" ? "debug" : "info";
+    reporter.capture(publicAiDiagnostic(event), severity);
+  };
 }
 
 /**

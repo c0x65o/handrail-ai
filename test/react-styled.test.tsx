@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { createInitialConversationState } from "../src/conversation/state.js";
-import { HandrailAssistantLauncher, StyledChatLauncher, StyledChatPreset, StyledChatPresetStyles, WorkspaceThreadPicker, createHandrailChatThemeStyle, installToolRendererPlugins } from "../src/react-styled/index.js";
+import { CatalogWorkspaceThreadPicker, HandrailAssistantLauncher, StyledChatLauncher, StyledChatPreset, StyledChatPresetStyles, WorkspaceThreadPicker, createHandrailChatThemeStyle, installToolRendererPlugins } from "../src/react-styled/index.js";
 
 describe("styled React preset", () => {
   it("boots the production launcher from an endpoint without project-owned runtime wiring", () => {
@@ -126,5 +126,43 @@ describe("styled React preset", () => {
     expect(screen.getByText("Threads (1 running)")).toBeTruthy();
     fireEvent.click(create);
     await waitFor(() => expect(open).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "new" })));
+  });
+  it("hydrates every authorized catalog page and exposes archive and restore lifecycle actions", async () => {
+    const active = { conversationId: "active", title: "Active case", lifecycle: "active",
+      archivedAt: null, createdAt: "2026-01-01", updatedAt: "2026-01-02", version: "v1", metadata: {} } as never;
+    const archived = { conversationId: "archived", title: "Past case", lifecycle: "archived",
+      archivedAt: "2026-01-02", createdAt: "2026-01-01", updatedAt: "2026-01-02", version: "v2", metadata: {} } as never;
+    const list = vi.fn(async (input: { cursor?: string }) => input.cursor
+      ? { items: [archived], nextCursor: null, hasMore: false,
+          order: { field: "updated_at", direction: "desc" } }
+      : { items: [active], nextCursor: "next", hasMore: true,
+          order: { field: "updated_at", direction: "desc" } });
+    const archive = vi.fn(async () => ({ descriptor: archived }));
+    const restore = vi.fn(async () => ({ descriptor: active }));
+    const catalog = { list, archive, restore,
+      capabilities: { archive: { supported: true }, restore: { supported: true } } } as never;
+    const snapshot = { selectedConversationId: "active", runningCount: 0, errorCount: 0,
+      unreadCount: 0, threads: [{ conversationId: "active", runtime: {}, turnStatus: "idle",
+        unread: false, revision: 0 }] } as never;
+    const open = vi.fn(async () => ({} as never));
+    const close = vi.fn(async () => true);
+    const workspace = { getSnapshot: () => snapshot, subscribe: () => () => undefined,
+      open, close, select: vi.fn() };
+    const view = render(<CatalogWorkspaceThreadPicker workspace={workspace as never}
+      catalogOptions={{ catalog, authorizationContext: { accountId: "authorized" }, pageSize: 1 }}/>);
+    const picker = within(view.container);
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+    expect(open).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "active", select: false }));
+    fireEvent.click(view.container.querySelector("summary")!);
+    fireEvent.click(picker.getByRole("button", { name: "Archive Active case" }));
+    await waitFor(() => expect(archive).toHaveBeenCalledWith(expect.objectContaining({
+      conversationId: "active", expectedVersion: "v1",
+    })));
+    expect(close).toHaveBeenCalledWith("active");
+    await waitFor(() => expect(picker.getByRole<HTMLButtonElement>("button", { name: "Restore Past case" }).disabled).toBe(false));
+    fireEvent.click(picker.getByRole("button", { name: "Restore Past case" }));
+    await waitFor(() => expect(restore).toHaveBeenCalledWith(expect.objectContaining({
+      conversationId: "archived", expectedVersion: "v2",
+    })));
   });
 });

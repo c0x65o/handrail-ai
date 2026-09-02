@@ -72,6 +72,9 @@ export interface CreatePresenceControllerOptions
 export interface PresenceControllerSnapshot {
   readonly conversationId: ConversationId;
   readonly connected: boolean;
+  /** Local identity lets renderers suppress self-typing without exposing session IDs. */
+  /** Present on controller snapshots; optional so externally supplied snapshots remain source-compatible. */
+  readonly localParticipantId?: PresenceParticipantId;
   /** Live records retain independent participant/device/session identity. */
   readonly records: readonly PresenceRecord[];
   readonly participants: readonly PresenceParticipantSummary[];
@@ -268,6 +271,7 @@ class PresenceControllerImpl implements PresenceController {
     this.snapshot = Object.freeze({
       conversationId: this.conversationId,
       connected: false,
+      localParticipantId: this.identity.participantId,
       records: Object.freeze([]) as readonly PresenceRecord[],
       participants: Object.freeze([]) as readonly PresenceParticipantSummary[],
     });
@@ -609,6 +613,7 @@ class PresenceControllerImpl implements PresenceController {
       this.snapshot = Object.freeze({
         conversationId: this.conversationId,
         connected: this.connected,
+        localParticipantId: this.identity.participantId,
         records,
         participants,
       });

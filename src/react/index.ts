@@ -32,6 +32,11 @@ export {
   type ConversationActions,
 } from "./hooks.js";
 export {
+  useSmartTranscriptFollow,
+  type SmartTranscriptFollowOptions,
+  type SmartTranscriptFollowResult,
+} from "./transcript-follow.js";
+export {
   createApplicationGatewayApprovalReviewAdapter,
   type ApplicationGatewayApprovalReviewAdapter,
 } from "./application-gateway.js";

@@ -17,6 +17,7 @@ import {
 } from "../src/index.js";
 import {
   AttachmentItem,
+  AssistantActivityIndicator,
   AttachmentList,
   AttachmentCancel,
   AttachmentRemove,
@@ -392,6 +393,31 @@ describe("headless chat primitives", () => {
     fireEvent.click(screen.getByRole("button", { name: "Remove photo.png" }));
     expect(remove).toHaveBeenCalledWith("attachment_1");
     expect(screen.getByRole("list", { name: "Errors" }).textContent).toBe("Could not send");
+  });
+
+  it("hides local typing identities and presents assistant activity safely", () => {
+    const local = {
+      participant_id: "person_local", participant_kind: "human", state: "active",
+      typing: true, updated_at: "2026-08-28T00:00:00.000Z", record_count: 1, records: [],
+    } as unknown as PresenceParticipantSummary;
+    const remote = {
+      ...local, participant_id: "private_remote_identity",
+      updated_at: "2026-08-28T00:00:01.000Z",
+    } as unknown as PresenceParticipantSummary;
+    const assistant = {
+      ...local, participant_id: "private_assistant_identity", participant_kind: "assistant",
+      typing: false, assistant_activity: "using_tool",
+      updated_at: "2026-08-28T00:00:02.000Z",
+    } as unknown as PresenceParticipantSummary;
+    const snapshot = { localParticipantId: "person_local", participants: [local, remote, assistant] };
+    const presence = {
+      getSnapshot: () => snapshot,
+      subscribe: () => () => undefined,
+    } as never;
+    render(<><TypingIndicator presence={presence}/><AssistantActivityIndicator presence={presence}/></>);
+    expect(screen.getByText("Someone is typing.")).toBeTruthy();
+    expect(screen.queryByText(/private_/u)).toBeNull();
+    expect(screen.getByText("Assistant is using a tool…")).toBeTruthy();
   });
 
   it("exposes accessible mixed attachment metadata, progress, and action seams", () => {

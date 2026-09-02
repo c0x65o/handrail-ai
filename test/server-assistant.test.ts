@@ -150,4 +150,44 @@ describe("createHandrailAssistant", () => {
       event.payload.status === "confirmed" && event.actor.type === "user" && event.actor.id === "alice" &&
       event.source.type === "runtime")).toBe(true);
   });
+
+  it("drains durable usage on startup and retries failed delivery in the worker", async () => {
+    vi.useFakeTimers();
+    try {
+      type Context = HandrailAssistantAuthorizationContext;
+      const context: Context = { principalId: "alice", tenantId: "tenant", scopeId: "scope",
+        attribution: { organization: { id: "org", source: "server_derived", trust: "authoritative" },
+          project: { id: "project", source: "server_derived", trust: "authoritative" },
+          service_environment: { id: "env", source: "server_derived", trust: "authoritative" },
+          known_user: { id: "alice", source: "server_derived", trust: "authoritative" },
+          session: { id: null, source: "server_derived", trust: "authoritative" },
+          automation: { id: null, source: "server_derived", trust: "authoritative" } } };
+      const flush = vi.fn()
+        .mockRejectedValueOnce(new Error("telemetry temporarily unavailable"))
+        .mockResolvedValue({ delivered: 1, pending: 0 });
+      const bundle = { events: new InMemoryConversationEventStore(),
+        approvals: new InMemoryApprovalProposalStore<Context>({ authorize: () => "allow" }),
+        catalog: new InMemoryConversationCatalog<Context>({ authorize: () => "allow" }),
+        durableTurns: new InMemoryDurableApplicationTurnStore(),
+        toolLedger: new InMemoryToolExecutionLedger(), activity: {}, attachments: {},
+        usageReceiptSink: { flush }, usageAdmissions: null } as unknown as PostgresAssistantPersistenceBundle<Context>;
+      const diagnostics = vi.fn();
+      const assistant = await createHandrailAssistant<Context>({ id: "usage-worker",
+        authorize: () => context, recoveryContexts: () => [context], diagnostics,
+        usage: { client: {} as never }, usageDelivery: { retryIntervalMilliseconds: 10, batchSize: 7 },
+        persistence: { attachmentLimits: { maximumBytes: 1_000, acceptedMediaTypes: ["text/plain"],
+          ttlMilliseconds: 60_000 }, persistence: {}, forScope: () => bundle } as unknown as PostgresAssistantPersistence,
+        provider: { metadata: { provider_id: "test", model_id: "test", capabilities: {
+          streaming: true, text: true, tool_calls: true, parallel_tool_calls: false, reasoning: false,
+          document_input: { supported: false }, provider_context: { supported: false, reason: "provider_not_supported" },
+          context_window_tokens: null, max_output_tokens: null } }, createTransport: () => transport } });
+      expect(flush).toHaveBeenCalledOnce();
+      expect(flush).toHaveBeenCalledWith(7);
+      expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({ operation: "usage_outbox_flush",
+        phase: "failed", retryable: true }));
+      await vi.advanceTimersByTimeAsync(10);
+      expect(flush).toHaveBeenCalledTimes(2);
+      assistant.stopUsageWorker();
+    } finally { vi.useRealTimers(); }
+  });
 });

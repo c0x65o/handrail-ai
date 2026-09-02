@@ -39,7 +39,7 @@ import type {
   PresenceController,
   PresenceControllerSnapshot,
 } from "../presence/controller.js";
-import type { PresenceParticipantSummary } from "../presence/types.js";
+import type { AssistantActivity, PresenceParticipantSummary } from "../presence/types.js";
 import { ConversationContext } from "./context.js";
 import {
   PrimitiveContext,
@@ -672,6 +672,8 @@ export const PresenceList = forwardRef<HTMLUListElement, PresenceListProps>(
 
 export interface TypingIndicatorProps extends HTMLAttributes<HTMLSpanElement> {
   getParticipantName?: (participant: PresenceParticipantSummary) => string;
+  /** Include the connected controller's local participant. Defaults false. */
+  includeSelf?: boolean;
   participants?: readonly PresenceParticipantSummary[];
   presence?: PresenceController;
   renderTyping?: (participants: readonly PresenceParticipantSummary[]) => ReactNode;
@@ -681,7 +683,8 @@ export const TypingIndicator = forwardRef<HTMLSpanElement, TypingIndicatorProps>
   function TypingIndicator(
     {
       children,
-      getParticipantName = (participant) => String(participant.participant_id),
+      getParticipantName = (participant) => participant.participant_kind === "assistant" ? "Assistant" : "Someone",
+      includeSelf = false,
       participants: explicitParticipants,
       presence,
       renderTyping,
@@ -691,7 +694,8 @@ export const TypingIndicator = forwardRef<HTMLSpanElement, TypingIndicatorProps>
   ) {
     const snapshot = useResolvedPresence(presence);
     const typing = (explicitParticipants ?? snapshot?.participants ?? [])
-      .filter((participant) => participant.typing);
+      .filter((participant) => participant.typing &&
+        (includeSelf || snapshot == null || participant.participant_id !== snapshot.localParticipantId));
     const names = typing.map(getParticipantName);
     const defaultContent = names.length === 0
       ? ""
@@ -706,6 +710,33 @@ export const TypingIndicator = forwardRef<HTMLSpanElement, TypingIndicatorProps>
         {children ?? (renderTyping ? renderTyping(typing) : defaultContent)}
       </span>
     );
+  },
+);
+
+export interface AssistantActivityIndicatorProps extends HTMLAttributes<HTMLSpanElement> {
+  participants?: readonly PresenceParticipantSummary[];
+  presence?: PresenceController;
+  renderActivity?: (activity: AssistantActivity | null) => ReactNode;
+}
+
+/** Render the freshest assistant activity without exposing its session identity. */
+export const AssistantActivityIndicator = forwardRef<HTMLSpanElement, AssistantActivityIndicatorProps>(
+  function AssistantActivityIndicator(
+    { children, participants: explicitParticipants, presence, renderActivity, ...props },
+    forwardedRef,
+  ) {
+    const snapshot = useResolvedPresence(presence);
+    const assistant = (explicitParticipants ?? snapshot?.participants ?? [])
+      .filter((participant) => participant.participant_kind === "assistant" && participant.assistant_activity)
+      .sort((left, right) => String(right.updated_at).localeCompare(String(left.updated_at)))[0];
+    const activity = assistant?.assistant_activity ?? null;
+    const content = activity === "thinking" ? "Assistant is thinking…"
+      : activity === "responding" ? "Assistant is responding…"
+        : activity === "using_tool" ? "Assistant is using a tool…" : "";
+    return <span {...props} ref={forwardedRef} role={props.role ?? "status"}
+      aria-live={props["aria-live"] ?? "polite"}>
+      {children ?? (renderActivity ? renderActivity(activity) : content)}
+    </span>;
   },
 );
 
