@@ -5,6 +5,7 @@ import {
   PostgresAiPersistence,
   PostgresPersistenceConflictError,
   createPostgresSqlClientFromPool,
+  postgres,
   type PostgresPoolClientLike,
   type PostgresPoolLike,
   type PostgresVersionedDocument,
@@ -110,6 +111,29 @@ function entry(id: string, enqueuedAt: string, logicalRequestId?: string): AIRun
 }
 
 describe("Postgres assistant persistence foundation", () => {
+  it("assembles every production store only after a trusted scope is supplied", () => {
+    const pool: PostgresPoolLike = {
+      async query<TRow extends Record<string, unknown>>() {
+        return { rows: [] as TRow[], rowCount: 0 };
+      },
+      async connect() { throw new Error("not used during assembly"); },
+    };
+    const configured = postgres(pool, { attachmentLimits: {
+      maximumBytes: 1024, acceptedMediaTypes: ["text/plain"], ttlMilliseconds: 60_000,
+    } });
+    const scoped = configured.forScope(
+      { tenantId: "tenant-a", scopeId: "user-a" },
+      { createConversationId: () => "conversation-a" as never },
+    );
+
+    expect(scoped.persistence).toBe(configured.persistence);
+    expect(scoped.durableTurns.tenantId).toBe("tenant-a");
+    expect(scoped.activity.scopeId).toBe("user-a");
+    expect(scoped.attachmentMetadata.scopeId).toBe("user-a");
+    expect(scoped.usageOutbox.scopeId).toBe("user-a");
+    expect(scoped.usageReceiptSink).toBeNull();
+  });
+
   it("adapts a pg-compatible pool and releases committed and rolled-back transactions", async () => {
     const commands: string[] = [];
     let releases = 0;

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { parseConversationEvent, type ConversationEvent, type ConversationId, type ConversationRevision } from "../conversation/events.js";
 import {
   ConversationEventStoreConflictError,
@@ -61,12 +62,15 @@ import {
   type ConversationActivityRecord,
   type DurableConversationActivityStore,
 } from "../conversation/activity.js";
-import type { AttachmentBlobStore, AttachmentStagingMetadataStore, StagedAttachmentRecord } from "../attachments/staging.js";
+import { createAttachmentStagingService, type AttachmentBlobStore, type AttachmentStagingMetadataStore,
+  type AttachmentStagingLimits, type StagedAttachmentRecord } from "../attachments/staging.js";
 import { diagnoseAiOperation, type AiDiagnosticSink } from "../diagnostics.js";
 import { parseNormalizedUsageReceipt } from "../usage.js";
-import type {
-  AIRuntimeUsageOutbox,
-  AIRuntimeUsageOutboxEntry,
+import {
+  createAIRuntimeUsageReceiptSink,
+  type AIRuntimeUsageClient,
+  type AIRuntimeUsageOutbox,
+  type AIRuntimeUsageOutboxEntry,
 } from "../server/usage-control.js";
 
 export * from "./live-pubsub.js";
@@ -1358,4 +1362,116 @@ export class PostgresApprovalProposalStore<TPermissionContext> implements Approv
     return error instanceof ApprovalProposalStoreError ? error : new ApprovalProposalStoreError("unavailable", operation);
   }
 }
-import { createHash } from "node:crypto";
+
+/** Identity used to scope every store in one authenticated assistant request. */
+export interface PostgresAssistantPersistenceScope {
+  readonly tenantId: string;
+  readonly scopeId: string;
+}
+
+export interface PostgresAssistantPersistenceOptions {
+  readonly diagnostics?: AiDiagnosticSink;
+  readonly attachmentLimits?: AttachmentStagingLimits;
+  readonly usageClient?: AIRuntimeUsageClient;
+}
+
+export interface PostgresAssistantScopedOptions<TAuthorizationContext> {
+  readonly createConversationId: () => ConversationId;
+  readonly authorizeConversation?: ConversationCatalogAuthorizer<TAuthorizationContext>;
+  readonly authorizeApproval?: ApprovalProposalPermissionCheck<TAuthorizationContext>;
+}
+
+/**
+ * The complete durable store graph for one server-authenticated tenant/scope.
+ * It is deliberately created after authorization so browser-controlled fields
+ * can never select persistence partitions.
+ */
+export interface PostgresAssistantPersistenceBundle<TAuthorizationContext> {
+  readonly persistence: PostgresAiPersistence;
+  readonly continuation: PostgresOpenAIResponsesContinuationStore;
+  readonly managedTurns: PostgresManagedRuntimeTurnStateStore;
+  readonly durableTurns: PostgresDurableApplicationTurnStore;
+  readonly activity: PostgresConversationActivityStore;
+  readonly attachmentBlobs: PostgresAttachmentBlobStore;
+  readonly attachmentMetadata: PostgresAttachmentStagingMetadataStore;
+  readonly attachments: ReturnType<typeof createAttachmentStagingService>;
+  readonly synchronization: PostgresConversationSyncStateStore;
+  readonly events: PostgresConversationEventStore;
+  readonly toolLedger: PostgresToolExecutionLedger;
+  readonly catalog: PostgresConversationCatalog<TAuthorizationContext>;
+  readonly approvals: PostgresApprovalProposalStore<TAuthorizationContext>;
+  readonly usageOutbox: PostgresAIRuntimeUsageOutbox;
+  readonly usageReceiptSink: ReturnType<typeof createAIRuntimeUsageReceiptSink> | null;
+}
+
+export interface PostgresAssistantPersistence {
+  readonly persistence: PostgresAiPersistence;
+  forScope<TAuthorizationContext>(
+    scope: PostgresAssistantPersistenceScope,
+    options: PostgresAssistantScopedOptions<TAuthorizationContext>,
+  ): PostgresAssistantPersistenceBundle<TAuthorizationContext>;
+}
+
+const DEFAULT_ASSISTANT_ATTACHMENT_LIMITS: AttachmentStagingLimits = Object.freeze({
+  maximumBytes: 20 * 1024 * 1024,
+  acceptedMediaTypes: Object.freeze(["image/*", "application/pdf", "text/plain"]),
+  ttlMilliseconds: 60 * 60 * 1_000,
+  cleanupBatchSize: 100,
+});
+
+/** Adapt a pg Pool into the complete production persistence bundle. */
+export function postgres(
+  pool: PostgresPoolLike,
+  options: PostgresAssistantPersistenceOptions = {},
+): PostgresAssistantPersistence {
+  const client = createDiagnosedPostgresSqlClient(createPostgresSqlClientFromPool(pool), options.diagnostics);
+  const persistence = new PostgresAiPersistence(client);
+  return Object.freeze({
+    persistence,
+    forScope<TAuthorizationContext>(
+      scope: PostgresAssistantPersistenceScope,
+      scoped: PostgresAssistantScopedOptions<TAuthorizationContext>,
+    ): PostgresAssistantPersistenceBundle<TAuthorizationContext> {
+      const tenantId = id(scope.tenantId, "tenantId");
+      const scopeId = id(scope.scopeId, "scopeId");
+      const attachmentBlobs = new PostgresAttachmentBlobStore(persistence, tenantId);
+      const attachmentMetadata = new PostgresAttachmentStagingMetadataStore(persistence, tenantId, scopeId);
+      const usageOutbox = new PostgresAIRuntimeUsageOutbox(persistence, tenantId, scopeId);
+      return Object.freeze({
+        persistence,
+        continuation: new PostgresOpenAIResponsesContinuationStore({ persistence, tenantId, scopeId }),
+        managedTurns: new PostgresManagedRuntimeTurnStateStore(persistence, tenantId),
+        durableTurns: new PostgresDurableApplicationTurnStore(persistence, tenantId),
+        activity: new PostgresConversationActivityStore(persistence, tenantId, scopeId),
+        attachmentBlobs,
+        attachmentMetadata,
+        attachments: createAttachmentStagingService({
+          blobs: attachmentBlobs,
+          metadata: attachmentMetadata,
+          limits: options.attachmentLimits ?? DEFAULT_ASSISTANT_ATTACHMENT_LIMITS,
+          ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
+        }),
+        synchronization: new PostgresConversationSyncStateStore(persistence, tenantId),
+        events: new PostgresConversationEventStore(persistence, tenantId),
+        toolLedger: new PostgresToolExecutionLedger(persistence, tenantId),
+        catalog: new PostgresConversationCatalog({
+          persistence,
+          tenantId,
+          scopeId: () => scopeId,
+          authorize: scoped.authorizeConversation ?? (() => "allow"),
+          createId: scoped.createConversationId,
+        }),
+        approvals: new PostgresApprovalProposalStore({
+          persistence,
+          tenantId,
+          scopeId: () => scopeId,
+          authorize: scoped.authorizeApproval ?? (() => "allow"),
+        }),
+        usageOutbox,
+        usageReceiptSink: options.usageClient
+          ? createAIRuntimeUsageReceiptSink(options.usageClient, usageOutbox)
+          : null,
+      });
+    },
+  });
+}
