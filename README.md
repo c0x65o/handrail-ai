@@ -15,6 +15,8 @@ const assistant = await createHandrailAssistant({
   persistence: postgres(pool),
   tools: [erpTools],
   usage: usageFromEnvironment(),
+  // Durable Postgres receipts drain at startup and retry every 30 seconds.
+  recoveryContexts: listAuthorizedWorkerContexts,
 });
 
 app.use("/api/assistant/aegis", assistant.express({ origin: applicationOrigin }));
@@ -52,11 +54,13 @@ Node.js 20 or newer is required for package tooling and trusted-server use.
 | `@handrail/ai` | Protocol, conversation runtime/store/catalog, citations, provider-context, approval, transcription, realtime voice, web-search, event-store and sync contracts, tools, presence, retry, and usage APIs | Runtime-neutral core; direct-provider construction and side effects are trusted-server only |
 | `@handrail/ai/browser` | IndexedDB stores plus generalized image/PDF attachment intake, audio capture, and WebRTC voice helpers | Browser only; no provider credentials or server-side tool execution |
 | `@handrail/ai/client` | Application-gateway transport and language-neutral wire types | Browser, React Native, and other Fetch/stream clients |
+| `@handrail/ai/conformance` | Deterministic protocol and adapter qualification helpers | Tests and CI; no production side effects |
 | `@handrail/ai/react/headless` | Runtime provider, selectors, and actions with no DOM elements or `react-dom` import | React Native and fully custom React renderers |
 | `@handrail/ai/react` | Optional unstyled React bindings and accessible composition seams for chat, citations, conversation picking, approvals, transcription, and realtime voice | Browser/React; React is an optional peer |
 | `@handrail/ai/react/styled` | Optional responsive styled launcher/dialog/drawer/page preset | Browser/React; theme variables and renderers are application-owned |
 | `@handrail/ai/server/application-gateway` | Express-compatible adapter for the web-standard streaming gateway | Trusted application server only |
 | `@handrail/ai/server/application` | One-call trusted assembly for plugins, MCP connectors, policy, approvals, bounded tools, runtime, and gateway routing | Trusted application server only |
+| `@handrail/ai/server/assistant` | High-level authenticated assistant, provider, durable persistence, usage worker, and HTTP assembly | Trusted application server only |
 | `@handrail/ai/server/assistant-context` | Server-owned principal, attribution, model-profile, tool-context, presence, and untrusted-correlation separation | Trusted application server only |
 | `@handrail/ai/server/managed` | Optional Handrail AI Runtime v1 streaming transport | Trusted server only |
 | `@handrail/ai/server/usage-control` | Server-only AI Runtime admission, hard-denial, and idempotent receipt-settlement client | Trusted server only |
@@ -192,7 +196,15 @@ result renderer keys.
 For concurrent conversations, use `HandrailChatWorkspace` or
 `HandrailChatWorkspaceLauncher`. Their built-in thread picker can create and
 switch chats while another turn continues in its independently owned runtime;
-the launcher exposes Running, Done/unread, and Error state. Pass an optional
+the launcher exposes Running, Done/unread, and Error state. Pass
+`catalogOptions={{ catalog: client.catalog, authorizationContext }}` to hydrate
+every authorized catalog page and expose capability-gated Archive/Restore
+controls. The styled transcript follows new and streamed content only while the
+reader remains near its bottom; scrolling up preserves position and reveals an
+accessible Jump to latest control. Assistant thinking/responding/tool activity
+and remote typing are presented with generic labels, and the local participant
+is never shown as typing to itself. These conveniences do not alter the
+independent headless primitives or custom renderer seams. Pass an optional
 server-backed `ConversationActivityReadable` when unopened or remote turns must
 also affect the badge. A client renderer plugin only needs stable renderer
 implementations plus the data-only `AiApplication.catalog()` result—the styled
@@ -259,7 +271,9 @@ Pass one `diagnostics` sink to `createAiApplication`, the gateway/client, or a
 direct-provider transport to receive correlated provider, gateway, retry, and
 tool lifecycle events without prompts or payloads. `createAiDiagnosticLoggerSink`
 adapts Pino-compatible structured loggers and removes the host-only error cause;
-retain a separate access-controlled sink only when raw failures are required.
+`createBrowserAiDiagnosticSink` provides the equivalent safe handoff to a
+browser telemetry/error reporter with normalized severity. Retain a separate
+access-controlled sink only when raw failures are required.
 
 The checked
 [`examples/trusted-server-transports.ts`](./examples/trusted-server-transports.ts)
@@ -607,7 +621,11 @@ normalized receipt batches from a trusted application server. Pair it with
 `AIRuntimeUsageOutbox`, then pass that sink as `ConversationRuntime`'s
 `usageReceiptSink`. The runtime durably enqueues each receipt before linking it;
 transient delivery leaves the stable receipt identity queued for startup or
-worker `flush()` retries. The token and exact service-environment binding remain
+worker `flush()` retries. `createHandrailAssistant` wires that Postgres outbox
+through its high-level persistence boundary, drains configured recovery scopes
+at startup, and runs a non-overlapping retry worker by default. Tune this with
+`usageDelivery`, call `flushUsage()` for an explicit drain, and call
+`stopUsageWorker()` during process shutdown. The token and exact service-environment binding remain
 server-only. Empty receipt batches are accepted only when a request is finalized
 before provider usage. The helper never accepts prompts, credentials, or raw
 provider payloads and does not become settlement authority. Handrail-managed
