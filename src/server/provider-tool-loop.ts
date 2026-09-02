@@ -36,6 +36,13 @@ export interface ProviderToolLoopTransportOptions {
     readonly signal: AbortSignal;
   }) => ProviderToolLoopExecutionResult | ProviderToolLoopApprovalResult |
     Promise<ProviderToolLoopExecutionResult | ProviderToolLoopApprovalResult>;
+  /** SDK-owned durable approval wait/resume boundary. The callback must not execute before confirmation. */
+  readonly awaitApproval?: (input: {
+    readonly conversationId: string;
+    readonly turnId: string;
+    readonly call: Pick<ResponseToolCallEvent, "tool_call_id" | "name" | "arguments">;
+    readonly signal: AbortSignal;
+  }) => Promise<ProviderToolLoopExecutionResult>;
   /** Called after every provider invocation; production callers durably capture before resolving. */
   readonly captureUsage?: (receipt: NormalizedUsageReceipt) => void | Promise<void>;
   readonly resolveDocumentReference?: (input: {
@@ -85,11 +92,14 @@ export function createProviderToolLoopTransport(
     async execute(value, turn) {
       let request = parseChatRequest(value), sequence = 0, calls = 0;
       const startedAt = Date.now(), usages: ProviderUsage[] = [];
+      let approvalWaitMilliseconds = 0;
       let rootRequestId = "", traceId = "", finalResult: ProviderAdapterResult | null = null;
       for (let iteration = 0; iteration < options.limits.maxIterations; iteration += 1) {
         if (turn.signal.aborted) return { status: "cancelled", checkpoint: {
           lastAppliedEventId: null, lastAppliedCursor: null, lastAppliedRevision: null } };
-        if (Date.now() - startedAt >= options.limits.maxElapsedMs) throw new Error("Tool loop wall-clock budget exhausted");
+        if (Date.now() - startedAt - approvalWaitMilliseconds >= options.limits.maxElapsedMs) {
+          throw new Error("Tool loop wall-clock budget exhausted");
+        }
         const context = await options.createContext({ conversationId: turn.conversationId, turnId: turn.turnId,
           mutationId: turn.mutationId, iteration });
         rootRequestId ||= context.request_id; traceId ||= context.trace_id;
@@ -144,14 +154,25 @@ export function createProviderToolLoopTransport(
           const outcomes = await Promise.all(batch.map((call) => options.executeTool({
             conversationId: turn.conversationId, turnId: turn.turnId, call, signal: turn.signal,
           })));
-          const approval = outcomes.find((outcome) => outcome.status === "external_approval_required");
-          if (approval?.status === "external_approval_required") {
-            const failure = { kind: "policy" as const, retryable: false as const, code: "policy_denied" as const,
-              message: "Tool execution requires external approval." };
-            finalResult = { status: "failed", error: failure, usage: null };
-            break;
+          for (let index = 0; index < outcomes.length; index += 1) {
+            const outcome = outcomes[index]!;
+            if (outcome.status === "completed") {
+              results.push(outcome.result);
+              continue;
+            }
+            if (options.awaitApproval === undefined) {
+              const failure = { kind: "policy" as const, retryable: false as const, code: "policy_denied" as const,
+                message: "Tool execution requires external approval." };
+              finalResult = { status: "failed", error: failure, usage: null };
+              break;
+            }
+            const waitStartedAt = Date.now();
+            const approved = await options.awaitApproval({ conversationId: turn.conversationId,
+              turnId: turn.turnId, call: batch[index]!, signal: turn.signal });
+            approvalWaitMilliseconds += Date.now() - waitStartedAt;
+            results.push(approved.result);
           }
-          results.push(...outcomes.map((outcome) => (outcome as ProviderToolLoopExecutionResult).result));
+          if (finalResult.status !== "completed") break;
         }
         if (finalResult.status !== "completed") break;
         request = parseChatRequest({ ...request, protocol_version: AI_RUNTIME_PROTOCOL_VERSION,

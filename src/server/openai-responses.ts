@@ -57,13 +57,22 @@ export function openaiResponses<TContext extends HandrailAssistantAuthorizationC
         adapter,
         tools: [...input.tools.definitions],
         limits: input.limits,
-        createContext: ({ turnId, mutationId, iteration }) => ({
-          request_id: iteration === 0 ? turnId : `${turnId}:provider:${iteration}`,
-          trace_id: mutationId,
-          attribution: input.context.attribution,
-          correlation_hints: {},
-        }),
+        createContext: async ({ turnId, mutationId, iteration }) => {
+          await input.persistence.usageAdmissions?.admit({
+            idempotency_key: `${turnId}:admission:${iteration}`, provider: adapter.metadata.provider_id,
+            model: adapter.metadata.model_id, client_request_id: mutationId, trace_id: mutationId,
+          });
+          return { request_id: iteration === 0 ? turnId : `${turnId}:provider:${iteration}`,
+            trace_id: mutationId, attribution: input.context.attribution, correlation_hints: {} };
+        },
         executeTool: async ({ call, signal }) => input.tools.execute(call, signal),
+        awaitApproval: async ({ conversationId, turnId, call, signal }) => {
+          const outcome = await input.tools.awaitApproval({ conversationId, turnId, call, signal });
+          return outcome.status === "completed" ? outcome : { status: "completed" as const, result: {
+            tool_call_id: call.tool_call_id, name: call.name,
+            content: [{ type: "text" as const, text: "Tool approval remains pending." }], is_error: true,
+          } };
+        },
         ...(input.persistence.usageReceiptSink === null ? {} : {
           captureUsage: input.persistence.usageReceiptSink.capture,
         }),

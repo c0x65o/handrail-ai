@@ -1,5 +1,41 @@
 # @handrail/ai
 
+## Production assistant in one boundary
+
+```ts
+import { createHandrailAssistant, openaiResponses } from "@handrail/ai/server/assistant";
+import { postgres } from "@handrail/ai/persistence/postgres";
+import { usageFromEnvironment } from "@handrail/ai/server/usage-control";
+
+const assistant = await createHandrailAssistant({
+  id: "aegis",
+  instructions,
+  authorize: resolveAuthenticatedUser,
+  provider: openaiResponses({ model }),
+  persistence: postgres(pool),
+  tools: [erpTools],
+  usage: usageFromEnvironment(),
+});
+
+app.use("/api/assistant/aegis", assistant.express({ origin: applicationOrigin }));
+```
+
+```tsx
+import { HandrailAssistantLauncher } from "@handrail/ai/react/styled";
+
+<HandrailAssistantLauncher endpoint="/api/assistant/aegis" />
+```
+
+The constructor owns the authenticated gateway, normalized streaming, bounded
+provider/tool continuation, durable replay and cancellation, approvals,
+attachments, conversation synchronization, activity/presence, title fallback,
+usage admission and receipts, diagnostics, and capability negotiation. The
+application continues to own authentication, domain tools/policy, provider
+credentials, and its Postgres pool. See the
+[Aegis qualification fixture](./examples/spartan-aegis-high-level.ts) for an
+under-100-line migration target; legacy dual-write is deliberately outside the
+reusable template.
+
 `@handrail/ai` is a headless-first TypeScript SDK for provider-neutral chat
 state, durable event replay, streaming transports, bounded application tools,
 provider-neutral image and PDF attachment references, structured citations,

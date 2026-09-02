@@ -27,7 +27,8 @@ import {
   type ListApprovalProposalGroupInput, type TransitionApprovalProposalInput,
 } from "../conversation/approval-proposal-store.js";
 import type { ConversationApprovalProposalRecord } from "../conversation/state.js";
-import type { DocumentInputCapabilityDescriptor } from "../providers/index.js";
+import type { DocumentInputCapabilityDescriptor, ProviderAdapterMetadata } from "../providers/index.js";
+import type { ToolLoopLimits } from "../tools/loop.js";
 import { diagnoseAiOperation, emitAiDiagnostic, type AiDiagnosticSink } from "../diagnostics.js";
 import type { AppendMutationsInput, AppendMutationsResult, PullSnapshotInput, PullSnapshotResult,
   ReadSinceInput, ReadSinceResult } from "../sync/types.js";
@@ -66,6 +67,13 @@ export interface ApplicationGatewayCapabilities {
     readonly conversations: boolean | ConversationCatalogCapabilities;
     readonly approvals: boolean;
     readonly titleGeneration: boolean;
+  };
+  /** Present for high-level assistants; older gateways omit this compatibly. */
+  readonly assistant?: {
+    readonly id: string;
+    readonly version: string;
+    readonly provider: ProviderAdapterMetadata;
+    readonly toolLoopLimits: Readonly<ToolLoopLimits>;
   };
 }
 
@@ -307,6 +315,7 @@ export function createApplicationGateway<TEvent, TRequest, TContext extends Appl
     activity: options.capabilities?.activity ?? false,
     synchronization: options.capabilities?.synchronization ?? false,
     ...(options.capabilities?.documentInput === undefined ? {} : { documentInput: options.capabilities.documentInput }),
+    ...(options.capabilities?.assistant === undefined ? {} : { assistant: options.capabilities.assistant }),
     resources: Object.freeze({ conversations: options.conversations?.capabilities ?? false,
       approvals: options.approvals !== undefined, titleGeneration: options.titleGeneration !== undefined }),
   });
@@ -489,8 +498,8 @@ function createGatewayAttachmentUploadAdapter<TEvent>(
           ? request.metadata.mediaType.startsWith(accepted.slice(0, -1)) : accepted === request.metadata.mediaType)) {
         throw new TypeError("Attachment does not satisfy negotiated gateway limits");
       }
-      const url = /^[a-z][a-z0-9+.-]*:/iu.test(uploadUrl)
-        ? new URL(uploadUrl).toString()
+      const url = /^[a-z][a-z0-9+.-]*:/iu.test(uploadUrl) || uploadUrl.startsWith("/")
+        ? new URL(uploadUrl, options.baseUrl).toString()
         : `${options.baseUrl.replace(/\/+$/u, "")}/${uploadUrl.replace(/^\/+/, "")}`;
       const form = new FormData();
       form.set("file", request.source, request.metadata.filename ?? "attachment");
@@ -535,6 +544,11 @@ export async function negotiateApplicationGatewayCapabilities(
 
 type WithoutAuthorization<T> = Omit<T, "authorizationContext" | "permissionContext">;
 
+export type ApplicationGatewayApprovalTransitionInput =
+  Omit<WithoutAuthorization<TransitionApprovalProposalInput<unknown>>, "attribution"> & {
+    readonly conversationId: string;
+  };
+
 export interface ApplicationGatewayResourceClient {
   /** Available when the negotiated gateway reports `activity: true`. */
   listActivity?(): Promise<readonly ConversationActivityRecord[]>;
@@ -553,7 +567,7 @@ export interface ApplicationGatewayResourceClient {
   createApproval(input: WithoutAuthorization<CreateApprovalProposalInput<unknown>>): Promise<ConversationApprovalProposalRecord>;
   getApproval(input: WithoutAuthorization<GetApprovalProposalInput<unknown>>): Promise<ConversationApprovalProposalRecord | null>;
   listApprovalGroup(input: WithoutAuthorization<ListApprovalProposalGroupInput<unknown>>): Promise<readonly ConversationApprovalProposalRecord[]>;
-  transitionApproval(input: WithoutAuthorization<TransitionApprovalProposalInput<unknown>>): Promise<ConversationApprovalProposalRecord>;
+  transitionApproval(input: ApplicationGatewayApprovalTransitionInput): Promise<ConversationApprovalProposalRecord>;
   generateTitle(input: { readonly conversationId: string; readonly idempotencyKey: string }): Promise<string>;
   pullSnapshot(input: PullSnapshotInput): Promise<PullSnapshotResult>;
   readSince(input: ReadSinceInput): Promise<ReadSinceResult>;

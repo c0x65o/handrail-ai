@@ -2,6 +2,44 @@
 
 This is a migration seam, not a rewrite of Spartan's business domain. It was derived from the current Aegis implementation in `src/server/aegis` and `src/client/features/aegis-assistant`. Spartan may consume the adapter directly or through a pinned integration artifact while the release is being qualified.
 
+## Production target
+
+The migration destination is the high-level constructor, not a copy of Aegis's
+current orchestration. The checked
+[`spartan-aegis-high-level.ts`](../examples/spartan-aegis-high-level.ts) is the
+qualification fixture and is under 100 lines of integration code:
+
+```ts
+const assistant = await createHandrailAssistant({
+  id: "aegis",
+  instructions,
+  authorize: resolveAuthenticatedUser,
+  provider: openaiResponses({ model, maximumInputMessages: 30 }),
+  persistence: postgres(pool),
+  tools: [erpTools],
+  usage: usageFromEnvironment(),
+});
+
+app.use("/api/assistant/aegis", assistant.express({ origin: applicationOrigin }));
+```
+
+The browser integration is only:
+
+```tsx
+<HandrailAssistantLauncher endpoint="/api/assistant/aegis" />
+```
+
+The reusable path contains no Aegis-owned SSE, retry policy, provider tool loop,
+cancellation protocol, replay logic, usage receipts/outbox, or conversation
+repository. Legacy dual-write is an Aegis rollout and rollback concern only; it
+must wrap the migration outside `createHandrailAssistant` and must never become
+part of the new-project template.
+
+The checked [`spartan-aegis-conformance.ts`](../examples/spartan-aegis-conformance.ts)
+runs the shared `@handrail/ai/conformance` contract against the mounted Aegis
+endpoint and an isolated Postgres schema. Its adapter must measure real durable
+rows and business-side-effect counts; it must not return hard-coded evidence.
+
 ## Keep domain ownership in Spartan
 
 - Keep read definitions, source labels, actor/company filtering, and execution in `tools.ts` and `tool-catalog.ts`.

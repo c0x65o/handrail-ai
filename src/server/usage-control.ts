@@ -14,6 +14,7 @@ export class AIRuntimeUsageClientError extends Error { readonly status: number; 
 /** Retained for source compatibility; Telemetry-first observe-only admission never throws it. */
 export class AIRuntimePreflightDeniedError extends AIRuntimeUsageClientError { readonly result: AIRuntimeAdmissionResult; constructor(result: AIRuntimeAdmissionResult) { super(`AI Runtime preflight denied: ${result.policy_decision.reason_code}`, { status: 403, code: result.policy_decision.reason_code, retryable: false }); this.name = "AIRuntimePreflightDeniedError"; this.result = result; } }
 export interface AIRuntimeUsageClient { admit(input: AIRuntimeAdmissionInput): Promise<AIRuntimeAdmissionResult>; settle(input: { readonly requestId: string; readonly receipts: readonly NormalizedUsageReceipt[]; readonly requestStatus?: "succeeded" | "failed" | "cancelled"; }): Promise<AIRuntimeSettlementResult>; }
+export interface AIRuntimeUsageConfiguration { readonly client: AIRuntimeUsageClient | null; }
 export interface AIRuntimeUsageOutboxEntry { readonly receipt: NormalizedUsageReceipt; readonly enqueuedAt: string; readonly attempts: number; }
 /** Host implementations must make enqueue idempotent by usage_receipt_id and durable before resolving. */
 export interface AIRuntimeUsageOutbox {
@@ -141,4 +142,11 @@ export function createAIRuntimeUsageClientFromEnv(env: Record<string, string | u
     ...(env.HANDRAIL_AI_RUNTIME_PROJECT_ID ? { projectId: env.HANDRAIL_AI_RUNTIME_PROJECT_ID } : {}),
     ...(env.HANDRAIL_AI_RUNTIME_SERVICE_ID ? { serviceId: env.HANDRAIL_AI_RUNTIME_SERVICE_ID } : {}),
     ...(env.HANDRAIL_AI_RUNTIME_ENV ? { environment: env.HANDRAIL_AI_RUNTIME_ENV } : {}) });
+}
+
+/** High-level constructor input with an explicit disabled state when environment configuration is absent. */
+export function usageFromEnvironment(
+  env: Record<string, string | undefined> = process.env,
+): AIRuntimeUsageConfiguration {
+  return Object.freeze({ client: createAIRuntimeUsageClientFromEnv(env) });
 }

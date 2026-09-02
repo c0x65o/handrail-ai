@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { parseStreamEvent, type ChatRequest, type StreamEvent } from "../protocol.js";
 import type { DurableApplicationTurnStore } from "../transports/durable.js";
+import type { ConversationTransport } from "../transports/types.js";
 import type { ConversationEvent, ConversationEventPayload, ConversationId } from "../conversation/events.js";
 import type { ConversationSyncMutationEvent } from "./types.js";
 import type { ConversationEventStore } from "../conversation/event-store.js";
@@ -43,6 +44,46 @@ export function createDurableApplicationConversationSync<TAuthorizationContext>(
       `assistant-sync:${digest(`${conversationId}\0${mutationId}`)}` as never,
     ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
   });
+}
+
+/** Reject provider starts that do not match the already-admitted canonical user turn. */
+export function qualifyDurableApplicationTurnStarts(
+  transport: ConversationTransport<StreamEvent, ChatRequest>,
+  eventStore: ConversationEventStore,
+): ConversationTransport<StreamEvent, ChatRequest> {
+  const qualified: ConversationTransport<StreamEvent, ChatRequest> = {
+    capabilities: transport.capabilities,
+    async startTurn(input) {
+      try {
+        const { state } = await replayConversation({ conversationId: input.conversationId as ConversationId,
+          eventStore, checkpointPolicy: false });
+        const turn = state.turns.find((candidate) => candidate.turn_id === input.conversationTurnId);
+        const message = turn?.input_message_ids.length === 1
+          ? state.messages.find((candidate) => candidate.message_id === turn.input_message_ids[0]) : undefined;
+        const proposed = input.request.messages.filter((candidate) => candidate.role === "user").at(-1);
+        const proposedText = proposed?.content.filter((part) => part.type === "text") ?? [];
+        if (!turn || !message || message.role !== "user" || !proposed || json(message.content) !== json(proposedText)) deny();
+        const admission = (await eventStore.read({ conversationId: input.conversationId as ConversationId })).entries.find(
+          ({ event }) => event.payload.type === "message.created" && event.payload.message_id === message.message_id,
+        )?.event;
+        if (!admission || admission.mutation_id !== input.mutationId) deny();
+        const retainedAttachments = message.attachments.map((attachment) => ({ attachment_id: attachment.attachment_id,
+          media_type: attachment.media_type, byte_size: attachment.size_bytes ?? null,
+          filename: attachment.filename ?? null })).sort(byAttachmentId);
+        const requestedAttachments = proposed.content.filter((part) => part.type !== "text").map((part) => ({
+          attachment_id: part.attachment.attachment_id, media_type: part.attachment.media_type,
+          byte_size: part.attachment.byte_size, filename: part.attachment.filename ?? null,
+        })).sort(byAttachmentId);
+        if (json(retainedAttachments) !== json(requestedAttachments)) deny();
+        return transport.startTurn(input);
+      } catch (error) {
+        return { ok: false as const, error: { code: "invalid_request" as const, retryable: false,
+          message: error instanceof Error ? error.message : "Canonical turn admission is invalid." } };
+      }
+    },
+    resumeTurn: (input) => transport.resumeTurn(input),
+  };
+  return Object.freeze(qualified);
 }
 
 async function canonicalize(
@@ -132,6 +173,9 @@ function cancellationReason(reason: string): "user" | "timeout" | "superseded" |
 }
 function withoutTarget(value: { readonly citation_id: string; readonly source_id: string; readonly order: number }) {
   return { citation_id: value.citation_id, source_id: value.source_id, order: value.order };
+}
+function byAttachmentId(left: { readonly attachment_id: string }, right: { readonly attachment_id: string }): number {
+  return left.attachment_id.localeCompare(right.attachment_id);
 }
 function digest(value: string): string { return createHash("sha256").update(value).digest("hex").slice(0, 32); }
 function json(value: unknown): string {

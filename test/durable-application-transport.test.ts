@@ -88,4 +88,33 @@ describe("createDurableApplicationTransport", () => {
     await Promise.all([a.startTurn(input), b.startTurn(input)]);
     await vi.waitFor(() => expect(innerA.startTurn.mock.calls.length + innerB.startTurn.mock.calls.length).toBe(1));
   });
+
+  it("persists cancellation, forwards it once, and emits nothing after the cancelled terminal", async () => {
+    let finish!: () => void, cancellationCalls = 0;
+    const cancelled = new Promise<void>((resolve) => { finish = resolve; });
+    const inner: ConversationTransport<Event, Request> = {
+      capabilities: { ...capabilities, authoritativeCancellation: { supported: true, capability: {
+        async cancelTurn() { cancellationCalls += 1; finish();
+          return { ok: true as const, value: { status: "cancellation_requested" as const } }; },
+      } } },
+      async startTurn(value) { return { ok: true, value: { conversationId: value.conversationId,
+        turnId: "provider-turn", mutationId: value.mutationId, observation: {
+          events: (async function* () { await cancelled; yield* [] as Event[]; })(),
+          result: cancelled.then(() => ({ status: "cancelled" as const, checkpoint: checkpoint(null) })),
+          disconnect() { finish(); },
+        } } }; },
+      async resumeTurn() { return { ok: false, error: { code: "not_found", message: "unused", retryable: false } }; },
+    };
+    const transport = durable(new InMemoryDurableApplicationTurnStore<Request, Event>(), inner, "worker-cancel");
+    const started = await transport.startTurn(input);
+    if (!started.ok) throw new Error(started.error.message);
+    const cancellation = transport.capabilities.authoritativeCancellation;
+    if (!cancellation.supported) throw new Error("cancellation missing");
+    expect(await cancellation.capability.cancelTurn({ conversationId: input.conversationId,
+      turnId: input.conversationTurnId, mutationId: "cancel-mutation", idempotencyKey: "cancel-idem",
+      reason: "user" })).toMatchObject({ ok: true, value: { status: "cancellation_requested" } });
+    expect(await collect(started.value.observation.events)).toEqual([]);
+    expect(await started.value.observation.result).toMatchObject({ status: "cancelled" });
+    await vi.waitFor(() => expect(cancellationCalls).toBe(1));
+  });
 });

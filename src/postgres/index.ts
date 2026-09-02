@@ -68,6 +68,8 @@ import { diagnoseAiOperation, type AiDiagnosticSink } from "../diagnostics.js";
 import { parseNormalizedUsageReceipt } from "../usage.js";
 import {
   createAIRuntimeUsageReceiptSink,
+  type AIRuntimeAdmissionInput,
+  type AIRuntimeAdmissionResult,
   type AIRuntimeUsageClient,
   type AIRuntimeUsageOutbox,
   type AIRuntimeUsageOutboxEntry,
@@ -721,6 +723,32 @@ export class PostgresAIRuntimeUsageOutbox implements AIRuntimeUsageOutbox {
         if (!(cause instanceof PostgresPersistenceConflictError) || attempt === 3) throw cause;
       }
     }
+  }
+}
+
+/** Durable idempotent usage admission paired with the scoped receipt outbox. */
+export class PostgresAIRuntimeUsageAdmissionStore {
+  constructor(
+    readonly persistence: PostgresAiPersistence,
+    readonly tenantId: string,
+    readonly scopeId: string,
+    readonly client: AIRuntimeUsageClient,
+  ) {
+    id(tenantId, "tenantId"); id(scopeId, "scopeId");
+  }
+
+  async admit(input: AIRuntimeAdmissionInput): Promise<AIRuntimeAdmissionResult> {
+    const key = id(input.idempotency_key, "idempotencyKey");
+    const fingerprint = createHash("sha256").update(JSON.stringify(input)).digest("hex");
+    const retained = await this.persistence.getOrCreateIdempotent({
+      tenantId: this.tenantId,
+      domain: "usage.admission",
+      scopeId: this.scopeId,
+      idempotencyKey: key,
+      fingerprint,
+      execute: () => this.client.admit(input),
+    });
+    return Object.freeze({ ...retained.value, replayed: retained.status === "idempotent" || retained.value.replayed });
   }
 }
 
@@ -1379,6 +1407,7 @@ export interface PostgresAssistantScopedOptions<TAuthorizationContext> {
   readonly createConversationId: () => ConversationId;
   readonly authorizeConversation?: ConversationCatalogAuthorizer<TAuthorizationContext>;
   readonly authorizeApproval?: ApprovalProposalPermissionCheck<TAuthorizationContext>;
+  readonly usageClient?: AIRuntimeUsageClient;
 }
 
 /**
@@ -1401,6 +1430,7 @@ export interface PostgresAssistantPersistenceBundle<TAuthorizationContext> {
   readonly catalog: PostgresConversationCatalog<TAuthorizationContext>;
   readonly approvals: PostgresApprovalProposalStore<TAuthorizationContext>;
   readonly usageOutbox: PostgresAIRuntimeUsageOutbox;
+  readonly usageAdmissions: PostgresAIRuntimeUsageAdmissionStore | null;
   readonly usageReceiptSink: ReturnType<typeof createAIRuntimeUsageReceiptSink> | null;
 }
 
@@ -1440,6 +1470,7 @@ export function postgres(
       const attachmentBlobs = new PostgresAttachmentBlobStore(persistence, tenantId);
       const attachmentMetadata = new PostgresAttachmentStagingMetadataStore(persistence, tenantId, scopeId);
       const usageOutbox = new PostgresAIRuntimeUsageOutbox(persistence, tenantId, scopeId);
+      const usageClient = scoped.usageClient ?? options.usageClient;
       return Object.freeze({
         persistence,
         continuation: new PostgresOpenAIResponsesContinuationStore({ persistence, tenantId, scopeId }),
@@ -1471,8 +1502,10 @@ export function postgres(
           authorize: scoped.authorizeApproval ?? (() => "allow"),
         }),
         usageOutbox,
-        usageReceiptSink: options.usageClient
-          ? createAIRuntimeUsageReceiptSink(options.usageClient, usageOutbox)
+        usageAdmissions: usageClient
+          ? new PostgresAIRuntimeUsageAdmissionStore(persistence, tenantId, scopeId, usageClient) : null,
+        usageReceiptSink: usageClient
+          ? createAIRuntimeUsageReceiptSink(usageClient, usageOutbox)
           : null,
       });
     },

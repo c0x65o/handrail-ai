@@ -26,11 +26,11 @@ export function createApplicationGatewayApprovalReviewAdapter<TPermissionContext
     transitionHandler: async (input: DecideApprovalInput<TPermissionContext>) => {
       if (input.signal.aborted) throw new DOMException("The operation was aborted.", "AbortError");
       const result = await client.transitionApproval({
+        conversationId: input.conversationId,
         proposalId: input.proposalId,
         expectedVersion: input.expectedVersion,
         status: input.decision === "confirm" ? "confirmed" :
           input.decision === "reject" ? "rejected" : "expired",
-        attribution: input.attribution,
         idempotencyKey: input.idempotencyKey,
         idempotencyFingerprint: input.idempotencyFingerprint,
         ...(input.decisionReason === undefined ? {} : { decisionReason: input.decisionReason }),

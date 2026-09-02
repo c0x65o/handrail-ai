@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   PostgresAIRuntimeUsageOutbox,
+  PostgresAIRuntimeUsageAdmissionStore,
   PostgresAiPersistence,
   PostgresPersistenceConflictError,
   createPostgresSqlClientFromPool,
@@ -111,6 +112,31 @@ function entry(id: string, enqueuedAt: string, logicalRequestId?: string): AIRun
 }
 
 describe("Postgres assistant persistence foundation", () => {
+  it("retains usage admission decisions with durable idempotency", async () => {
+    let providerCalls = 0;
+    let retained: unknown;
+    const persistence = {
+      async getOrCreateIdempotent(input: { readonly execute: () => Promise<unknown> }) {
+        if (retained !== undefined) return { status: "idempotent" as const, value: retained };
+        retained = await input.execute();
+        return { status: "created" as const, value: retained };
+      },
+    } as unknown as PostgresAiPersistence;
+    const store = new PostgresAIRuntimeUsageAdmissionStore(persistence, "tenant-1", "user-1", {
+      async admit(input) { providerCalls += 1; return { contract_version: "v1", replayed: false,
+        request: { id: input.idempotency_key, status: "observing", project_id: "project", capability_id: "",
+          service_id: "service", environment: "prod", provider: input.provider, model: input.model },
+        policy_decision: { id: "decision", policy_id: null, policy_version: null, enforcement_mode: "observe",
+          decision: "allow", reason_code: "observe", created_at: "2026-09-02T00:00:00.000Z" }, reservation: null }; },
+      async settle() { throw new Error("not used"); },
+    });
+    const input = { idempotency_key: "turn-1:admission", provider: "openai", model: "gpt-test" };
+
+    expect((await store.admit(input)).replayed).toBe(false);
+    expect((await store.admit(input)).replayed).toBe(true);
+    expect(providerCalls).toBe(1);
+  });
+
   it("assembles every production store only after a trusted scope is supplied", () => {
     const pool: PostgresPoolLike = {
       async query<TRow extends Record<string, unknown>>() {
