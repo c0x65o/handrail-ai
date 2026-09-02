@@ -822,7 +822,8 @@ async function resultForTerminal(
   usage: Usage | null,
 ): Promise<ManagedRuntimeObservationOutcome> {
   let receipt: NormalizedUsageReceipt | null = null;
-  if (usage !== null && options.createUsageReceiptIdentity !== undefined) {
+  const settledByManagedGateway = started.metadata?.usage_settlement_owner === "handrail";
+  if (usage !== null && options.createUsageReceiptIdentity !== undefined && !settledByManagedGateway) {
     const terminalStatus: UsageReceiptTerminalStatus =
       terminal.type === "response.completed"
         ? "completed"

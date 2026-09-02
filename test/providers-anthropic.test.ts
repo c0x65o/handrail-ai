@@ -153,6 +153,7 @@ describe("AnthropicProviderAdapter", () => {
       usage: {
         input_tokens: 19,
         cached_input_tokens: 3,
+        cache_write_input_tokens: 4,
         output_tokens: 7,
         reasoning_tokens: 2,
         total_tokens: 26,

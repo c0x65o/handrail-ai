@@ -569,14 +569,19 @@ function parseUsage(value: unknown): ProviderUsage {
     promptDetails?.cached_tokens === undefined
       ? 0
       : safeInteger(promptDetails.cached_tokens);
+  const cacheWriteTokens =
+    promptDetails?.cache_write_tokens === undefined
+      ? 0
+      : safeInteger(promptDetails.cache_write_tokens);
   const reasoningTokens =
     completionDetails?.reasoning_tokens === undefined
       ? 0
       : safeInteger(completionDetails.reasoning_tokens);
   if (
     cachedTokens === null ||
+    cacheWriteTokens === null ||
     reasoningTokens === null ||
-    cachedTokens > inputTokens ||
+    cachedTokens + cacheWriteTokens > inputTokens ||
     reasoningTokens > outputTokens
   ) {
     throw new OpenAIMalformedStreamError();
@@ -585,6 +590,7 @@ function parseUsage(value: unknown): ProviderUsage {
   return {
     input_tokens: inputTokens,
     cached_input_tokens: cachedTokens,
+    ...(cacheWriteTokens ? { cache_write_input_tokens: cacheWriteTokens } : {}),
     output_tokens: outputTokens,
     reasoning_tokens: reasoningTokens,
     total_tokens: totalTokens,

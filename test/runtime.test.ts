@@ -1115,6 +1115,7 @@ describe("createConversationRuntime", () => {
     const eventStore = new InMemoryConversationEventStore();
     const transport = new FakeTransport();
     const receipt = usageReceipt();
+    const capture = vi.fn(async () => undefined);
     transport.startObservations.push(observation([
       startedFrame(),
       completedFrame(1),
@@ -1124,6 +1125,7 @@ describe("createConversationRuntime", () => {
       clientId,
       transport,
       eventStore,
+      usageReceiptSink: { capture },
       ...deterministicSources(),
     });
 
@@ -1134,6 +1136,7 @@ describe("createConversationRuntime", () => {
 
     expect(outcome).toMatchObject({ status: "completed" });
     expect(outcome.usageReceipts).toEqual([receipt]);
+    expect(capture).toHaveBeenCalledWith(receipt);
     expect(Object.isFrozen(outcome.usageReceipts)).toBe(true);
     expect(runtime.getSnapshot().usage_receipt_links).toMatchObject([{
       turn_id: outcome.turnId,

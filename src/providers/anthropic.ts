@@ -275,6 +275,7 @@ function normalizeUsage(usage: NativeUsage): ProviderUsage {
   return {
     input_tokens: inputTokens,
     cached_input_tokens: usage.cacheReadInputTokens,
+    cache_write_input_tokens: usage.cacheCreationInputTokens,
     output_tokens: usage.outputTokens,
     reasoning_tokens: usage.reasoningTokens,
     total_tokens: addSafe(inputTokens, usage.outputTokens),

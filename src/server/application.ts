@@ -107,6 +107,8 @@ export interface CreateAiApplicationOptions<
   readonly diagnostics?: AiDiagnosticSink;
   readonly executorLimits?: Partial<BoundedToolExecutorLimits>;
   readonly toolLoopLimits?: Partial<ToolLoopLimits>;
+  /** Default durable usage sink automatically attached to runtimes created by this application. */
+  readonly usageReceiptSink?: ConversationRuntimeOptions<unknown>["usageReceiptSink"];
 }
 
 export interface AiApplicationRunOptions<
@@ -279,7 +281,12 @@ export async function createAiApplication<
       });
     },
     createRuntime<TRequest>(runtimeOptions: ConversationRuntimeOptions<TRequest>) {
-      return createConversationRuntime(runtimeOptions);
+      return createConversationRuntime({
+        ...runtimeOptions,
+        ...(runtimeOptions.usageReceiptSink || !options.usageReceiptSink
+          ? {}
+          : { usageReceiptSink: options.usageReceiptSink }),
+      });
     },
     createGateway<TEvent, TRequest, TContext extends ApplicationGatewayAuthorizationContext>(
       gatewayOptions: ApplicationGatewayOptions<TEvent, TRequest, TContext>,

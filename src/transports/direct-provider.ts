@@ -359,10 +359,12 @@ function usageReceipt(
   context: DirectProviderTurnContext,
   input: StartTurnInput<ChatRequest>,
   provider: ProviderAdapterMetadata,
+  occurredAt: string,
 ): NormalizedUsageReceipt | null {
   if (result.usage === null) return null;
   return projectProviderUsageToReceipt(result.usage, {
     ...context.usage,
+    occurred_at: occurredAt,
     conversation_id: input.conversationId,
     turn_id: input.conversationTurnId,
     trace_id: context.trace_id,
@@ -525,7 +527,13 @@ async function pumpProvider(
     if (heldTerminal === null || !terminalMatchesResult(heldTerminal, item.value)) {
       throw new TypeError("terminal event does not match provider result");
     }
-    const receipt = usageReceipt(item.value, context, input, adapter.metadata);
+    const receipt = usageReceipt(
+      item.value,
+      context,
+      input,
+      adapter.metadata,
+      new Date(startedAt).toISOString(),
+    );
     observation.push(heldTerminal);
     observation.close(observationResult(item.value, receipt));
     emitAiDiagnostic(diagnostics, {

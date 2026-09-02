@@ -231,12 +231,14 @@ function usage(value: unknown): ProviderUsage {
   }
   const inputDetails = source.input_tokens_details && typeof source.input_tokens_details === "object" ? record(source.input_tokens_details) : {};
   const outputDetails = source.output_tokens_details && typeof source.output_tokens_details === "object" ? record(source.output_tokens_details) : {};
-  const cached = Number(inputDetails.cached_tokens ?? 0), reasoning = Number(outputDetails.reasoning_tokens ?? 0);
+  const cached = Number(inputDetails.cached_tokens ?? 0), cacheWrite = Number(inputDetails.cache_write_tokens ?? 0), reasoning = Number(outputDetails.reasoning_tokens ?? 0);
   if (!Number.isSafeInteger(cached) || cached < 0 || cached > (input as number) ||
+    !Number.isSafeInteger(cacheWrite) || cacheWrite < 0 || cached + cacheWrite > (input as number) ||
     !Number.isSafeInteger(reasoning) || reasoning < 0 || reasoning > (output as number)) {
     throw new TypeError("OpenAI Responses usage details are invalid");
   }
   return { input_tokens: input as number, cached_input_tokens: cached,
+    ...(cacheWrite ? { cache_write_input_tokens: cacheWrite } : {}),
     output_tokens: output as number, reasoning_tokens: reasoning, total_tokens: total as number,
     provider_cost: { known: false } };
 }

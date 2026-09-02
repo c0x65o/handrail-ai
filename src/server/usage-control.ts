@@ -14,6 +14,18 @@ export class AIRuntimeUsageClientError extends Error { readonly status: number; 
 /** Retained for source compatibility; Telemetry-first observe-only admission never throws it. */
 export class AIRuntimePreflightDeniedError extends AIRuntimeUsageClientError { readonly result: AIRuntimeAdmissionResult; constructor(result: AIRuntimeAdmissionResult) { super(`AI Runtime preflight denied: ${result.policy_decision.reason_code}`, { status: 403, code: result.policy_decision.reason_code, retryable: false }); this.name = "AIRuntimePreflightDeniedError"; this.result = result; } }
 export interface AIRuntimeUsageClient { admit(input: AIRuntimeAdmissionInput): Promise<AIRuntimeAdmissionResult>; settle(input: { readonly requestId: string; readonly receipts: readonly NormalizedUsageReceipt[]; readonly requestStatus?: "succeeded" | "failed" | "cancelled"; }): Promise<AIRuntimeSettlementResult>; }
+export interface AIRuntimeUsageOutboxEntry { readonly receipt: NormalizedUsageReceipt; readonly enqueuedAt: string; readonly attempts: number; }
+/** Host implementations must make enqueue idempotent by usage_receipt_id and durable before resolving. */
+export interface AIRuntimeUsageOutbox {
+  enqueue(entry: AIRuntimeUsageOutboxEntry): Promise<void>;
+  pending(limit: number): Promise<readonly AIRuntimeUsageOutboxEntry[]>;
+  acknowledge(usageReceiptId: string): Promise<void>;
+  failed(usageReceiptId: string, error: { readonly code: string; readonly retryable: boolean }): Promise<void>;
+}
+export interface AIRuntimeUsageReceiptSink {
+  capture(receipt: NormalizedUsageReceipt): Promise<void>;
+  flush(limit?: number): Promise<{ readonly delivered: number; readonly pending: number }>;
+}
 export interface AIRuntimeQuotaLease { readonly lease_id: string; readonly logical_request_id: string; readonly enforcement_mode: "observe" | "warn" | "deny"; readonly decision: "allow" | "warn" | "deny"; readonly reason_code: string; readonly reserved_tokens: number; readonly reserved_provider_cost: number; readonly provider_cost_currency: string; readonly output_token_limit: number | null; readonly strict: boolean; readonly expires_at: string; }
 
 function required(value: string | undefined, label: string): string { const normalized = String(value || "").trim(); if (!normalized) throw new TypeError(`${label} is required`); return normalized; }
@@ -51,6 +63,56 @@ export function createAIRuntimeUsageClient(options: AIRuntimeUsageClientOptions)
     }
   };
   return Object.freeze(client);
+}
+
+/**
+ * Connects ConversationRuntime receipts to Telemetry through a host-owned
+ * durable outbox. Capture succeeds once the receipt is durable; transient
+ * delivery failure never drops it, and Telemetry deduplicates retries by the
+ * stable receipt identity.
+ */
+export function createAIRuntimeUsageReceiptSink(
+  client: AIRuntimeUsageClient,
+  outbox: AIRuntimeUsageOutbox,
+  options: { readonly now?: () => Date; readonly flushBatchSize?: number } = {},
+): AIRuntimeUsageReceiptSink {
+  const now = options.now ?? (() => new Date());
+  const batchSize = Math.max(1, Math.min(100, options.flushBatchSize ?? 25));
+  let flushing: Promise<{ delivered: number; pending: number }> | null = null;
+  const flush = (limit = batchSize): Promise<{ delivered: number; pending: number }> => {
+    if (flushing) return flushing;
+    flushing = (async () => {
+      const entries = await outbox.pending(Math.max(1, Math.min(100, limit)));
+      let delivered = 0;
+      for (const entry of entries) {
+        try {
+          const status = entry.receipt.terminal_status === "completed" ? "succeeded"
+            : entry.receipt.terminal_status === "cancelled" ? "cancelled" : "failed";
+          await client.settle({ requestId: entry.receipt.turn_id, receipts: [entry.receipt], requestStatus: status });
+          await outbox.acknowledge(entry.receipt.usage_receipt_id);
+          delivered += 1;
+        } catch (cause) {
+          const error = cause instanceof AIRuntimeUsageClientError
+            ? { code: cause.code, retryable: cause.retryable }
+            : { code: "ai_runtime_usage_delivery_failed", retryable: true };
+          await outbox.failed(entry.receipt.usage_receipt_id, error);
+          if (error.retryable) break;
+        }
+      }
+      return { delivered, pending: Math.max(0, entries.length - delivered) };
+    })().finally(() => { flushing = null; });
+    return flushing;
+  };
+  return Object.freeze({
+    async capture(receipt: NormalizedUsageReceipt): Promise<void> {
+      const normalized = parseNormalizedUsageReceipt(receipt);
+      await outbox.enqueue({ receipt: normalized, enqueuedAt: now().toISOString(), attempts: 0 });
+      // Delivery is intentionally best effort after the durable write. Hosts
+      // should also call flush at startup and from a retry worker.
+      void flush().catch(() => undefined);
+    },
+    flush,
+  });
 }
 
 /** Opt-in enforcement foundation. Observe-only integrations must not call this until rollout is enabled. */

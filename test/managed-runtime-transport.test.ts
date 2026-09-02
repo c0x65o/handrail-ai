@@ -249,6 +249,22 @@ describe("ManagedRuntimeTransport", () => {
     expect("ManagedRuntimeTransport" in browserEntry).toBe(false);
   });
 
+  it("does not project a second receipt when the managed gateway owns settlement", async () => {
+    let identityCalls = 0;
+    const managedStarted = { ...started, metadata: { usage_settlement_owner: "handrail" } };
+    const usageEvent = { ...envelope("response.usage", 1), type: "response.usage" as const,
+      usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6 } };
+    const terminal = { ...envelope("response.completed", 2), type: "response.completed" as const, outcome: "stop" as const };
+    const transport = transportFor(async () => streamResponse(sseFrame(managedStarted) + sseFrame(usageEvent) + sseFrame(terminal)),
+      2_000, () => { identityCalls += 1; return { usage_receipt_id: "must-not-project", logical_request_id: "logical",
+        attempt: { id: "attempt", index: 0 }, continuation: { id: "continuation", index: 0 }, provider_id: "runtime", model_id: "model" }; });
+    const result = await startTurn(transport);
+    expect(result.ok).toBe(true); if (!result.ok) return;
+    await collect(result.value.observation.events);
+    expect((await result.value.observation.result).usageReceipt).toBeNull();
+    expect(identityCalls).toBe(0);
+  });
+
   it("rejects document input before the managed runtime fetch boundary", async () => {
     let fetchCalls = 0;
     const transport = transportFor(async () => {

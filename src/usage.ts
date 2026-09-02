@@ -89,6 +89,8 @@ export interface NormalizedTokenUsage {
   readonly input_tokens: NormalizedUsageQuantity;
   /** A non-additive subset of input_tokens. */
   readonly cached_input_tokens: NormalizedUsageQuantity;
+  /** A non-additive subset written into a provider prompt cache. Optional in v1 for compatibility. */
+  readonly cache_write_input_tokens?: NormalizedUsageQuantity;
   /** All output tokens, including reasoning tokens. */
   readonly output_tokens: NormalizedUsageQuantity;
   /** A non-additive subset of output_tokens. */
@@ -118,6 +120,8 @@ export interface UsageContinuationIdentity {
  */
 export interface NormalizedUsageReceipt {
   readonly version: typeof NORMALIZED_USAGE_RECEIPT_VERSION;
+  /** Provider invocation start time used for effective-dated price selection. */
+  readonly occurred_at?: string;
   readonly usage_receipt_id: ConversationUsageReceiptId;
   readonly conversation_id: ConversationId;
   readonly turn_id: ConversationTurnId;
@@ -135,6 +139,8 @@ export interface NormalizedUsageReceipt {
 }
 
 export interface ProviderUsageReceiptContext {
+  /** Provider invocation start time. Omitted only by legacy receipt producers. */
+  readonly occurred_at?: string;
   readonly usage_receipt_id: string;
   readonly conversation_id: string;
   readonly turn_id: string;
@@ -303,8 +309,9 @@ function validateTokenUsage(value: unknown, path: string): void {
     "total_tokens",
   ] as const;
   requiredKeys(object, fields, path);
-  allowedKeys(object, fields, path);
+  allowedKeys(object, [...fields, "cache_write_input_tokens"], path);
   for (const field of fields) validateQuantity(object[field], `${path}.${field}`);
+  if (object.cache_write_input_tokens !== undefined) validateQuantity(object.cache_write_input_tokens, `${path}.cache_write_input_tokens`);
 
   const input = knownQuantityValue(object.input_tokens);
   const output = knownQuantityValue(object.output_tokens);
@@ -328,6 +335,10 @@ function validateTokenUsage(value: unknown, path: string): void {
   }
   if (cached !== undefined && input !== undefined && cached > input) {
     fail(`${path}.cached_input_tokens.value`, "must not exceed input_tokens");
+  }
+  const cacheWrite = object.cache_write_input_tokens === undefined ? undefined : knownQuantityValue(object.cache_write_input_tokens);
+  if (cacheWrite !== undefined && (input === undefined || cacheWrite > input || cacheWrite + (cached ?? 0) > input)) {
+    fail(`${path}.cache_write_input_tokens.value`, "must be a disjoint subset of input_tokens");
   }
 
   const reasoning = knownQuantityValue(object.reasoning_tokens);
@@ -448,12 +459,23 @@ export function parseNormalizedUsageReceipt(
     "provider_cost",
   ] as const;
   requiredKeys(object, fields, "$receipt");
-  allowedKeys(object, fields, "$receipt");
+  allowedKeys(object, [...fields, "occurred_at"], "$receipt");
   if (object.version !== NORMALIZED_USAGE_RECEIPT_VERSION) {
     fail(
       "$receipt.version",
       `must equal ${NORMALIZED_USAGE_RECEIPT_VERSION}`,
     );
+  }
+  if (Object.hasOwn(object, "occurred_at")) {
+    const occurredAt = boundedString(
+      object.occurred_at,
+      "$receipt.occurred_at",
+      64,
+    );
+    const parsed = new Date(occurredAt);
+    if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== occurredAt) {
+      fail("$receipt.occurred_at", "must be a canonical ISO-8601 timestamp");
+    }
   }
   for (const field of [
     "usage_receipt_id",
@@ -539,6 +561,9 @@ export function projectProviderUsageToReceipt(
 
   return parseNormalizedUsageReceipt({
     version: NORMALIZED_USAGE_RECEIPT_VERSION,
+    ...(context.occurred_at === undefined
+      ? {}
+      : { occurred_at: context.occurred_at }),
     usage_receipt_id: context.usage_receipt_id,
     conversation_id: context.conversation_id,
     turn_id: context.turn_id,
@@ -557,6 +582,9 @@ export function projectProviderUsageToReceipt(
         context.quality,
         usage.cached_input_tokens,
       ),
+      ...(usage.cache_write_input_tokens === undefined ? {} : {
+        cache_write_input_tokens: quantity(context.quality, usage.cache_write_input_tokens),
+      }),
       output_tokens: quantity(context.quality, usage.output_tokens),
       reasoning_tokens: quantity(context.quality, usage.reasoning_tokens),
       total_tokens: quantity(context.quality, usage.total_tokens),

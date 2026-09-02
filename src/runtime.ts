@@ -156,6 +156,14 @@ export interface ConversationRuntimeOptions<TRequest> {
   readonly retryPolicy?: RetryPolicy;
   /** Optional provider-context acceleration. Unsupported capabilities are a no-op. */
   readonly providerContext?: ConversationRuntimeProviderContextOptions<TRequest, unknown>;
+  /**
+   * Trusted host boundary for durably capturing normalized provider receipts.
+   * The sink is invoked before the receipt is linked into the conversation log;
+   * rejecting capture fails the observation so usage cannot be silently lost.
+   */
+  readonly usageReceiptSink?: {
+    capture(receipt: NormalizedUsageReceipt): Promise<void>;
+  };
 }
 
 export interface ConversationRuntimeSendMessageInput<TRequest> {
@@ -586,7 +594,7 @@ export async function createConversationRuntime<TRequest>(
     });
   };
 
-  const captureUsageReceipt = (
+  const captureUsageReceipt = async (
     turnId: ConversationTurnId,
     transportResult: TurnObservationResult,
   ): Promise<void> => {
@@ -597,42 +605,28 @@ export async function createConversationRuntime<TRequest>(
     ) {
       return Promise.resolve();
     }
+    let receipt: NormalizedUsageReceipt;
     try {
-      const receipt = parseNormalizedUsageReceipt(transportResult.usageReceipt);
-      if (
-        receipt.conversation_id !== options.conversationId ||
-        receipt.turn_id !== turnId
-      ) {
-        return Promise.resolve();
-      }
-      let receipts = usageReceiptsByTurn.get(turnId);
-      if (receipts === undefined) {
-        receipts = new Map<string, NormalizedUsageReceipt>();
-        usageReceiptsByTurn.set(turnId, receipts);
-      }
-      if (!receipts.has(receipt.usage_receipt_id)) {
-        receipts.set(receipt.usage_receipt_id, receipt);
-      }
-      if (
-        store.getSnapshot().usage_receipt_links.some(
-          (link) => link.usage_receipt_id === receipt.usage_receipt_id,
-        )
-      ) {
-        return Promise.resolve();
-      }
-      return persist([{
-        actor: { type: "assistant" },
-        source: runtimeSource(),
-        payload: {
-          type: "usage.receipt_linked",
-          turn_id: turnId,
-          usage_receipt_id: receipt.usage_receipt_id,
-        },
-      }]).then(() => undefined);
+      receipt = parseNormalizedUsageReceipt(transportResult.usageReceipt);
     } catch {
       // Observation receipts are untrusted transport output. Invalid values are omitted.
       return Promise.resolve();
     }
+    if (receipt.conversation_id !== options.conversationId || receipt.turn_id !== turnId) return;
+    let receipts = usageReceiptsByTurn.get(turnId);
+    if (receipts === undefined) {
+      receipts = new Map<string, NormalizedUsageReceipt>();
+      usageReceiptsByTurn.set(turnId, receipts);
+    }
+    if (!receipts.has(receipt.usage_receipt_id)) {
+      await options.usageReceiptSink?.capture(receipt);
+      receipts.set(receipt.usage_receipt_id, receipt);
+    }
+    if (store.getSnapshot().usage_receipt_links.some((link) => link.usage_receipt_id === receipt.usage_receipt_id)) return;
+    await persist([{
+      actor: { type: "assistant" }, source: runtimeSource(),
+      payload: { type: "usage.receipt_linked", turn_id: turnId, usage_receipt_id: receipt.usage_receipt_id },
+    }]);
   };
 
   const observeTransport = async (

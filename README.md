@@ -566,13 +566,17 @@ control-plane policy remain owned by Handrail and are not implemented in this
 package.
 
 `createAIRuntimeUsageClient` from `@handrail/ai/server/usage-control` submits
-preflight reservations and normalized receipt batches from a trusted
-application server. Its token and exact service-environment binding are
-server-only. Admission and settlement retry safely because request and receipt
-identities are idempotent; a typed `AIRuntimePreflightDeniedError` is the hard
-stop before any provider call. Empty receipt batches are accepted only when a
-request is finalized before provider usage. The helper never accepts prompts,
-credentials, or raw provider payloads and does not become settlement authority.
+normalized receipt batches from a trusted application server. Pair it with
+`createAIRuntimeUsageReceiptSink` and a host-implemented durable
+`AIRuntimeUsageOutbox`, then pass that sink as `ConversationRuntime`'s
+`usageReceiptSink`. The runtime durably enqueues each receipt before linking it;
+transient delivery leaves the stable receipt identity queued for startup or
+worker `flush()` retries. The token and exact service-environment binding remain
+server-only. Empty receipt batches are accepted only when a request is finalized
+before provider usage. The helper never accepts prompts, credentials, or raw
+provider payloads and does not become settlement authority. Handrail-managed
+streams identify Handrail as settlement owner, so their SDK projection cannot
+double-submit usage already settled by the managed gateway.
 
 ## Host-supplied boundaries
 

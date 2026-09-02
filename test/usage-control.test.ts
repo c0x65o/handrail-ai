@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createAIRuntimeUsageClient } from "../src/server/usage-control.js";
+import {
+  createAIRuntimeUsageClient,
+  createAIRuntimeUsageReceiptSink,
+  type AIRuntimeUsageOutboxEntry,
+} from "../src/server/usage-control.js";
 import { createAIRuntimeQuotaLeaseClient } from "../src/server/usage-control.js";
 import { parseNormalizedUsageReceipt } from "../src/usage.js";
 
@@ -56,6 +60,33 @@ describe("AI Runtime usage-control client", () => {
     const client = createAIRuntimeUsageClient({ apiUrl: "https://telemetry.example", token: "server-token", serviceEnvId: "service-env-1", fetch: fetcher });
     const result = await client.settle({ requestId: "request-1", receipts: [receipt("receipt-1"), receipt("receipt-2")], requestStatus: "cancelled" });
     expect(result.accepted_receipts).toBe(2);
+  });
+
+  it("durably enqueues receipts before delivery and retries the same receipt identity", async () => {
+    const rows = new Map<string, AIRuntimeUsageOutboxEntry>();
+    const outbox = {
+      enqueue: vi.fn(async (entry: AIRuntimeUsageOutboxEntry) => { rows.set(entry.receipt.usage_receipt_id, entry); }),
+      pending: vi.fn(async (limit: number) => [...rows.values()].slice(0, limit)),
+      acknowledge: vi.fn(async (id: string) => { rows.delete(id); }),
+      failed: vi.fn(async () => undefined),
+    };
+    const client = {
+      admit: vi.fn(),
+      settle: vi.fn()
+        .mockRejectedValueOnce(new Error("offline"))
+        .mockResolvedValue({ accepted_receipts: 1 }),
+    };
+    const sink = createAIRuntimeUsageReceiptSink(client as never, outbox);
+    await sink.capture(receipt("receipt-durable"));
+    await vi.waitFor(() => expect(outbox.failed).toHaveBeenCalled());
+    expect(rows.has("receipt-durable")).toBe(true);
+    await sink.flush();
+    expect(client.settle).toHaveBeenLastCalledWith(expect.objectContaining({
+      requestId: "turn-1",
+      receipts: [expect.objectContaining({ usage_receipt_id: "receipt-durable" })],
+      requestStatus: "succeeded",
+    }));
+    expect(rows.size).toBe(0);
   });
 });
 

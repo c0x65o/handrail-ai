@@ -280,6 +280,8 @@ export interface ProviderUsage {
   readonly input_tokens: number;
   /** The subset of input_tokens served from a provider cache; never additive. */
   readonly cached_input_tokens: number;
+  /** The subset of input_tokens written to provider cache when reported. */
+  readonly cache_write_input_tokens?: number;
   /** All generated output tokens, including reasoning tokens when reported. */
   readonly output_tokens: number;
   /** The subset of output_tokens used for reasoning; never additive. */
