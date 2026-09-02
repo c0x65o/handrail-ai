@@ -18,6 +18,9 @@ import { createAiApplication, type AiApplication } from "./application.js";
 import type { ApplicationToolExecutor, ApplicationToolPolicy, BoundedToolExecutionOutcome } from "../tools/executor.js";
 import type { ToolPlugin } from "../tools/plugin.js";
 import type { ResponseToolCallEvent, ToolDefinition } from "../protocol.js";
+import { createConversationSynchronizationHttpHandler } from "../sync/http.js";
+import { createDurableApplicationConversationSync } from "../sync/durable-application-adapter.js";
+import { createInMemoryLivePresenceDelivery, createLivePresenceHttpHandler } from "../presence/live-delivery.js";
 
 export { openaiResponses, type HandrailOpenAIResponsesOptions } from "./openai-responses.js";
 export { createProviderToolLoopTransport, type ProviderToolLoopTransportOptions } from "./provider-tool-loop.js";
@@ -107,6 +110,7 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
   const bundles = new Map<string, PostgresAssistantPersistenceBundle<TContext>>();
   const applications = new Map<string, Promise<AiApplication<TContext, TContext, unknown>>>();
   const transports = new Map<string, Promise<DurableApplicationTransport<StreamEvent, ChatRequest>>>();
+  const presenceDelivery = createInMemoryLivePresenceDelivery();
   const keyFor = (context: TContext) => `${identifier(context.tenantId, "tenantId")}\0${identifier(context.scopeId, "scopeId")}`;
   const bundleFor = (context: TContext) => {
     const key = keyFor(context);
@@ -191,6 +195,47 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
   });
   const activity = (request: Request, context: TContext) =>
     createConversationActivityHttpHandler(bundleFor(context).activity)(request);
+  const ownsConversation = async (context: TContext, conversationId: string) => {
+    await bundleFor(context).catalog.get({ authorizationContext: context, conversationId: conversationId as never });
+    return true;
+  };
+  const attachments = async (request: Request, context: TContext) => {
+    if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
+    try {
+      const form = await request.formData();
+      const file = form.get("file"), conversationId = form.get("conversationId"), idempotencyKey = form.get("idempotencyKey");
+      if (!(file instanceof Blob) || typeof conversationId !== "string" || typeof idempotencyKey !== "string") {
+        return new Response(null, { status: 400 });
+      }
+      await ownsConversation(context, conversationId);
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const fingerprint = createHash("sha256").update(bytes).digest("hex");
+      const reference = await bundleFor(context).attachments.stage({ ownerScopeId: context.scopeId, conversationId,
+        idempotencyKey, fingerprint, mediaType: file.type,
+        ...(typeof (file as File).name === "string" ? { filename: (file as File).name } : {}), bytes });
+      return new Response(JSON.stringify({ ok: true, value: reference }), {
+        headers: { "content-type": "application/json; charset=utf-8" },
+      });
+    } catch {
+      return new Response(JSON.stringify({ ok: false, error: { code: "forbidden", message: "Attachment upload denied." } }),
+        { status: 403, headers: { "content-type": "application/json; charset=utf-8" } });
+    }
+  };
+  const synchronization = createConversationSynchronizationHttpHandler<TContext>({
+    adapterFor: (context) => createDurableApplicationConversationSync({
+      authorizationContext: context,
+      principalId: context.principalId,
+      eventStore: bundleFor(context).events,
+      turnStore: bundleFor(context).durableTurns as never,
+      authorizeConversation: (conversationId) => ownsConversation(context, conversationId),
+      ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
+    }),
+    ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
+  });
+  const presence = (request: Request, context: TContext) => createLivePresenceHttpHandler({
+    delivery: presenceDelivery,
+    authorize: async (_request, conversationId) => { await ownsConversation(context, conversationId); return context; },
+  })(request);
   const gateway: ApplicationGateway = createApplicationGateway({
     authorize: async (request, action) => options.authorize(request, action),
     transportFor,
@@ -198,8 +243,11 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
     conversations: catalog as unknown as ConversationCatalog<TContext>,
     approvals,
     ...(options.titleGeneration === undefined ? {} : { titleGeneration: { generate: options.titleGeneration } }),
-    handlers: { activity },
-    capabilities: { activity: true, documentInput: options.provider.metadata.capabilities.document_input.supported
+    handlers: { activity, attachments, synchronization, presence },
+    capabilities: { activity: true, presence: true, synchronization: true,
+      attachments: { maximumFiles: 16, maximumBytesPerFile: options.persistence.attachmentLimits.maximumBytes,
+        acceptedMediaTypes: options.persistence.attachmentLimits.acceptedMediaTypes, uploadUrl: "attachments" },
+      documentInput: options.provider.metadata.capabilities.document_input.supported
       ? options.provider.metadata.capabilities.document_input.capability : false },
     ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
   });

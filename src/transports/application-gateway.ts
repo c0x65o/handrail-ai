@@ -489,7 +489,9 @@ function createGatewayAttachmentUploadAdapter<TEvent>(
           ? request.metadata.mediaType.startsWith(accepted.slice(0, -1)) : accepted === request.metadata.mediaType)) {
         throw new TypeError("Attachment does not satisfy negotiated gateway limits");
       }
-      const url = new URL(uploadUrl, options.baseUrl).toString();
+      const url = /^[a-z][a-z0-9+.-]*:/iu.test(uploadUrl)
+        ? new URL(uploadUrl).toString()
+        : `${options.baseUrl.replace(/\/+$/u, "")}/${uploadUrl.replace(/^\/+/, "")}`;
       const form = new FormData();
       form.set("file", request.source, request.metadata.filename ?? "attachment");
       form.set("idempotencyKey", request.idempotencyKey);

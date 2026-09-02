@@ -58,7 +58,7 @@ export function openaiResponses<TContext extends HandrailAssistantAuthorizationC
         tools: [...input.tools.definitions],
         limits: input.limits,
         createContext: ({ turnId, mutationId, iteration }) => ({
-          request_id: `${turnId}:provider:${iteration}`,
+          request_id: iteration === 0 ? turnId : `${turnId}:provider:${iteration}`,
           trace_id: mutationId,
           attribution: input.context.attribution,
           correlation_hints: {},
