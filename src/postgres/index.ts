@@ -63,6 +63,11 @@ import {
 } from "../conversation/activity.js";
 import type { AttachmentBlobStore, AttachmentStagingMetadataStore, StagedAttachmentRecord } from "../attachments/staging.js";
 import { diagnoseAiOperation, type AiDiagnosticSink } from "../diagnostics.js";
+import { parseNormalizedUsageReceipt } from "../usage.js";
+import type {
+  AIRuntimeUsageOutbox,
+  AIRuntimeUsageOutboxEntry,
+} from "../server/usage-control.js";
 
 export * from "./live-pubsub.js";
 
@@ -77,6 +82,77 @@ export interface PostgresQueryResult<TRow extends Record<string, unknown> = Reco
 export interface PostgresSqlClient {
   query<TRow extends Record<string, unknown> = Record<string, unknown>>(text: string, values?: readonly unknown[]): Promise<PostgresQueryResult<TRow>>;
   transaction<T>(operation: (client: PostgresSqlClient) => Promise<T>): Promise<T>;
+}
+
+export interface PostgresPoolQueryResult<
+  TRow extends Record<string, unknown> = Record<string, unknown>,
+> {
+  readonly rows: readonly TRow[];
+  readonly rowCount: number | null;
+}
+
+export interface PostgresPoolClientLike {
+  query<TRow extends Record<string, unknown> = Record<string, unknown>>(
+    text: string,
+    values?: readonly unknown[],
+  ): Promise<PostgresPoolQueryResult<TRow>>;
+  release(): void;
+}
+
+/** Structural subset implemented by pg.Pool; pg remains an application dependency. */
+export interface PostgresPoolLike {
+  query<TRow extends Record<string, unknown> = Record<string, unknown>>(
+    text: string,
+    values?: readonly unknown[],
+  ): Promise<PostgresPoolQueryResult<TRow>>;
+  connect(): Promise<PostgresPoolClientLike>;
+}
+
+function postgresTransactionClient(client: PostgresPoolClientLike): PostgresSqlClient {
+  return Object.freeze({
+    async query<TRow extends Record<string, unknown> = Record<string, unknown>>(
+      text: string,
+      values?: readonly unknown[],
+    ): Promise<PostgresQueryResult<TRow>> {
+      const result = await client.query<TRow>(text, values);
+      return Object.freeze({ rows: result.rows, rowCount: result.rowCount ?? 0 });
+    },
+    transaction: <T>(operation: (transaction: PostgresSqlClient) => Promise<T>) =>
+      operation(postgresTransactionClient(client)),
+  });
+}
+
+/**
+ * Adapts an existing pg-compatible pool without taking ownership of it.
+ * Transactions always release their checked-out client and roll back failures.
+ */
+export function createPostgresSqlClientFromPool(pool: PostgresPoolLike): PostgresSqlClient {
+  if (!pool || typeof pool.query !== "function" || typeof pool.connect !== "function") {
+    throw new TypeError("A Postgres-compatible pool is required");
+  }
+  return Object.freeze({
+    async query<TRow extends Record<string, unknown> = Record<string, unknown>>(
+      text: string,
+      values?: readonly unknown[],
+    ): Promise<PostgresQueryResult<TRow>> {
+      const result = await pool.query<TRow>(text, values);
+      return Object.freeze({ rows: result.rows, rowCount: result.rowCount ?? 0 });
+    },
+    async transaction<T>(operation: (transaction: PostgresSqlClient) => Promise<T>): Promise<T> {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const value = await operation(postgresTransactionClient(client));
+        await client.query("COMMIT");
+        return value;
+      } catch (error) {
+        try { await client.query("ROLLBACK"); } catch { /* preserve the operation failure */ }
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+  });
 }
 
 /**
@@ -120,7 +196,7 @@ export const handrailPostgresSchemaV1 = Object.freeze([
   `CREATE INDEX IF NOT EXISTS handrail_ai_attachment_blobs_expiry ON handrail_ai_attachment_blobs (tenant_id, expires_at)`,
 ] as const);
 
-export type PostgresDocumentKind = "checkpoint" | "catalog" | "approval" | "turn_state" | "durable_turn" | "activity" | "sync_state" | "openai_continuation" | "attachment";
+export type PostgresDocumentKind = "checkpoint" | "catalog" | "approval" | "turn_state" | "durable_turn" | "activity" | "sync_state" | "openai_continuation" | "attachment" | "usage_outbox";
 
 export interface PostgresVersionedDocument<T = unknown> {
   readonly tenantId: string;
@@ -487,6 +563,160 @@ export class PostgresConversationActivityStore implements DurableConversationAct
       } catch (error) { if (!(error instanceof PostgresPersistenceConflictError)) throw error; }
     }
     throw new PostgresPersistenceConflictError();
+  }
+}
+
+const POSTGRES_USAGE_OUTBOX_SCHEMA_VERSION = 1 as const;
+
+interface PostgresUsageOutboxRecord {
+  readonly schemaVersion: typeof POSTGRES_USAGE_OUTBOX_SCHEMA_VERSION;
+  readonly status: "pending" | "failed";
+  readonly entry: AIRuntimeUsageOutboxEntry;
+  readonly lastError?: { readonly code: string; readonly retryable: boolean };
+}
+
+function usageOutboxEntry(value: AIRuntimeUsageOutboxEntry): AIRuntimeUsageOutboxEntry {
+  const receipt = parseNormalizedUsageReceipt(value.receipt);
+  const enqueuedAt = new Date(value.enqueuedAt);
+  if (!Number.isFinite(enqueuedAt.getTime()) || enqueuedAt.toISOString() !== value.enqueuedAt) {
+    throw new TypeError("Usage outbox enqueuedAt must be an RFC 3339 UTC timestamp");
+  }
+  if (!Number.isSafeInteger(value.attempts) || value.attempts < 0) {
+    throw new TypeError("Usage outbox attempts must be a non-negative safe integer");
+  }
+  return Object.freeze({ receipt, enqueuedAt: value.enqueuedAt, attempts: value.attempts });
+}
+
+function usageOutboxRecord(value: PostgresUsageOutboxRecord): PostgresUsageOutboxRecord {
+  if (value?.schemaVersion !== POSTGRES_USAGE_OUTBOX_SCHEMA_VERSION ||
+    (value.status !== "pending" && value.status !== "failed")) {
+    throw new TypeError("Postgres usage outbox record is invalid");
+  }
+  const entry = usageOutboxEntry(value.entry);
+  const lastError = value.lastError;
+  if (lastError !== undefined && (typeof lastError.code !== "string" || !lastError.code ||
+    lastError.code.length > 256 || typeof lastError.retryable !== "boolean")) {
+    throw new TypeError("Postgres usage outbox failure is invalid");
+  }
+  return Object.freeze({
+    schemaVersion: POSTGRES_USAGE_OUTBOX_SCHEMA_VERSION,
+    status: value.status,
+    entry,
+    ...(lastError === undefined ? {} : { lastError: Object.freeze({ ...lastError }) }),
+  });
+}
+
+/** Durable, tenant-scoped receipt delivery queue for createAIRuntimeUsageReceiptSink. */
+export class PostgresAIRuntimeUsageOutbox implements AIRuntimeUsageOutbox {
+  constructor(
+    readonly persistence: PostgresAiPersistence,
+    readonly tenantId: string,
+    readonly scopeId: string,
+  ) {
+    id(tenantId, "tenantId");
+    id(scopeId, "scopeId");
+  }
+
+  async enqueue(value: AIRuntimeUsageOutboxEntry): Promise<void> {
+    const entry = usageOutboxEntry(value);
+    const recordId = entry.receipt.usage_receipt_id;
+    const record = usageOutboxRecord({
+      schemaVersion: POSTGRES_USAGE_OUTBOX_SCHEMA_VERSION,
+      status: "pending",
+      entry,
+    });
+    const current = await this.persistence.getDocument<PostgresUsageOutboxRecord>(
+      this.tenantId, "usage_outbox", this.scopeId, recordId,
+    );
+    if (current) {
+      if (!jsonValuesEqual(usageOutboxRecord(current.value).entry.receipt, entry.receipt)) {
+        throw new PostgresPersistenceConflictError();
+      }
+      return;
+    }
+    try {
+      await this.persistence.compareAndSetDocument({
+        tenantId: this.tenantId,
+        kind: "usage_outbox",
+        scopeId: this.scopeId,
+        recordId,
+        expectedVersion: null,
+        value: record,
+      });
+    } catch (error) {
+      if (!(error instanceof PostgresPersistenceConflictError)) throw error;
+      const winner = await this.persistence.getDocument<PostgresUsageOutboxRecord>(
+        this.tenantId, "usage_outbox", this.scopeId, recordId,
+      );
+      if (!winner || !jsonValuesEqual(usageOutboxRecord(winner.value).entry.receipt, entry.receipt)) {
+        throw error;
+      }
+    }
+  }
+
+  async pending(limit: number): Promise<readonly AIRuntimeUsageOutboxEntry[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new TypeError("Usage outbox limit must be an integer between 1 and 100");
+    }
+    const result = await this.persistence.client.query<{ payload: PostgresUsageOutboxRecord }>(
+      "SELECT payload FROM handrail_ai_documents WHERE tenant_id=$1 AND kind='usage_outbox' AND scope_id=$2 AND payload->>'status'='pending' ORDER BY payload->'entry'->>'enqueuedAt',record_id LIMIT $3",
+      [this.tenantId, this.scopeId, limit],
+    );
+    return Object.freeze(result.rows
+      .map((row) => usageOutboxRecord(row.payload))
+      .map((candidate) => candidate.entry));
+  }
+
+  async acknowledge(usageReceiptId: string): Promise<void> {
+    const recordId = id(usageReceiptId, "usageReceiptId");
+    const current = await this.persistence.getDocument<PostgresUsageOutboxRecord>(
+      this.tenantId, "usage_outbox", this.scopeId, recordId,
+    );
+    if (!current) return;
+    await this.persistence.deleteDocument({
+      tenantId: this.tenantId,
+      kind: "usage_outbox",
+      scopeId: this.scopeId,
+      recordId,
+      expectedVersion: current.version,
+    });
+  }
+
+  async failed(
+    usageReceiptId: string,
+    error: { readonly code: string; readonly retryable: boolean },
+  ): Promise<void> {
+    const recordId = id(usageReceiptId, "usageReceiptId");
+    if (typeof error.code !== "string" || !error.code || error.code.length > 256 ||
+      typeof error.retryable !== "boolean") {
+      throw new TypeError("Usage outbox failure is invalid");
+    }
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const current = await this.persistence.getDocument<PostgresUsageOutboxRecord>(
+        this.tenantId, "usage_outbox", this.scopeId, recordId,
+      );
+      if (!current) return;
+      const retained = usageOutboxRecord(current.value);
+      const next = usageOutboxRecord({
+        schemaVersion: POSTGRES_USAGE_OUTBOX_SCHEMA_VERSION,
+        status: error.retryable ? "pending" : "failed",
+        entry: { ...retained.entry, attempts: retained.entry.attempts + 1 },
+        lastError: error,
+      });
+      try {
+        await this.persistence.compareAndSetDocument({
+          tenantId: this.tenantId,
+          kind: "usage_outbox",
+          scopeId: this.scopeId,
+          recordId,
+          expectedVersion: current.version,
+          value: next,
+        });
+        return;
+      } catch (cause) {
+        if (!(cause instanceof PostgresPersistenceConflictError) || attempt === 3) throw cause;
+      }
+    }
   }
 }
 
