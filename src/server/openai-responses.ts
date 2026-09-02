@@ -46,7 +46,7 @@ export function openaiResponses<TContext extends HandrailAssistantAuthorizationC
   const metadata = createOpenAIResponsesProviderAdapter({ ...adapterOptions, request }).metadata;
   return Object.freeze({
     metadata,
-    createTransport(input) {
+    createTransport(input: Parameters<HandrailAssistantProvider<TContext>["createTransport"]>[0]) {
       const adapter = createOpenAIResponsesProviderAdapter({
         ...adapterOptions,
         request,
@@ -55,7 +55,7 @@ export function openaiResponses<TContext extends HandrailAssistantAuthorizationC
       });
       return createProviderToolLoopTransport({
         adapter,
-        tools: input.tools.definitions,
+        tools: [...input.tools.definitions],
         limits: input.limits,
         createContext: ({ turnId, mutationId, iteration }) => ({
           request_id: `${turnId}:provider:${iteration}`,
@@ -64,7 +64,9 @@ export function openaiResponses<TContext extends HandrailAssistantAuthorizationC
           correlation_hints: {},
         }),
         executeTool: async ({ call, signal }) => input.tools.execute(call, signal),
-        captureUsage: input.persistence.usageReceiptSink?.capture,
+        ...(input.persistence.usageReceiptSink === null ? {} : {
+          captureUsage: input.persistence.usageReceiptSink.capture,
+        }),
         resolveDocumentReference: async ({ conversationId, reference }) => {
           const resolved = await input.persistence.attachments.resolve({
             ownerScopeId: input.context.scopeId,

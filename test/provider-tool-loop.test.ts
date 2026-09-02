@@ -17,8 +17,7 @@ const attribution = {
 const usage = { input_tokens: 2, cached_input_tokens: 0, output_tokens: 1, reasoning_tokens: 0,
   total_tokens: 3, provider_cost: { known: false as const } };
 
-function event(invocation: ProviderAdapterInvocation, sequence: number, value: Omit<StreamEvent,
-  "protocol_version" | "request_id" | "trace_id" | "sequence">): StreamEvent {
+function event(invocation: ProviderAdapterInvocation, sequence: number, value: object): StreamEvent {
   return { ...value, protocol_version: AI_RUNTIME_PROTOCOL_VERSION, request_id: invocation.context.request_id,
     trace_id: invocation.context.trace_id, sequence } as StreamEvent;
 }

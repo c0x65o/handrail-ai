@@ -50,16 +50,19 @@ function metadataFrom(
     readonly mediaType: NormalizedAttachmentUploadMetadata["mediaType"];
     readonly byteSize: number;
     readonly filename?: string;
+    readonly conversationId?: string;
   },
 ): NormalizedAttachmentUploadMetadata {
   const kind = selection.kind ?? "image";
   return (selection.filename === undefined
-    ? { kind, mediaType: selection.mediaType, byteSize: selection.byteSize }
+    ? { kind, mediaType: selection.mediaType, byteSize: selection.byteSize,
+        ...(selection.conversationId === undefined ? {} : { conversationId: selection.conversationId }) }
     : {
         kind,
         mediaType: selection.mediaType,
         byteSize: selection.byteSize,
         filename: selection.filename,
+        ...(selection.conversationId === undefined ? {} : { conversationId: selection.conversationId }),
       }) as NormalizedAttachmentUploadMetadata;
 }
 
@@ -131,6 +134,7 @@ function validateMetadata(
     );
   }
   if (metadata.filename !== undefined) validateSafeFilename(metadata.filename);
+  if (metadata.conversationId !== undefined) validateOpaqueKey(metadata.conversationId, "conversationId");
 }
 
 function validateSelection<TSource>(

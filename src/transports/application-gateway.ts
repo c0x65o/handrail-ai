@@ -494,6 +494,7 @@ function createGatewayAttachmentUploadAdapter<TEvent>(
       form.set("file", request.source, request.metadata.filename ?? "attachment");
       form.set("idempotencyKey", request.idempotencyKey);
       form.set("kind", request.metadata.kind ?? "image");
+      if (request.metadata.conversationId) form.set("conversationId", request.metadata.conversationId);
       const initial: RequestInit = { method: "POST", body: form, signal: request.signal };
       const response = await fetcher(url, await options.protectedRequest?.({ url, ...initial }) ?? initial);
       if (!response.ok) throw new TypeError("Attachment upload failed");

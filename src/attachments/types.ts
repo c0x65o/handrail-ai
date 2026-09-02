@@ -11,6 +11,8 @@ export interface AttachmentUploadMetadata {
   readonly mediaType: AttachmentMimeType;
   readonly byteSize: number;
   readonly filename?: string;
+  /** Conversation ownership selected by the runtime, never an authorization scope. */
+  readonly conversationId?: string;
 }
 
 export interface NormalizedAttachmentUploadMetadata

@@ -1406,6 +1406,7 @@ export interface PostgresAssistantPersistenceBundle<TAuthorizationContext> {
 
 export interface PostgresAssistantPersistence {
   readonly persistence: PostgresAiPersistence;
+  readonly attachmentLimits: AttachmentStagingLimits;
   forScope<TAuthorizationContext>(
     scope: PostgresAssistantPersistenceScope,
     options: PostgresAssistantScopedOptions<TAuthorizationContext>,
@@ -1426,8 +1427,10 @@ export function postgres(
 ): PostgresAssistantPersistence {
   const client = createDiagnosedPostgresSqlClient(createPostgresSqlClientFromPool(pool), options.diagnostics);
   const persistence = new PostgresAiPersistence(client);
+  const attachmentLimits = Object.freeze(options.attachmentLimits ?? DEFAULT_ASSISTANT_ATTACHMENT_LIMITS);
   return Object.freeze({
     persistence,
+    attachmentLimits,
     forScope<TAuthorizationContext>(
       scope: PostgresAssistantPersistenceScope,
       scoped: PostgresAssistantScopedOptions<TAuthorizationContext>,
@@ -1448,7 +1451,7 @@ export function postgres(
         attachments: createAttachmentStagingService({
           blobs: attachmentBlobs,
           metadata: attachmentMetadata,
-          limits: options.attachmentLimits ?? DEFAULT_ASSISTANT_ATTACHMENT_LIMITS,
+          limits: attachmentLimits,
           ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
         }),
         synchronization: new PostgresConversationSyncStateStore(persistence, tenantId),

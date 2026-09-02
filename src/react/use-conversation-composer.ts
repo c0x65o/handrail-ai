@@ -699,6 +699,7 @@ export function useConversationComposer<TRequest = undefined>(
         );
         const id = uploader.enqueue({
           ...selection,
+          ...(conversationId === null ? {} : { conversationId }),
           fingerprint: `composer:${scope}:${compactHash(selection.fingerprint)}`,
           idempotencyKey: `composer:${scope}:${compactHash(selection.idempotencyKey)}`,
         });
@@ -742,7 +743,7 @@ export function useConversationComposer<TRequest = undefined>(
         : { fingerprint: rejection.fingerprint }),
       ...(rejection.filename === undefined ? {} : { filename: rejection.filename }),
     })));
-  }, [releaseOwned, scope, uploader]);
+  }, [conversationId, releaseOwned, scope, uploader]);
 
   const handlePaste = useCallback((event: ClipboardEvent<HTMLTextAreaElement>): void => {
     const sources = filesFromItems(event.clipboardData.items);
