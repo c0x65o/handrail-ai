@@ -1,4 +1,9 @@
-import { Fragment, createElement, useState, type CSSProperties, type ReactNode } from "react";
+import { Fragment, createElement, useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { createHandrailAiClient, type HandrailAiClient } from "../client/bootstrap.js";
+import { createAttachmentUploader, type AttachmentUploader } from "../attachments/uploader.js";
+import type { ApplicationGatewayAttachmentSource } from "../transports/application-gateway.js";
+import { AI_RUNTIME_PROTOCOL_VERSION, type ChatRequest, type StreamEvent } from "../protocol.js";
+import type { ConversationClientId, ConversationDeviceId } from "../conversation/events.js";
 import type { ConversationAttachmentReference } from "../conversation/events.js";
 import type { ConversationMessageRecord, ConversationState, ConversationToolResultRecord } from "../conversation/state.js";
 import type { PresenceController } from "../presence/controller.js";
@@ -509,6 +514,102 @@ export function HandrailChatWorkspaceLauncher<TRequest, TAuthorizationContext>(
     <ChatLauncherTitle className="hr-chat__sr">{props.title ?? "Assistant"}</ChatLauncherTitle>
     <HandrailChatWorkspace {...workspaceProps} layout="launcher"/>
   </ChatLauncherPanel></ChatLauncherPortal></ChatLauncherRoot>;
+}
+
+export interface HandrailAssistantLauncherProps extends Omit<HandrailChatWorkspaceLauncherProps<ChatRequest, object>,
+  "workspace" | "composerForConversation" | "createConversation" | "activity" | "presenceForConversation"> {
+  /** The only required integration value; capabilities and resources are negotiated from this endpoint. */
+  readonly endpoint: string;
+  readonly fetch?: typeof globalThis.fetch;
+  readonly protectedRequest?: (input: RequestInit & { readonly url: string }) => RequestInit | Promise<RequestInit>;
+  readonly clientId?: string;
+  readonly deviceId?: string;
+  readonly loading?: ReactNode;
+  readonly failure?: (error: unknown) => ReactNode;
+}
+
+interface AssistantLauncherState {
+  readonly client: HandrailAiClient<StreamEvent, ChatRequest, object>;
+  readonly uploader: AttachmentUploader<ApplicationGatewayAttachmentSource>;
+}
+
+function browserIdentity(prefix: string): string {
+  const id = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `${prefix}-${id}`;
+}
+
+/** Endpoint-only production launcher. It owns negotiation, catalog, runtimes, uploads, recovery, and cleanup. */
+export function HandrailAssistantLauncher(props: HandrailAssistantLauncherProps): ReactNode {
+  const [state, setState] = useState<AssistantLauncherState | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  useEffect(() => {
+    let disposed = false;
+    let owned: AssistantLauncherState | null = null;
+    void (async () => {
+      try {
+        const authorizationContext = Object.freeze({});
+        const clientId = (props.clientId ?? browserIdentity("client")) as ConversationClientId;
+        const deviceId = (props.deviceId ?? browserIdentity("device")) as ConversationDeviceId;
+        const client = await createHandrailAiClient<StreamEvent, ChatRequest, object>({
+          baseUrl: props.endpoint,
+          ...(props.fetch === undefined ? {} : { fetch: props.fetch }),
+          ...(props.protectedRequest === undefined ? {} : { protectedRequest: props.protectedRequest }),
+          conversations: { mode: "multiple", clientId, deviceId, authorize: () => "allow" },
+          buildRequest: ({ content, attachments }) => ({
+            protocol_version: AI_RUNTIME_PROTOCOL_VERSION,
+            continuation_of: null,
+            messages: [{ role: "user", content: [
+              ...(content ? [{ type: "text" as const, text: content }] : []),
+              ...attachments.map((attachment) => ({
+                type: String((attachment as { media_type?: string }).media_type).startsWith("image/")
+                  ? "image" as const : "document" as const,
+                attachment: attachment as never,
+              })),
+            ] }],
+            tools: [], tool_results: [],
+            generation: { max_output_tokens: 2048, temperature: 0.2 },
+            correlation_hints: {},
+          }),
+        });
+        if (!client.workspace) throw new TypeError("The assistant endpoint did not create a conversation workspace");
+        const uploader = createAttachmentUploader<ApplicationGatewayAttachmentSource>(client.attachmentUpload ?? {
+          upload: async () => { throw new TypeError("This assistant does not accept attachments"); },
+        });
+        owned = { client, uploader };
+        const listed = await client.catalog.list({ authorizationContext, lifecycle: "active", pageSize: 1,
+          order: { field: "updated_at", direction: "desc" } });
+        const descriptor = listed.items[0] ?? (await client.catalog.create({ authorizationContext,
+          idempotencyKey: browserIdentity("conversation") as never })).descriptor;
+        await client.workspace.open({ authorizationContext, conversationId: descriptor.conversationId });
+        if (!disposed) setState(owned);
+      } catch (cause) { if (!disposed) setError(cause); }
+    })();
+    return () => {
+      disposed = true;
+      owned?.uploader.dispose();
+      void owned?.client.dispose();
+    };
+  }, [props.endpoint, props.fetch, props.protectedRequest, props.clientId, props.deviceId]);
+
+  if (error !== null) return props.failure?.(error) ?? <span role="alert">Assistant unavailable.</span>;
+  if (state === null || state.client.workspace === null) return props.loading ?? null;
+  const { endpoint: _endpoint, fetch: _fetch, protectedRequest: _protected, clientId: _clientId,
+    deviceId: _deviceId, loading: _loading, failure: _failure, ...launcher } = props;
+  void _endpoint; void _fetch; void _protected; void _clientId; void _deviceId; void _loading; void _failure;
+  const authorizationContext = Object.freeze({});
+  return <HandrailChatWorkspaceLauncher {...launcher} workspace={state.client.workspace}
+    {...(state.client.activity === null ? {} : { activity: state.client.activity })}
+    presenceForConversation={state.client.presenceControllerFor}
+    createConversation={async () => {
+      const created = await state.client.catalog.create({ authorizationContext,
+        idempotencyKey: browserIdentity("conversation") as never });
+      return { authorizationContext, conversationId: created.descriptor.conversationId };
+    }}
+    composerForConversation={(runtime, conversationId) => ({
+      uploader: state.uploader,
+      conversationId,
+      createRequest: ({ text, attachments }) => state.client.buildRequest({ content: text, attachments }),
+    })}/>
 }
 
 export interface StyledChatLauncherProps extends StyledChatPresetProps {

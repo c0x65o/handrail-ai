@@ -2,9 +2,16 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { createInitialConversationState } from "../src/conversation/state.js";
-import { StyledChatLauncher, StyledChatPreset, StyledChatPresetStyles, WorkspaceThreadPicker, createHandrailChatThemeStyle, installToolRendererPlugins } from "../src/react-styled/index.js";
+import { HandrailAssistantLauncher, StyledChatLauncher, StyledChatPreset, StyledChatPresetStyles, WorkspaceThreadPicker, createHandrailChatThemeStyle, installToolRendererPlugins } from "../src/react-styled/index.js";
 
 describe("styled React preset", () => {
+  it("boots the production launcher from an endpoint without project-owned runtime wiring", () => {
+    const fetcher: typeof fetch = async () => new Promise<Response>(() => undefined);
+    const { getByText } = render(<HandrailAssistantLauncher endpoint="/api/assistant/aegis"
+      fetch={fetcher} loading={<span>Connecting assistant</span>}/>);
+    expect(getByText("Connecting assistant")).toBeTruthy();
+  });
+
   it("maps typed theme tokens and mode to stable CSS properties", () => {
     expect(createHandrailChatThemeStyle({
       mode: "dark",
