@@ -188,6 +188,40 @@ describe("OpenAI Responses deferred tool projection", () => {
     })] }] });
   });
 
+  it("projects host-resolved spreadsheets as native file inputs without PDF detail", async () => {
+    let nativeRequest: unknown;
+    const spreadsheetType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" as const;
+    const adapter = createOpenAIResponsesProviderAdapter({
+      model: "gpt-example",
+      document_input: { supported_mime_types: [spreadsheetType, "text/csv"], max_document_count: 2,
+        max_document_bytes: 1024, requires_host_resolution: true },
+      request: async function* (request) {
+        nativeRequest = request;
+        yield { type: "response.completed", response: { usage: { input_tokens: 2, output_tokens: 1, total_tokens: 3 } } };
+      },
+    });
+    const stream = adapter.invoke({ messages: [{ role: "user", content: [{ type: "document", attachment: {
+      attachment_id: "att_sheet", content_ref: "ref_sheet", media_type: spreadsheetType,
+      byte_size: 3, filename: "adjustments.xlsx",
+    } }] }], tools: [], tool_results: [], generation: { max_output_tokens: 100, temperature: 0 },
+      signal: new AbortController().signal,
+      resolve_document_reference: async () => ({ media_type: spreadsheetType, bytes: new Uint8Array([1, 2, 3]) }),
+      context: { request_id: "xlsx-r", trace_id: "xlsx-t", attribution: {
+        organization: { id: "o", source: "server_derived", trust: "authoritative" },
+        project: { id: "p", source: "server_derived", trust: "authoritative" },
+        service_environment: { id: "e", source: "server_derived", trust: "authoritative" },
+        known_user: { id: null, source: "server_derived", trust: "authoritative" },
+        session: { id: null, source: "server_derived", trust: "authoritative" },
+        automation: { id: null, source: "server_derived", trust: "authoritative" },
+      }, correlation_hints: {} },
+    });
+    for (;;) { const item = await stream.next(); if (item.done) break; }
+    expect(nativeRequest).toMatchObject({ input: [{ content: [{
+      type: "input_file", filename: "adjustments.xlsx", file_data: `data:${spreadsheetType};base64,AQID`,
+    }] }] });
+    expect(JSON.stringify(nativeRequest)).not.toContain('"detail"');
+  });
+
   it("normalizes cancellation and retryable rate limits without leaking provider errors", async () => {
     const invocation = (signal: AbortSignal) => ({
       messages: [{ role: "user" as const, content: [{ type: "text" as const, text: "Check" }] }],

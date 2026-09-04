@@ -1,8 +1,9 @@
 import { Fragment, createElement, useCallback, useEffect, useRef, useState, type ComponentProps, type CSSProperties, type ReactNode } from "react";
 import { createHandrailAiClient, type HandrailAiClient } from "../client/bootstrap.js";
 import { createAttachmentUploader, type AttachmentUploader } from "../attachments/uploader.js";
-import type { ApplicationGatewayAttachmentSource } from "../transports/application-gateway.js";
-import { AI_RUNTIME_PROTOCOL_VERSION, type ChatRequest, type StreamEvent } from "../protocol.js";
+import type { ApplicationGatewayAttachmentSource, ApplicationGatewayCapabilities } from "../transports/application-gateway.js";
+import { AI_RUNTIME_DOCUMENT_MIME_TYPES, AI_RUNTIME_IMAGE_MIME_TYPES, AI_RUNTIME_PROTOCOL_LIMITS,
+  AI_RUNTIME_PROTOCOL_VERSION, type AttachmentMimeType, type ChatRequest, type StreamEvent } from "../protocol.js";
 import type { ConversationClientId, ConversationDeviceId } from "../conversation/events.js";
 import type { ConversationAttachmentReference } from "../conversation/events.js";
 import type { ConversationApprovalProposalRecord, ConversationMessageRecord, ConversationState, ConversationToolResultRecord } from "../conversation/state.js";
@@ -166,13 +167,13 @@ const DEFAULT_LABELS = { attach: "Attach", send: "Send", stop: "Stop", retry: "R
 
 /** A zero-runtime-dependency stylesheet; copy or override every custom property. */
 export const handrailChatPresetCss = `
-.hr-chat{--hr-accent:#635bff;--hr-bg:#fff;--hr-panel:#f6f7fb;--hr-text:#171927;--hr-muted:#687083;--hr-border:#dfe3eb;--hr-danger:#a32020;--hr-activity:#6750a4;--hr-radius-panel:16px;--hr-radius-message:12px;--hr-radius-control:9px;--hr-font:ui-sans-serif,system-ui,sans-serif;color:var(--hr-text);background:var(--hr-bg);border:1px solid var(--hr-border);border-radius:var(--hr-radius-panel);display:grid;grid-template-rows:auto minmax(12rem,1fr) auto;inline-size:min(100%,48rem);block-size:min(80dvh,48rem);font:400 14px/1.5 var(--hr-font);overflow:hidden;box-shadow:0 16px 50px #17192720}
+.hr-chat{--hr-accent:#635bff;--hr-bg:#fff;--hr-panel:#f6f7fb;--hr-text:#171927;--hr-muted:#687083;--hr-border:#dfe3eb;--hr-danger:#a32020;--hr-activity:#6750a4;--hr-radius-panel:16px;--hr-radius-message:12px;--hr-radius-control:9px;--hr-font:ui-sans-serif,system-ui,sans-serif;color:var(--hr-text);background:var(--hr-bg);border:1px solid var(--hr-border);border-radius:var(--hr-radius-panel);display:grid;grid-template-rows:auto minmax(12rem,1fr) auto;inline-size:min(100%,48rem);block-size:min(80dvh,48rem);font:400 14px/1.5 var(--hr-font);overflow:hidden;box-shadow:0 18px 55px #1719272b}
 .hr-chat[data-theme=dark]{--hr-accent:#9f9aff;--hr-bg:#171927;--hr-panel:#242735;--hr-text:#f4f5fa;--hr-muted:#aeb5c4;--hr-border:#3b4051;--hr-danger:#ff8c8c;--hr-activity:#c7b8ff}@media(prefers-color-scheme:dark){.hr-chat[data-theme=system]{--hr-accent:#9f9aff;--hr-bg:#171927;--hr-panel:#242735;--hr-text:#f4f5fa;--hr-muted:#aeb5c4;--hr-border:#3b4051;--hr-danger:#ff8c8c;--hr-activity:#c7b8ff}}
-.hr-chat[data-layout=page]{inline-size:100%;block-size:100dvh;border:0;border-radius:0}.hr-chat[data-layout=drawer]{border-radius:var(--hr-radius-panel) 0 0 var(--hr-radius-panel);max-inline-size:30rem}.hr-chat__sr{block-size:1px;clip:rect(0 0 0 0);clip-path:inset(50%);inline-size:1px;overflow:hidden;position:absolute;white-space:nowrap}.hr-chat__header{align-items:center;border-block-end:1px solid var(--hr-border);display:flex;gap:.75rem;padding:.85rem 1rem}.hr-chat__header h2{font-size:1rem;margin:0}.hr-chat__picker{margin-inline-start:auto}.hr-chat__body{display:grid;grid-template-columns:minmax(0,1fr);min-block-size:0}.hr-chat__transcript{overflow:auto;padding:1rem;scrollbar-gutter:stable}.hr-chat [role=listitem]{background:var(--hr-panel);border-radius:var(--hr-radius-message);margin:.5rem 0;max-inline-size:85%;padding:.7rem .85rem;white-space:pre-wrap}.hr-chat [aria-label='user message']{background:var(--hr-accent);color:white;margin-inline-start:auto}.hr-chat__message-actions{display:flex;justify-content:flex-end;margin-block-start:.25rem}.hr-chat__message-actions button{font-size:.75rem;padding:.25rem .45rem}.hr-message-action-status:not(:empty){margin-inline-start:.4rem}.hr-chat__status{align-items:center;color:var(--hr-muted);display:flex;gap:.75rem;min-block-size:1.5rem;padding-inline:1rem}.hr-chat__composer{border-block-start:1px solid var(--hr-border);padding:.75rem}.hr-chat__attachments{display:flex;gap:.5rem;list-style:none;margin:0 0 .5rem;padding:0}.hr-chat__form{display:grid;gap:.5rem;grid-template-columns:auto minmax(0,1fr) auto auto}.hr-chat textarea{background:var(--hr-panel);border:1px solid var(--hr-border);border-radius:var(--hr-radius-control);color:inherit;min-block-size:2.75rem;padding:.65rem;resize:none}.hr-chat button,.hr-chat__file{align-items:center;background:var(--hr-panel);border:1px solid var(--hr-border);border-radius:var(--hr-radius-control);color:inherit;cursor:pointer;display:inline-flex;padding:.6rem .75rem}.hr-chat button[type=submit]{background:var(--hr-accent);color:#fff}.hr-chat button:focus-visible,.hr-chat textarea:focus-visible,.hr-chat input:focus-visible{outline:3px solid color-mix(in srgb,var(--hr-accent),transparent 55%);outline-offset:2px}.hr-chat button:disabled{cursor:not-allowed;opacity:.5}.hr-chat__errors{color:var(--hr-danger);grid-column:1/-1}.hr-chat__aux{border-block-start:1px solid var(--hr-border);padding:.75rem 1rem}@media(max-width:520px){.hr-chat{block-size:100dvh;border:0;border-radius:0;inline-size:100%}.hr-chat__form{grid-template-columns:auto minmax(0,1fr) auto}.hr-chat__retry{display:none}}@media(prefers-reduced-motion:reduce){.hr-chat *{scroll-behavior:auto!important;transition:none!important}}
+.hr-chat[data-layout=page]{inline-size:100%;block-size:100%;min-block-size:30rem}.hr-chat[data-layout=drawer]{border-radius:var(--hr-radius-panel) 0 0 var(--hr-radius-panel);max-inline-size:30rem}.hr-chat[data-layout=launcher]{inline-size:min(48rem,calc(100vw - 2rem));block-size:min(46rem,calc(100dvh - 6rem))}.hr-chat__sr{block-size:1px;clip:rect(0 0 0 0);clip-path:inset(50%);inline-size:1px;overflow:hidden;position:absolute;white-space:nowrap}.hr-chat__header{align-items:center;background:var(--hr-bg);border-block-end:1px solid var(--hr-border);display:flex;gap:.75rem;padding:.9rem 1rem}.hr-chat__header h2{font-size:1rem;font-weight:700;margin:0}.hr-chat__picker{margin-inline-start:auto}.hr-chat__body{background:color-mix(in srgb,var(--hr-panel),var(--hr-bg) 52%);display:grid;grid-template-columns:minmax(0,1fr);min-block-size:0}.hr-chat__transcript{overflow:auto;padding:1rem;scrollbar-gutter:stable}.hr-chat [role=listitem]{background:var(--hr-bg);border:1px solid color-mix(in srgb,var(--hr-border),transparent 25%);border-radius:var(--hr-radius-message);box-shadow:0 1px 2px #1719270d;margin:.65rem 0;max-inline-size:88%;padding:.75rem .9rem;white-space:pre-wrap}.hr-chat [aria-label='user message']{background:var(--hr-accent);border-color:var(--hr-accent);color:white;margin-inline-start:auto}.hr-chat__message-row{display:grid}.hr-chat__message-actions{display:flex;justify-content:flex-end;margin-block-start:.15rem}.hr-message-action-status:not(:empty){margin-inline-start:.4rem}.hr-chat__status{align-items:center;background:var(--hr-bg);color:var(--hr-muted);display:flex;gap:.75rem;min-block-size:2rem;padding-inline:1rem}.hr-chat__composer{background:var(--hr-bg);border-block-start:1px solid var(--hr-border);padding:.75rem}.hr-chat__attachments{display:flex;gap:.5rem;list-style:none;margin:0 0 .5rem;padding:0}.hr-chat__form{align-items:end;display:grid;gap:.5rem;grid-template-columns:auto minmax(0,1fr) auto auto}.hr-chat textarea{background:var(--bg,var(--hr-bg));border:1px solid var(--hr-border);border-radius:var(--hr-radius-control);color:inherit;font:inherit;min-block-size:2.75rem;padding:.65rem .75rem;resize:none}.hr-chat button,.hr-chat__file{align-items:center;background:var(--hr-panel);border:1px solid var(--hr-border);border-radius:var(--hr-radius-control);color:inherit;cursor:pointer;display:inline-flex;font:inherit;justify-content:center;padding:.6rem .75rem}.hr-chat button:hover:not(:disabled),.hr-chat__file:hover{border-color:color-mix(in srgb,var(--hr-accent),var(--hr-border) 45%)}.hr-chat button[type=submit]{background:var(--hr-accent);border-color:var(--hr-accent);color:#fff;font-weight:650}.hr-chat .hr-chat__copy{background:transparent;border-color:transparent;color:var(--hr-muted);font-size:.75rem;line-height:1;padding:.25rem .35rem}.hr-chat button:focus-visible,.hr-chat textarea:focus-visible,.hr-chat input:focus-visible,.hr-chat summary:focus-visible{outline:3px solid color-mix(in srgb,var(--hr-accent),transparent 55%);outline-offset:2px}.hr-chat button:disabled{cursor:not-allowed;opacity:.5}.hr-chat__errors{color:var(--hr-danger);grid-column:1/-1;margin:.25rem 0 0;padding-inline-start:1.25rem}.hr-chat__aux{background:var(--hr-bg);border-block-start:1px solid var(--hr-border);padding:.75rem 1rem}@media(max-width:520px){.hr-chat,.hr-chat[data-layout=launcher]{block-size:100dvh;border:0;border-radius:0;inline-size:100vw}.hr-chat__form{grid-template-columns:auto minmax(0,1fr) auto}.hr-chat__header{padding-inline:.75rem}.hr-chat__transcript{padding:.75rem}}@media(prefers-reduced-motion:reduce){.hr-chat *{scroll-behavior:auto!important;transition:none!important}}
 .hr-chat__markdown{overflow-wrap:anywhere;white-space:normal}.hr-chat__markdown>:first-child{margin-block-start:0}.hr-chat__markdown>:last-child{margin-block-end:0}.hr-chat__markdown pre{max-inline-size:100%;overflow:auto;white-space:pre}.hr-chat__markdown code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.hr-chat__markdown a{color:inherit;text-decoration:underline}.hr-chat__message-citations{font-size:.78rem;margin:.5rem 0 0;padding-inline-start:1.25rem}.hr-chat__message-citations li{background:transparent;margin:.15rem 0;max-inline-size:none;padding:0}.hr-chat__message-citations li>span:last-child{color:var(--hr-muted);margin-inline-start:.35rem}.hr-chat__attachment-card{align-items:center;border:1px solid var(--hr-border);border-radius:10px;color:inherit;display:flex;gap:.65rem;min-inline-size:11rem;overflow:hidden;padding:.5rem;text-decoration:none}.hr-chat__attachment-card img{block-size:5rem;inline-size:7rem;object-fit:cover}.hr-chat__attachment-copy{display:flex;min-inline-size:0;flex-direction:column}.hr-chat__attachment-copy strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.hr-chat__attachment-copy small{color:var(--hr-muted)}.hr-chat__voice{align-items:center;display:flex}
 .hr-chat__transcript-wrap{display:grid;min-block-size:0;position:relative}.hr-chat__transcript-wrap>.hr-chat__transcript{min-block-size:0}.hr-chat__jump{inset-block-end:.75rem;inset-inline-end:.75rem;position:absolute;z-index:1}.hr-chat__assistant-activity:not(:empty){font-weight:600}
 .hr-chat__launcher-trigger{align-items:center;display:inline-flex;gap:.45rem}.hr-chat__launcher-status{font-size:.75rem;font-weight:600}.hr-chat__launcher-trigger[data-busy=true] .hr-chat__launcher-status{color:var(--hr-activity)}.hr-chat__launcher-trigger[data-error=true] .hr-chat__launcher-status{color:var(--hr-danger)}.hr-chat__launcher-badge:empty{display:none}.hr-chat__launcher-badge{align-items:center;background:var(--hr-danger);border-radius:999px;color:#fff;display:inline-flex;font-size:.7rem;justify-content:center;min-block-size:1.2rem;min-inline-size:1.2rem;padding-inline:.25rem}
-.hr-chat__workspace-picker{align-items:flex-start;display:flex;gap:.4rem;position:relative}.hr-chat__workspace-picker summary{background:var(--hr-panel,#f6f7fb);border:1px solid var(--hr-border,#dfe3eb);border-radius:9px;cursor:pointer;list-style:none;padding:.6rem .75rem}.hr-chat__workspace-picker summary::-webkit-details-marker{display:none}.hr-chat__workspace-picker ul{background:var(--hr-bg,#fff);border:1px solid var(--hr-border,#dfe3eb);display:grid;gap:.25rem;inset-block-start:100%;inset-inline-end:0;list-style:none;margin:0;max-block-size:16rem;min-inline-size:14rem;overflow:auto;padding:.35rem;position:absolute;z-index:10}.hr-chat__workspace-picker li{margin:0;padding:0}.hr-chat__workspace-picker li button{align-items:center;display:flex;inline-size:100%;justify-content:space-between;max-inline-size:none;text-align:start}.hr-chat__workspace-picker small{color:var(--hr-muted,#687083);margin-inline-start:.5rem}.hr-chat__workspace-picker [data-turn-status=running] small{color:#6750a4}.hr-chat__empty{display:grid;min-block-size:12rem;place-items:center;padding:1rem}
+.hr-chat__workspace-picker{align-items:flex-start;display:flex;gap:.4rem;position:relative}.hr-chat__workspace-picker summary{background:var(--hr-panel,#f6f7fb);border:1px solid var(--hr-border,#dfe3eb);border-radius:9px;cursor:pointer;list-style:none;padding:.55rem .7rem}.hr-chat__workspace-picker summary::-webkit-details-marker{display:none}.hr-chat__workspace-picker ul{background:var(--hr-bg,#fff);border:1px solid var(--hr-border,#dfe3eb);border-radius:10px;box-shadow:0 12px 35px #17192724;display:grid;gap:.2rem;inset-block-start:calc(100% + .35rem);inset-inline-end:0;list-style:none;margin:0;max-block-size:20rem;min-inline-size:18rem;overflow:auto;padding:.4rem;position:absolute;z-index:10}.hr-chat__workspace-picker li{align-items:center;display:flex;margin:0;padding:0}.hr-chat__workspace-picker li button:first-child{align-items:center;display:flex;flex:1;inline-size:100%;justify-content:space-between;max-inline-size:none;text-align:start}.hr-chat__workspace-picker small{color:var(--hr-muted,#687083);margin-inline-start:.5rem}.hr-chat__workspace-picker [data-turn-status=running] small{color:var(--hr-activity)}.hr-chat__empty{display:grid;min-block-size:12rem;place-items:center;padding:1rem}
 .hr-chat__approvals{display:grid;gap:.5rem}.hr-chat__approval{background:var(--hr-panel);border:1px solid var(--hr-border);border-radius:var(--hr-radius-control);display:grid;gap:.4rem;padding:.65rem}.hr-chat__approval-actions{display:flex;gap:.5rem}.hr-chat__approval-error{color:var(--hr-danger)}
 `;
 
@@ -204,6 +205,10 @@ export function createHandrailChatThemeStyle(theme: HandrailChatTheme = {}): Han
 /** Accessible responsive drop-in surface; all headless primitives remain independently usable. */
 export function StyledChatPreset(props: StyledChatPresetProps): ReactNode {
   const labels = { ...DEFAULT_LABELS, ...props.labels };
+  const resolvedState = useResolvedState(props.state);
+  const retryableTurn = [...(resolvedState?.turns ?? [])].reverse().find((turn) =>
+    (turn.status === "failed" && turn.error?.retryable === true) || turn.status === "cancelled");
+  const canStop = Boolean(props.composer?.isSending || resolvedState?.active_turn_id);
   const renderContent = props.renderMessageContent ?? (props.markdown === false
     ? undefined
     : renderSafeMessageMarkdown);
@@ -228,14 +233,14 @@ export function StyledChatPreset(props: StyledChatPresetProps): ReactNode {
     <main className="hr-chat__body">
       <FollowedTranscript className="hr-chat__transcript" {...(renderToolResult ? { renderToolResult } : {})}
         {...(renderAttachment ? { renderAttachment } : {})}
-        {...(props.messageActions === false ? {} : { renderMessage: (message, _index, context) => <div>
+        {...(props.messageActions === false ? {} : { renderMessage: (message, _index, context) => <div className="hr-chat__message-row">
           <Message message={message} error={context.error} toolCalls={context.toolCalls}
             {...(renderContent ? { renderContent } : {})}
             {...(renderAttachment ? { renderAttachment } : {})}
             {...(renderToolResult ? { renderToolResult } : {})}/>
           {props.messageCitations === false ? null : <CitationList
             className="hr-chat__message-citations" messageId={message.message_id}/>}
-          <div className="hr-chat__message-actions"><CopyMessageButton message={message}/></div>
+          <div className="hr-chat__message-actions"><CopyMessageButton className="hr-chat__copy" message={message}/></div>
         </div> })}>{props.emptyState}</FollowedTranscript>
       <div className="hr-chat__status"><StreamStatus/><AssistantActivityIndicator className="hr-chat__assistant-activity"/><TypingIndicator/></div>
       <LiveRegion/>
@@ -247,7 +252,8 @@ export function StyledChatPreset(props: StyledChatPresetProps): ReactNode {
         {props.voiceControls && <div className="hr-chat__voice">{props.voiceControls}</div>}
         <label className="hr-chat__file">{labels.attach}<FileInput hidden/></label>
         <Textarea rows={1} placeholder={labels.placeholder}/>
-        <Stop>{labels.stop}</Stop><Retry className="hr-chat__retry">{labels.retry}</Retry>
+        {canStop ? <Stop>{labels.stop}</Stop> : null}
+        {retryableTurn ? <Retry className="hr-chat__retry" turnId={retryableTurn.turn_id} available>{labels.retry}</Retry> : null}
         <Submit>{labels.send}</Submit><ErrorList className="hr-chat__errors"/>
       </Form>
     </Composer>
@@ -297,7 +303,7 @@ const renderSafeMessageMarkdown: MessageContentRenderer = (parts, message) => {
 
 function safeMarkdownInline(text: string, blockKey: string): ReactNode[] {
   const output: ReactNode[] = [];
-  const pattern = /\[([^\]]+)\]\(([^)]+)\)|`([^`]+)`/gu;
+  const pattern = /\[([^\]]+)\]\(([^)]+)\)|`([^`]+)`|\*\*([^*]+)\*\*|__([^_]+)__|(?<!\*)\*([^*]+)\*(?!\*)|(?<!_)_([^_]+)_(?!_)/gu;
   let cursor = 0;
   let index = 0;
   for (const match of text.matchAll(pattern)) {
@@ -306,8 +312,14 @@ function safeMarkdownInline(text: string, blockKey: string): ReactNode[] {
     const label = match[1];
     const destination = match[2];
     const code = match[3];
+    const strong = match[4] ?? match[5];
+    const emphasis = match[6] ?? match[7];
     if (code !== undefined) {
       output.push(<code key={`${blockKey}-code-${index}`}>{code}</code>);
+    } else if (strong !== undefined) {
+      output.push(<strong key={`${blockKey}-strong-${index}`}>{strong}</strong>);
+    } else if (emphasis !== undefined) {
+      output.push(<em key={`${blockKey}-em-${index}`}>{emphasis}</em>);
     } else if (label !== undefined && destination !== undefined) {
       const href = safeMarkdownUrl(destination);
       const external = href.startsWith("http://") || href.startsWith("https://");
@@ -360,10 +372,30 @@ function safeMarkdownBlocks(text: string): ReactNode[] {
       output.push(<ul key={`list-${index}`}>{items}</ul>);
       continue;
     }
+    if (/^\d+[.)]\s+/u.test(line)) {
+      const items: ReactNode[] = [];
+      while (index < lines.length && /^\d+[.)]\s+/u.test(lines[index] ?? "")) {
+        const item = (lines[index] ?? "").replace(/^\d+[.)]\s+/u, "");
+        items.push(<li key={`ordered-item-${index}`}>{safeMarkdownInline(item, `ordered-item-${index}`)}</li>);
+        index += 1;
+      }
+      output.push(<ol key={`ordered-list-${index}`}>{items}</ol>);
+      continue;
+    }
+    if (/^>\s?/u.test(line)) {
+      const quoted: string[] = [];
+      while (index < lines.length && /^>\s?/u.test(lines[index] ?? "")) {
+        quoted.push((lines[index] ?? "").replace(/^>\s?/u, "")); index += 1;
+      }
+      output.push(<blockquote key={`quote-${index}`}>{quoted.map((value, quoteIndex) =>
+        <Fragment key={`quote-line-${quoteIndex}`}>{quoteIndex === 0 ? null : <br/>}
+          {safeMarkdownInline(value, `quote-${index}-${quoteIndex}`)}</Fragment>)}</blockquote>);
+      continue;
+    }
     const paragraph: string[] = [line];
     index += 1;
     while (index < lines.length && (lines[index] ?? "").trim() !== "" &&
-      !/^(?:#{1,6}\s+|[-*]\s+|```)/u.test(lines[index] ?? "")) {
+      !/^(?:#{1,6}\s+|[-*]\s+|\d+[.)]\s+|>\s?|```)/u.test(lines[index] ?? "")) {
       paragraph.push(lines[index] ?? ""); index += 1;
     }
     output.push(<p key={`paragraph-${index}`}>{paragraph.map((value, lineIndex) =>
@@ -432,6 +464,7 @@ export interface ConversationWorkspaceController<TRequest, TAuthorizationContext
   extends ConversationWorkspaceReadable {
   open(input: ConversationWorkspaceOpenInput<TAuthorizationContext>): Promise<ConversationRuntime<TRequest>>;
   select(conversationId: ConversationId | null): void;
+  markRead?(conversationId: ConversationId): void;
   close?(conversationId: ConversationId): Promise<boolean>;
 }
 
@@ -446,6 +479,7 @@ export interface WorkspaceThreadPickerProps<TRequest, TAuthorizationContext> {
   readonly workspace: ConversationWorkspaceController<TRequest, TAuthorizationContext>;
   readonly createConversation?: () => Promise<ConversationWorkspaceOpenInput<TAuthorizationContext>>;
   readonly getThreadLabel?: (conversationId: ConversationId) => ReactNode;
+  readonly onConversationRead?: (conversationId: ConversationId) => void | Promise<void>;
 }
 
 /** Compact open-thread picker that never blocks New while another turn runs. */
@@ -470,7 +504,8 @@ export function WorkspaceThreadPicker<TRequest, TAuthorizationContext>(
       <li key={thread.conversationId}><button type="button"
         aria-current={snapshot.selectedConversationId === thread.conversationId ? "true" : undefined}
         data-turn-status={thread.turnStatus}
-        onClick={() => props.workspace.select(thread.conversationId)}>
+        onClick={() => { props.workspace.select(thread.conversationId); props.workspace.markRead?.(thread.conversationId);
+          void props.onConversationRead?.(thread.conversationId); }}>
         <span>{props.getThreadLabel?.(thread.conversationId) ?? thread.conversationId}</span>
         <small>{thread.turnStatus === "running" ? "Running" : thread.unread ? "Done" : thread.turnStatus}</small>
       </button></li>)}</ul></details>
@@ -510,12 +545,9 @@ export function CatalogWorkspaceThreadPicker<TRequest, TAuthorizationContext>(
         if (cancelled) return;
         setDescriptors(found);
         const active = found.filter((descriptor) => descriptor.lifecycle === "active");
-        for (const descriptor of active) {
-          await props.workspace.open({ authorizationContext,
-            conversationId: descriptor.conversationId, select: false });
-        }
         if (props.workspace.getSnapshot().selectedConversationId === null && active[0]) {
-          props.workspace.select(active[0].conversationId);
+          await props.workspace.open({ authorizationContext,
+            conversationId: active[0].conversationId });
         }
       } catch { if (!cancelled) setError("Conversations could not be loaded."); }
     })();
@@ -547,20 +579,26 @@ export function CatalogWorkspaceThreadPicker<TRequest, TAuthorizationContext>(
     finally { setBusyId(null); }
   };
   const labels = new Map(descriptors.map((descriptor) => [descriptor.conversationId, descriptor.title]));
+  const active = descriptors.filter((descriptor) => descriptor.lifecycle === "active");
   const archived = descriptors.filter((descriptor) => descriptor.lifecycle === "archived");
   return <div className="hr-chat__workspace-picker">
     {props.createConversation && <button type="button" disabled={busyId !== null} aria-busy={busyId === "create"}
       onClick={() => void create()}>{busyId === "create" ? "Creating…" : "New"}</button>}
     <details><summary>Threads{snapshot.runningCount > 0 ? ` (${snapshot.runningCount} running)` : ""}</summary>
-      <ul aria-label="Conversations">{snapshot.threads.map((thread) => {
-        const descriptor = descriptors.find((item) => item.conversationId === thread.conversationId);
-        return <li key={thread.conversationId} data-turn-status={thread.turnStatus}>
-          <button type="button" aria-current={snapshot.selectedConversationId === thread.conversationId ? "true" : undefined}
-            onClick={() => props.workspace.select(thread.conversationId)}>
-            <span>{props.getThreadLabel?.(thread.conversationId) ?? labels.get(thread.conversationId) ?? thread.conversationId}</span>
-            <small>{thread.turnStatus === "running" ? "Running" : thread.unread ? "Done" : thread.turnStatus}</small>
+      <ul aria-label="Conversations">{active.map((descriptor) => {
+        const thread = snapshot.threads.find((item) => item.conversationId === descriptor.conversationId);
+        return <li key={descriptor.conversationId} data-turn-status={thread?.turnStatus ?? "idle"}>
+          <button type="button" aria-current={snapshot.selectedConversationId === descriptor.conversationId ? "true" : undefined}
+            onClick={() => void (async () => {
+              if (thread) props.workspace.select(descriptor.conversationId);
+              else await props.workspace.open({ authorizationContext, conversationId: descriptor.conversationId });
+              props.workspace.markRead?.(descriptor.conversationId);
+              await props.onConversationRead?.(descriptor.conversationId);
+            })()}>
+            <span>{props.getThreadLabel?.(descriptor.conversationId) ?? labels.get(descriptor.conversationId) ?? descriptor.conversationId}</span>
+            <small>{thread?.turnStatus === "running" ? "Running" : thread?.unread ? "Done" : thread?.turnStatus ?? "idle"}</small>
           </button>
-          {descriptor && catalog.capabilities.archive.supported && <button type="button"
+          {catalog.capabilities.archive.supported && <button type="button"
             disabled={busyId !== null} aria-label={`Archive ${descriptor.title ?? "conversation"}`}
             onClick={() => void mutate(descriptor)}>Archive</button>}
         </li>;
@@ -588,6 +626,7 @@ export interface HandrailChatWorkspaceProps<TRequest, TAuthorizationContext>
   /** Enables full authorized catalog hydration plus archive/restore UI. */
   readonly catalogOptions?: ConversationCatalogWorkspaceOptions<TAuthorizationContext>;
   readonly getThreadLabel?: (conversationId: ConversationId) => ReactNode;
+  readonly onConversationRead?: (conversationId: ConversationId) => void | Promise<void>;
   readonly noConversation?: ReactNode;
   /** Optional stable controller factory, normally `client.presenceControllerFor`. */
   readonly presenceForConversation?: (conversationId: ConversationId) => PresenceController | null;
@@ -603,10 +642,12 @@ export function HandrailChatWorkspace<TRequest, TAuthorizationContext>(
   const picker = props.conversationPicker ?? (props.catalogOptions
     ? <CatalogWorkspaceThreadPicker workspace={props.workspace} catalogOptions={props.catalogOptions}
       {...(props.createConversation ? { createConversation: props.createConversation } : {})}
-      {...(props.getThreadLabel ? { getThreadLabel: props.getThreadLabel } : {})}/>
+      {...(props.getThreadLabel ? { getThreadLabel: props.getThreadLabel } : {})}
+      {...(props.onConversationRead ? { onConversationRead: props.onConversationRead } : {})}/>
     : <WorkspaceThreadPicker workspace={props.workspace}
     {...(props.createConversation ? { createConversation: props.createConversation } : {})}
-    {...(props.getThreadLabel ? { getThreadLabel: props.getThreadLabel } : {})}/>);
+    {...(props.getThreadLabel ? { getThreadLabel: props.getThreadLabel } : {})}
+    {...(props.onConversationRead ? { onConversationRead: props.onConversationRead } : {})}/>);
   if (!selected) return <section className={["hr-chat", props.className].filter(Boolean).join(" ")}
     data-layout={props.layout ?? "page"} style={props.style}>
     <header className="hr-chat__header"><h2>{props.title ?? "Assistant"}</h2>
@@ -614,9 +655,9 @@ export function HandrailChatWorkspace<TRequest, TAuthorizationContext>(
     <div className="hr-chat__empty">{props.noConversation ?? "Start or select a conversation."}</div>
   </section>;
   const { workspace: _workspace, composerForConversation: _composerFor, createConversation: _create,
-    getThreadLabel: _label, noConversation: _empty, conversationPicker: _picker,
+    getThreadLabel: _label, onConversationRead: _onConversationRead, noConversation: _empty, conversationPicker: _picker,
     presenceForConversation: _presenceFor, catalogOptions: _catalogOptions, ...chat } = props;
-  void _workspace; void _composerFor; void _create; void _label; void _empty; void _picker; void _presenceFor; void _catalogOptions;
+  void _workspace; void _composerFor; void _create; void _label; void _onConversationRead; void _empty; void _picker; void _presenceFor; void _catalogOptions;
   const runtime = selected.runtime as ConversationRuntime<TRequest>;
   const presence = props.presenceForConversation?.(selected.conversationId) ?? props.presence;
   const composer = props.composerForConversation(runtime, selected.conversationId);
@@ -630,6 +671,7 @@ export interface HandrailChatWorkspaceLauncherProps<TRequest, TAuthorizationCont
   readonly trigger?: ReactNode;
   readonly connectionStatus?: ChatLauncherConnectionStatus;
   readonly activity?: ConversationActivityReadable;
+  readonly onOpenChange?: (open: boolean) => void;
 }
 
 /** Drop-in launcher whose button reflects every open background conversation. */
@@ -637,9 +679,28 @@ export function HandrailChatWorkspaceLauncher<TRequest, TAuthorizationContext>(
   props: HandrailChatWorkspaceLauncherProps<TRequest, TAuthorizationContext>,
 ): ReactNode {
   const binding = useConversationLauncherBinding(props.workspace, props.connectionStatus, props.activity);
-  const { trigger, connectionStatus: _connection, activity: _activity, ...workspaceProps } = props;
+  const selectedBeforeClose = useRef<ConversationId | null>(props.workspace.getSnapshot().selectedConversationId);
+  useEffect(() => {
+    selectedBeforeClose.current = props.workspace.getSnapshot().selectedConversationId;
+    props.workspace.select(null);
+  }, [props.workspace]);
+  const { trigger, connectionStatus: _connection, activity: _activity, onOpenChange, ...workspaceProps } = props;
   void _connection; void _activity;
-  return <ChatLauncherRoot {...binding}><ChatLauncherTrigger className="hr-chat__launcher-trigger">
+  const handleOpenChange = (open: boolean) => {
+    if (open) {
+      const selected = selectedBeforeClose.current ?? props.workspace.getSnapshot().threads[0]?.conversationId ?? null;
+      props.workspace.select(selected);
+      if (selected !== null) {
+        props.workspace.markRead?.(selected);
+        void props.onConversationRead?.(selected);
+      }
+    } else {
+      selectedBeforeClose.current = props.workspace.getSnapshot().selectedConversationId;
+      props.workspace.select(null);
+    }
+    onOpenChange?.(open);
+  };
+  return <ChatLauncherRoot {...binding} onOpenChange={handleOpenChange}><ChatLauncherTrigger className="hr-chat__launcher-trigger">
     {trigger ?? "Open chat"}<ChatLauncherStatus className="hr-chat__launcher-status">{(state) =>
       state.error ? "Error" : state.busy ? "Running" : state.unreadCount > 0 ? "Done" : ""
     }</ChatLauncherStatus><ChatLauncherBadge className="hr-chat__launcher-badge">{(state) =>
@@ -670,8 +731,57 @@ export interface HandrailAssistantLauncherProps extends Omit<HandrailChatWorkspa
   readonly presentation?: "launcher" | "page";
   /** Migration/domain seam for an existing authorized upload route. The SDK uploader remains the default. */
   readonly uploaderForConversation?: (conversationId: ConversationId) => AttachmentUploader<Blob>;
+  /** Override negotiated browser intake when a host-owned uploader has stricter limits. */
+  readonly attachmentIntake?: UseConversationComposerOptions<ChatRequest>["attachmentIntake"];
   /** Inject the canonical scoped preset once with the launcher. Defaults to true. */
   readonly includeStyles?: boolean;
+}
+
+/** Derives browser intake from the protected gateway instead of exposing unsupported file controls. */
+export function gatewayAttachmentIntake(
+  capabilities: ApplicationGatewayCapabilities,
+  hostUploader = false,
+): UseConversationComposerOptions<ChatRequest>["attachmentIntake"] | undefined {
+  if (capabilities.attachments === false && !hostUploader) return undefined;
+  const documentCapability = capabilities.documentInput === false
+    ? undefined
+    : capabilities.documentInput;
+  const advertised = capabilities.attachments === false
+    ? [
+      ...AI_RUNTIME_IMAGE_MIME_TYPES,
+      ...(documentCapability?.supported_mime_types ?? []),
+    ]
+    : capabilities.attachments.acceptedMediaTypes;
+  const acceptedMediaTypes = [
+    ...AI_RUNTIME_IMAGE_MIME_TYPES,
+    ...AI_RUNTIME_DOCUMENT_MIME_TYPES,
+  ].filter((mediaType): mediaType is AttachmentMimeType => advertised.some((candidate) =>
+    candidate === mediaType ||
+    (candidate.endsWith("/*") && mediaType.startsWith(candidate.slice(0, -1)))));
+  if (acceptedMediaTypes.length === 0) return undefined;
+  const imageMaximumBytes = capabilities.attachments === false
+    ? AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMaxBytes
+    : capabilities.attachments.maximumBytesPerFile;
+  const documentMaximumBytes = capabilities.attachments === false
+    ? documentCapability?.max_document_bytes ?? AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMaxBytes
+    : capabilities.attachments.maximumBytesPerFile;
+  const imageMaximumFiles = capabilities.attachments === false
+    ? AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentsPerMessage
+    : capabilities.attachments.maximumFiles;
+  const documentMaximumFiles = capabilities.attachments === false
+    ? documentCapability?.max_document_count ?? AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentsPerMessage
+    : capabilities.attachments.maximumFiles;
+  return {
+    acceptedMediaTypes,
+    maxFileBytes: {
+      image: Math.min(imageMaximumBytes, AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentMaxBytes),
+      document: Math.min(documentMaximumBytes, AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMaxBytes),
+    },
+    maxSelectionCount: {
+      image: Math.min(imageMaximumFiles, AI_RUNTIME_PROTOCOL_LIMITS.imageAttachmentsPerMessage),
+      document: Math.min(documentMaximumFiles, AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentsPerMessage),
+    },
+  };
 }
 
 interface AssistantLauncherState {
@@ -679,12 +789,13 @@ interface AssistantLauncherState {
   readonly uploader: AttachmentUploader<ApplicationGatewayAttachmentSource>;
 }
 
-function AssistantWorkingObserver({ workspace, onChange }: {
+function AssistantWorkingObserver({ workspace, activity, onChange }: {
   readonly workspace: ConversationWorkspaceReadable;
+  readonly activity?: ConversationActivityReadable;
   readonly onChange?: (working: boolean) => void;
 }) {
-  const snapshot = useConversationWorkspaceSnapshot(workspace);
-  useEffect(() => onChange?.(snapshot.runningCount > 0), [onChange, snapshot.runningCount]);
+  const binding = useConversationLauncherBinding(workspace, undefined, activity);
+  useEffect(() => onChange?.(binding.turnStatus === "busy"), [binding.turnStatus, onChange]);
   return null;
 }
 
@@ -865,13 +976,18 @@ export function HandrailAssistantLauncher(props: HandrailAssistantLauncherProps)
   const { endpoint: _endpoint, fetch: _fetch, protectedRequest: _protected, diagnostics: _diagnostics, clientId: _clientId,
     deviceId: _deviceId, loading: _loading, failure: _failure, includeStyles: _includeStyles,
     onWorkingChange: _onWorkingChange, autoTitle: _autoTitle,
-    presentation: _presentation, uploaderForConversation: _uploaderForConversation, ...launcher } = props;
+    presentation: _presentation, uploaderForConversation: _uploaderForConversation,
+    attachmentIntake: _attachmentIntake, ...launcher } = props;
   void _endpoint; void _fetch; void _protected; void _diagnostics; void _clientId; void _deviceId; void _loading;
   void _failure; void _includeStyles; void _onWorkingChange; void _autoTitle; void _presentation; void _uploaderForConversation;
   const authorizationContext = EMPTY_ASSISTANT_AUTHORIZATION_CONTEXT;
   const approvals = props.approvals === undefined
     ? <StandardGatewayApprovals client={state.client}/>
     : props.approvals;
+  const attachmentIntake = props.attachmentIntake ?? gatewayAttachmentIntake(
+    state.client.capabilities,
+    props.uploaderForConversation !== undefined,
+  );
   const workspaceProps = {
     ...launcher,
     workspace: state.client.workspace,
@@ -879,6 +995,13 @@ export function HandrailAssistantLauncher(props: HandrailAssistantLauncherProps)
     catalogOptions: { catalog: state.client.catalog, authorizationContext },
     getThreadLabel: (conversationId: ConversationId) => generatedTitles.get(conversationId)
       ?? props.getThreadLabel?.(conversationId),
+    onConversationRead: (conversationId: ConversationId) => {
+      state.client.workspace?.markRead(conversationId);
+      return state.client.markActivityRead(conversationId).catch((cause) => {
+        emitAiDiagnostic(props.diagnostics, { domain: "gateway", operation: "activity_mark_read",
+          phase: "failed", retryable: true, conversationId, cause });
+      });
+    },
     presenceForConversation: state.client.presenceControllerFor,
     createConversation: async () => {
       const created = await state.client.catalog.create({ authorizationContext,
@@ -891,9 +1014,10 @@ export function HandrailAssistantLauncher(props: HandrailAssistantLauncherProps)
             const uploader = props.uploaderForConversation!(conversationId);
             hostUploaders.current.set(conversationId, uploader);
             return uploader;
-          })(),
+      })(),
       conversationId,
       createRequest: ({ text, attachments }) => state.client.buildRequest({ content: text, attachments }),
+      ...(attachmentIntake === undefined ? {} : { attachmentIntake }),
     }),
     approvals,
   } satisfies HandrailChatWorkspaceProps<ChatRequest, object>;
@@ -901,6 +1025,7 @@ export function HandrailAssistantLauncher(props: HandrailAssistantLauncherProps)
     ? <HandrailChatWorkspace {...workspaceProps} layout="page"/>
     : <HandrailChatWorkspaceLauncher {...workspaceProps}/>;
   return <>{styles}<AssistantWorkingObserver workspace={state.client.workspace}
+    {...(state.client.activity === null ? {} : { activity: state.client.activity })}
     {...(props.onWorkingChange === undefined ? {} : { onChange: props.onWorkingChange })}/>
     <StandardConversationTitleObserver client={state.client} enabled={props.autoTitle !== false}
       onTitle={rememberGeneratedTitle}

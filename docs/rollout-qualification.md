@@ -10,24 +10,28 @@ a production package pin.
 
 | Target | Standard server | Standard UI | Recovery / telemetry | Compile and focused behavior | Immutable 0.2 pin | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| SDK | `createHandrailAssistant` | styled default + headless escape | durable outbox, worker, trusted-context recovery | passed | no release commit | candidate qualified |
-| Mills Family Office | high-level composition | page presentation of standard launcher | trusted-session recovery; SDK outbox | passed | still `@handrail/ai` 0.1.91 | architecture qualified; release blocked |
-| Spartan Cyber ERP | high-level Aegis adapter | standard launcher is default; legacy rollback | trusted-session recovery, Postgres pub-sub, authoritative receipt test | passed | still `@handrail/ai` 0.1.91 | architecture qualified; release blocked |
+| SDK | `createHandrailAssistant` | styled default + headless escape | durable outbox, worker, trusted-context recovery | focused UI/composer/file-input tests, build, and typecheck passed | `0.2.2` source candidate; no immutable release SHA yet | repair qualified; release blocked |
+| Mills Family Office | high-level composition | legacy default; standard page launcher is explicit opt-in | trusted-session recovery; SDK outbox | typecheck, document intake/extraction, UI seam, and gateway passed | canonical `@handrail/ai-assistant` remains pinned to reviewed 0.2.1 SHA `8468d21f93a5b60ebc710e473c0477554316abe6` | source qualified; 0.2.2 pin pending |
+| Spartan Cyber ERP | high-level Aegis adapter | legacy default; standard launcher is explicit opt-in | trusted-session recovery, Postgres pub-sub, authoritative receipt test | typecheck, attachment persistence/provider/UI seams passed | canonical `@handrail/ai-assistant` remains pinned to reviewed 0.2.1 SHA `8468d21f93a5b60ebc710e473c0477554316abe6` | source qualified; 0.2.2 pin pending |
 | Remaining projects | standard template required | styled default unless documented headless exception | Handrail binding + same outbox contract | not run | not installed | not started |
 
-Both real consumers pass the source architecture findings of
-`handrail-ai-assistant check`. They intentionally fail its package, immutable
-source, lockfile, and legacy-name findings until a real reviewed 0.2 commit SHA
-exists. The migration command has been run in preview mode and reports only the
-expected manifest/import rewrite set. Do not use an alias or fabricated SHA to
-make the gate green.
+Both real consumers now use the canonical package key and imports with regenerated
+lockfiles. The current UI and generalized PDF/spreadsheet input repair remains an
+uncommitted SDK working-tree change, so neither consumer may be moved to it until
+review produces a new immutable SHA. Both consumers intentionally default their
+browser selector to the legacy UI during that qualification window.
 
 ## Verification evidence
 
 SDK candidate:
 
 - `npm run typecheck`
-- `npx vitest run test/react-styled.test.tsx` — 13 passed
+- `npm run build`
+- `npx vitest run test/openai-responses-tools.test.ts` — 9 passed
+- `npx vitest run test/browser-attachments.test.ts` — 22 passed
+- `npx vitest run test/react-presentations.test.tsx` — 7 passed
+- `npx vitest run test/react-styled.test.tsx` — 15 passed
+- `npx vitest run test/react-composer.test.tsx` — 13 passed
 - `npx vitest run test/server-assistant.test.ts` — 4 passed
 - `npx vitest run test/postgres-assistant-foundation.test.ts` — 5 passed
 - `npm run check:adoption-tool` — 3 passed
@@ -37,6 +41,11 @@ SDK candidate:
 Mills real consumer:
 
 - `npm run typecheck` — passed
+- `npx vitest run src/client/assistant/assistant-api.test.ts` — 14 passed
+- `npx vitest run src/server/assistant/contracts.test.ts` — 11 passed
+- `npx vitest run src/server/assistant/property-document-content.test.ts` — 8 passed
+- focused validated CSV upload/bind/serve lifecycle in
+  `src/server/assistant/assistant.test.ts` — passed
 - `npx vitest run src/server/assistant/handrail-ai-gateway.test.ts` — 10 passed
 - `npx vitest run src/server/assistant/handrail-ai-gateway-postgres.test.ts` — 4 passed
 - source conformance findings for high-level server, automatic telemetry,
@@ -45,6 +54,8 @@ Mills real consumer:
 Spartan real consumer:
 
 - `npm run typecheck` — passed
+- focused attachment persistence, provider native-file input, and legacy picker
+  tests in `tests/aegis.test.ts` — passed
 - `npm test -- --run tests/aegis.test.ts` — 69 passed
 - `npm test -- --run tests/aegis-handrail-ai-ui.test.ts` — 1 passed
 - `npm test -- --run tests/aegis-handrail-ai-postgres-live-delivery.test.ts` — 1 passed
@@ -67,9 +78,9 @@ still cover successful, failed, and cancelled traffic over time.
 
 The next authorized release operator must:
 
-1. review the SDK diff and create the immutable 0.2 release commit/tag;
+1. review the SDK UI-repair diff and create a new immutable release commit/tag;
 2. record its full 40-character SHA and package integrity;
-3. run the migration CLI with `--write` in Mills, regenerate its lockfile, clean
+3. update Mills from the current canonical 0.2.1 SHA to the repaired SHA, clean
    install, rerun the listed Mills checks, and rerun conformance;
 4. repeat only after Mills is green for Spartan, then rerun the listed Spartan
    checks and conformance;
@@ -103,7 +114,8 @@ rollout outcome.
 
 - Immutable package release: blocked by the explicit no-commit/no-push
   constraint for this run.
-- Consumer dependency rename and clean lockfiles: depend on that immutable SHA.
+- Consumer dependency rename and clean lockfiles are complete; advancing the pin
+  to the repaired SDK depends on the new immutable SHA.
 - Handrail KB publication: no KB write API is available in this Dev Chat. The
   canonical source is ready, and guarded workflow-improvement proposal
   `c54f01ee-e497-4866-872f-886e42598c23` records the publication gap.

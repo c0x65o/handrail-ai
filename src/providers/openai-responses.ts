@@ -5,6 +5,7 @@ import {
   type CitationSourceId,
 } from "../citations.js";
 import {
+  AI_RUNTIME_DOCUMENT_MIME_TYPES,
   AI_RUNTIME_PROTOCOL_LIMITS,
   AI_RUNTIME_PROTOCOL_VERSION,
   type AttachmentReference,
@@ -45,7 +46,7 @@ export interface OpenAIResponsesProviderOptions {
   /** Optional host transcript policy; Spartan configures this to 30. */
   readonly maximumInputMessages?: number;
   readonly resolveAttachment?: (reference: AttachmentReference) => JsonObject;
-  /** Explicit PDF limits; document input remains unsupported when omitted. */
+  /** Explicit file-input limits; document input remains unsupported when omitted. */
   readonly document_input?: DocumentInputCapabilityDescriptor;
   /** Trusted, server-local retention for store:false tool continuations. */
   readonly continuationStore?: OpenAIResponsesContinuationStore;
@@ -283,9 +284,8 @@ export class OpenAIResponsesProviderAdapter implements ProviderAdapter {
     this.#documentInput = options.document_input === undefined
       ? parseProviderDocumentInputCapability({ supported: false })
       : parseProviderDocumentInputCapability({ supported: true, capability: options.document_input });
-    if (this.#documentInput.supported && (!this.#documentInput.capability.supported_mime_types.includes("application/pdf") ||
-      !this.#documentInput.capability.requires_host_resolution)) {
-      throw new TypeError("document_input must support application/pdf through host resolution");
+    if (this.#documentInput.supported && !this.#documentInput.capability.requires_host_resolution) {
+      throw new TypeError("document_input must require host resolution");
     }
     this.#continuations = options.continuationStore ?? new InMemoryOpenAIResponsesContinuationStore();
     this.metadata = Object.freeze({ provider_id: "openai", model_id: options.model, capabilities: {
@@ -307,15 +307,21 @@ export class OpenAIResponsesProviderAdapter implements ProviderAdapter {
       documentCount += 1;
       if (message.role !== "user" || !this.#documentInput.supported || !invocation.resolve_document_reference ||
         documentCount > this.#documentInput.capability.max_document_count ||
-        part.attachment.media_type !== "application/pdf" ||
+        !this.#documentInput.capability.supported_mime_types.includes(part.attachment.media_type) ||
         part.attachment.byte_size > this.#documentInput.capability.max_document_bytes) throw new OpenAIResponsesPreflightError();
       const document = await invocation.resolve_document_reference(part.attachment, { signal: invocation.signal });
-      if (document.media_type !== "application/pdf" || !(document.bytes instanceof Uint8Array) ||
+      if (document.media_type !== part.attachment.media_type || !(document.bytes instanceof Uint8Array) ||
         document.bytes.byteLength !== part.attachment.byte_size) throw new OpenAIResponsesPreflightError();
-      const filename = part.attachment.filename ?? `${part.attachment.attachment_id.slice(0, 251)}.pdf`;
+      const filename = part.attachment.filename ?? documentFilename(
+        part.attachment.attachment_id,
+        part.attachment.media_type,
+      );
       if (!safeFilename(filename)) throw new OpenAIResponsesPreflightError();
       resolved.set(part.attachment.content_ref, {
-        type: "input_file", filename, file_data: `data:application/pdf;base64,${base64(document.bytes)}`, detail: "auto",
+        type: "input_file",
+        filename,
+        file_data: `data:${document.media_type};base64,${base64(document.bytes)}`,
+        ...(document.media_type === "application/pdf" ? { detail: "auto" } : {}),
       });
     }
     return resolved;
@@ -416,6 +422,21 @@ export class OpenAIResponsesProviderAdapter implements ProviderAdapter {
       return { status: "failed", error: normalized, usage: null };
     }
   }
+}
+
+function documentFilename(
+  attachmentId: string,
+  mediaType: (typeof AI_RUNTIME_DOCUMENT_MIME_TYPES)[number],
+): string {
+  const extension: Record<(typeof AI_RUNTIME_DOCUMENT_MIME_TYPES)[number], string> = {
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.ms-excel": ".xls",
+    "text/csv": ".csv",
+    "text/tab-separated-values": ".tsv",
+  };
+  const suffix = extension[mediaType]!;
+  return `${attachmentId.slice(0, 251 - suffix.length)}${suffix}`;
 }
 
 function optionsMaximumMessages(options: OpenAIResponsesProviderOptions): number | null {

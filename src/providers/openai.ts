@@ -1,6 +1,7 @@
 import {
   AI_RUNTIME_ATTACHMENT_ID_GRAMMAR,
   AI_RUNTIME_CONTENT_REFERENCE_GRAMMAR,
+  AI_RUNTIME_DOCUMENT_MIME_TYPES,
   AI_RUNTIME_PROTOCOL_LIMITS,
   AI_RUNTIME_PROTOCOL_VERSION,
   type ApplicationToolResult,
@@ -460,7 +461,7 @@ function validateDocumentAttachment(
     typeof attachment.content_ref !== "string" ||
     /^(?:data|blob|https?):/i.test(attachment.content_ref) ||
     !CONTENT_REFERENCE_PATTERN.test(attachment.content_ref) ||
-    attachment.media_type !== "application/pdf" ||
+    !AI_RUNTIME_DOCUMENT_MIME_TYPES.includes(attachment.media_type as never) ||
     !Number.isSafeInteger(attachment.byte_size) ||
     attachment.byte_size < AI_RUNTIME_PROTOCOL_LIMITS.documentAttachmentMinBytes ||
     attachment.byte_size > maxDocumentBytes ||
@@ -470,6 +471,21 @@ function validateDocumentAttachment(
   }
   rejectCredentialMaterial(attachment.attachment_id);
   rejectCredentialMaterial(attachment.content_ref);
+}
+
+function documentFilename(
+  attachmentId: string,
+  mediaType: (typeof AI_RUNTIME_DOCUMENT_MIME_TYPES)[number],
+): string {
+  const extension: Record<(typeof AI_RUNTIME_DOCUMENT_MIME_TYPES)[number], string> = {
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.ms-excel": ".xls",
+    "text/csv": ".csv",
+    "text/tab-separated-values": ".tsv",
+  };
+  const suffix = extension[mediaType]!;
+  return `${attachmentId.slice(0, 251 - suffix.length)}${suffix}`;
 }
 
 function base64(bytes: Uint8Array): string {
@@ -663,7 +679,7 @@ async function mapMessage(
     if (
       !resolvedRecord ||
       Object.keys(resolvedRecord).sort().join(",") !== "bytes,media_type" ||
-      resolved.media_type !== "application/pdf" ||
+      resolved.media_type !== part.attachment.media_type ||
       !(resolved.bytes instanceof Uint8Array) ||
       resolved.bytes.length !== part.attachment.byte_size ||
       resolved.bytes.length <
@@ -672,15 +688,16 @@ async function mapMessage(
     ) {
       throw new OpenAIPreflightError();
     }
-    const filename =
-      part.attachment.filename ??
-      `${part.attachment.attachment_id.slice(0, 251)}.pdf`;
+    const filename = part.attachment.filename ?? documentFilename(
+      part.attachment.attachment_id,
+      part.attachment.media_type,
+    );
     if (!safeFilename(filename)) throw new OpenAIPreflightError();
     content.push({
       type: "file",
       file: {
         filename,
-        file_data: `data:application/pdf;base64,${base64(resolved.bytes)}`,
+        file_data: `data:${resolved.media_type};base64,${base64(resolved.bytes)}`,
       },
     });
   }
@@ -860,13 +877,10 @@ export class OpenAIProviderAdapter implements ProviderAdapter {
           });
     if (
       documentInput.supported &&
-      (!documentInput.capability.supported_mime_types.includes(
-        "application/pdf",
-      ) ||
-        !documentInput.capability.requires_host_resolution)
+      !documentInput.capability.requires_host_resolution
     ) {
       throw new TypeError(
-        "document_input must support application/pdf through host resolution",
+        "document_input must require host resolution",
       );
     }
     this.provider_context = createOpenAIProviderContextCapability({

@@ -268,7 +268,13 @@ describe("chat request protocol", () => {
     ]);
     expect(AI_RUNTIME_IMAGE_MIME_TYPES).not.toContain("image/svg+xml");
     expect(AI_RUNTIME_IMAGE_MIME_TYPES.every((type) => !type.includes("*"))).toBe(true);
-    expect(AI_RUNTIME_DOCUMENT_MIME_TYPES).toEqual(["application/pdf"]);
+    expect(AI_RUNTIME_DOCUMENT_MIME_TYPES).toEqual([
+      "application/pdf",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "application/vnd.ms-excel",
+      "text/csv",
+      "text/tab-separated-values",
+    ]);
     expect(AI_RUNTIME_ATTACHMENT_ID_GRAMMAR).toBe(
       "^att_[A-Za-z0-9][A-Za-z0-9._-]{0,251}$",
     );
@@ -285,7 +291,7 @@ describe("chat request protocol", () => {
       imageAttachmentsPerMessage: 4,
       imageAttachmentsPerRequest: 8,
       documentAttachmentMinBytes: 1,
-      documentAttachmentMaxBytes: 20 * 1024 * 1024,
+      documentAttachmentMaxBytes: 25 * 1024 * 1024,
       documentAttachmentsPerMessage: 2,
       documentAttachmentsPerRequest: 4,
     });

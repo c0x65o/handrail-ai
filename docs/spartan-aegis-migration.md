@@ -127,8 +127,7 @@ confirmation authority, business audit, or retention rules as SDK cleanup.
 - the SDK `test/postgres-assistant-foundation.test.ts` proves durable receipt
   enqueue, retry attempts, dead-lettering, and acknowledgement.
 
-The tracked Spartan manifest intentionally remains on immutable
-`@handrail/ai` 0.1.91 while 0.2 is qualified from a local package. Rename the
-dependency and every import to `@handrail/ai-assistant` only with the real,
-reviewed 0.2 commit SHA and regenerated lockfile. Aliasing the 0.1 artifact
-under the new name is forbidden and is rejected by the adoption checker.
+The tracked Spartan manifest and imports now use canonical
+`@handrail/ai-assistant`, pinned to the reviewed 0.2.1 commit with a regenerated
+lockfile. The UI repair described in the rollout qualification record must receive
+its own reviewed immutable SHA before Spartan advances its pin.

@@ -62,7 +62,17 @@ export const AI_RUNTIME_IMAGE_MIME_TYPES = [
   "image/webp",
 ] as const;
 
-export const AI_RUNTIME_DOCUMENT_MIME_TYPES = ["application/pdf"] as const;
+/**
+ * Provider-neutral document inputs supported by the wire protocol. Providers
+ * and hosts still advertise the subset they can resolve and process.
+ */
+export const AI_RUNTIME_DOCUMENT_MIME_TYPES = [
+  "application/pdf",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-excel",
+  "text/csv",
+  "text/tab-separated-values",
+] as const;
 
 export const AI_RUNTIME_ATTACHMENT_ID_GRAMMAR =
   "^att_[A-Za-z0-9][A-Za-z0-9._-]{0,251}$" as const;
@@ -82,7 +92,7 @@ export const AI_RUNTIME_PROTOCOL_LIMITS = {
   imageAttachmentsPerMessage: 4,
   imageAttachmentsPerRequest: 8,
   documentAttachmentMinBytes: 1,
-  documentAttachmentMaxBytes: 20_971_520,
+  documentAttachmentMaxBytes: 26_214_400,
   documentAttachmentsPerMessage: 2,
   documentAttachmentsPerRequest: 4,
   jsonDepth: 20,

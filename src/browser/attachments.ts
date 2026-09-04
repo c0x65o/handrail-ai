@@ -97,7 +97,7 @@ export const BROWSER_PDF_INTAKE_REJECTION_REASONS = [
 export type BrowserPdfIntakeRejectionReason =
   (typeof BROWSER_PDF_INTAKE_REJECTION_REASONS)[number];
 
-/** Minimal mixed attachment state used to derive PDF duplicates and document count. */
+/** Minimal mixed attachment state used to derive document duplicates and count. */
 export interface BrowserPdfExistingSelection {
   readonly fingerprint: string;
   /** Omitted legacy kinds are images and do not consume the document count. */
@@ -105,7 +105,7 @@ export interface BrowserPdfExistingSelection {
 }
 
 export interface BrowserPdfIntakeOptions {
-  /** Defaults to all protocol document MIME types (currently application/pdf). */
+  /** Defaults to all protocol document MIME types. */
   readonly acceptedMediaTypes?: readonly DocumentMimeType[];
   /** Positive integer no greater than the protocol's per-document byte limit. */
   readonly maxFileBytes: number;
@@ -115,7 +115,7 @@ export interface BrowserPdfIntakeOptions {
   readonly existingFingerprints?: Iterable<string>;
   /**
    * Mixed attachment state. All fingerprints are deduplicated; only document-kind
-   * entries consume the PDF count because legacy omitted kinds are images.
+   * entries consume the document count because legacy omitted kinds are images.
    */
   readonly existingSelections?: Iterable<BrowserPdfExistingSelection>;
   /**
@@ -138,12 +138,12 @@ export interface BrowserPdfIntakeRejection {
 export interface BrowserPdfIntakeResult {
   readonly selections: readonly AttachmentSelection<BrowserAttachmentSource>[];
   readonly rejections: readonly BrowserPdfIntakeRejection[];
-  /** No-op cleanup retained for intake lifecycle symmetry; PDFs create no previews. */
+  /** No-op cleanup retained for intake lifecycle symmetry; documents create no previews. */
   dispose(): void;
 }
 
 export interface BrowserDropPdfIntakeResult extends BrowserPdfIntakeResult {
-  /** True only when this drop operation produced at least one accepted PDF. */
+  /** True only when this drop operation produced at least one accepted document. */
   readonly shouldPreventDefault: boolean;
 }
 
@@ -640,7 +640,7 @@ function safePdfFilename(
 ): string | null {
   const name = (source as Blob & { readonly name?: unknown }).name;
   if (name === undefined || name === "") {
-    return `document-${fingerprint.slice("browser-pdf:".length)}.pdf`;
+    return `document-${fingerprint.slice("browser-pdf:".length)}${documentExtension(source.type as DocumentMimeType)}`;
   }
   if (
     typeof name !== "string" ||
@@ -658,6 +658,17 @@ function safePdfFilename(
     return null;
   }
   return name;
+}
+
+function documentExtension(mediaType: DocumentMimeType): string {
+  const extensions: Record<DocumentMimeType, string> = {
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.ms-excel": ".xls",
+    "text/csv": ".csv",
+    "text/tab-separated-values": ".tsv",
+  };
+  return extensions[mediaType] ?? ".bin";
 }
 
 function pdfRejection(
@@ -786,7 +797,7 @@ export function intakeFileInputPdfs(
   return intakePdfs(pdfSourcesFromList(files), options);
 }
 
-/** Extracts file-kind drop items and recommends consuming only accepted PDF drops. */
+/** Extracts file-kind drop items and recommends consuming only accepted document drops. */
 export function intakeDroppedPdfs(
   dataTransfer: DataTransfer,
   options: BrowserPdfIntakeOptions,
@@ -801,3 +812,17 @@ export function intakeDroppedPdfs(
     shouldPreventDefault: result.selections.length > 0,
   });
 }
+
+/** Generic names for document intake. The PDF names remain as compatibility aliases. */
+export const BROWSER_DOCUMENT_INTAKE_REJECTION_REASONS =
+  BROWSER_PDF_INTAKE_REJECTION_REASONS;
+export type BrowserDocumentIntakeRejectionReason = BrowserPdfIntakeRejectionReason;
+export type BrowserDocumentExistingSelection = BrowserPdfExistingSelection;
+export type BrowserDocumentIntakeOptions = BrowserPdfIntakeOptions;
+export type BrowserDocumentIntakeRejection = BrowserPdfIntakeRejection;
+export type BrowserDocumentIntakeResult = BrowserPdfIntakeResult;
+export type BrowserDropDocumentIntakeResult = BrowserDropPdfIntakeResult;
+export { BrowserPdfIntakeValidationError as BrowserDocumentIntakeValidationError };
+export const fingerprintBrowserDocument = fingerprintBrowserPdf;
+export const intakeFileInputDocuments = intakeFileInputPdfs;
+export const intakeDroppedDocuments = intakeDroppedPdfs;

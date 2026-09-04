@@ -2,7 +2,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { createInitialConversationState } from "../src/conversation/state.js";
-import { CatalogWorkspaceThreadPicker, HandrailAssistantLauncher, StandardConversationTitleObserver, StandardGatewayApprovals, StyledChatLauncher, StyledChatPreset, StyledChatPresetStyles, WorkspaceThreadPicker, createHandrailChatThemeStyle, installToolRendererPlugins } from "../src/react-styled/index.js";
+import { CatalogWorkspaceThreadPicker, HandrailAssistantLauncher, StandardConversationTitleObserver, StandardGatewayApprovals, StyledChatLauncher, StyledChatPreset, StyledChatPresetStyles, WorkspaceThreadPicker, createHandrailChatThemeStyle, gatewayAttachmentIntake, installToolRendererPlugins } from "../src/react-styled/index.js";
 
 describe("styled React preset", () => {
   it("boots the production launcher with canonical styles from an endpoint", () => {
@@ -18,6 +18,53 @@ describe("styled React preset", () => {
     const { container } = render(<HandrailAssistantLauncher endpoint="/api/assistant/aegis"
       fetch={fetcher} includeStyles={false} loading={<span>Connecting assistant</span>}/>);
     expect(container.querySelector("style[data-handrail-ai-preset]")).toBeNull();
+  });
+
+  it("derives file intake from protected gateway MIME and size limits", () => {
+    expect(gatewayAttachmentIntake({
+      protocolVersion: "handrail.application-gateway.v1",
+      authoritativeCancellation: true,
+      attachments: {
+        maximumFiles: 4,
+        maximumBytesPerFile: 10 * 1024 * 1024,
+        acceptedMediaTypes: ["image/*", "application/pdf", "text/csv"],
+      },
+      presence: false,
+      synchronization: false,
+    })).toEqual({
+      acceptedMediaTypes: [
+        "image/jpeg", "image/png", "image/gif", "image/webp", "application/pdf", "text/csv",
+      ],
+      maxFileBytes: { image: 10 * 1024 * 1024, document: 10 * 1024 * 1024 },
+      maxSelectionCount: { image: 4, document: 2 },
+    });
+    expect(gatewayAttachmentIntake({
+      protocolVersion: "handrail.application-gateway.v1",
+      authoritativeCancellation: false,
+      attachments: false,
+      presence: false,
+      synchronization: false,
+    })).toBeUndefined();
+    expect(gatewayAttachmentIntake({
+      protocolVersion: "handrail.application-gateway.v1",
+      authoritativeCancellation: false,
+      attachments: false,
+      documentInput: {
+        supported_mime_types: ["application/pdf", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],
+        max_document_count: 2,
+        max_document_bytes: 25 * 1024 * 1024,
+        requires_host_resolution: true,
+      },
+      presence: false,
+      synchronization: false,
+    }, true)).toMatchObject({
+      acceptedMediaTypes: [
+        "image/jpeg", "image/png", "image/gif", "image/webp", "application/pdf",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      ],
+      maxFileBytes: { document: 25 * 1024 * 1024 },
+      maxSelectionCount: { document: 2 },
+    });
   });
 
   it("generates and persists a title after the first completed turn", async () => {
@@ -120,13 +167,15 @@ describe("styled React preset", () => {
     expect(screen.getByText("Approval required")).toBeTruthy();
     expect(container.querySelector("[data-layout=drawer]")).toBeTruthy();
     expect(container.querySelector("style[data-handrail-ai-preset]")?.textContent).toContain("prefers-reduced-motion");
+    expect(screen.queryByRole("button", { name: "Stop response" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   });
   it("renders safe semantic Markdown, target citations, rich attachments, and voice composition", () => {
     const initial = createInitialConversationState("conversation" as never);
     const message = {
       message_id: "message" as never, turn_id: "turn" as never, role: "assistant" as const,
       content: [{ type: "text" as const,
-        text: "### Summary\n\n- Safe item\n\n[Good](https://example.com) [Bad](javascript:alert(1))" }],
+        text: "### Summary\n\n- **Safe** item\n\n1. *First* step\n2. Second step\n\n> Trusted note\n\n[Good](https://example.com) [Bad](javascript:alert(1))" }],
       attachments: [{ attachment_id: "attachment" as never, kind: "image" as const,
         filename: "chart.png", media_type: "image/png" as const, size_bytes: 2048 }],
       created_at: null, attribution: null,
@@ -140,13 +189,31 @@ describe("styled React preset", () => {
     render(<StyledChatPreset state={state} voiceControls={<button>Speak</button>}
       resolveAttachmentUrl={() => "/api/attachments/attachment"}/>);
     expect(screen.getByRole("heading", { name: "Summary", level: 3 })).toBeTruthy();
-    expect(screen.getByText("Safe item")).toBeTruthy();
+    expect(screen.getByText("Safe").tagName).toBe("STRONG");
+    expect(screen.getByText("First").tagName).toBe("EM");
+    expect(screen.getByText("Trusted note").closest("blockquote")).toBeTruthy();
     expect(screen.getByRole("link", { name: "Good" }).getAttribute("rel")).toContain("noopener");
     expect(screen.getByText("Bad").closest("a")).toBeNull();
     expect(screen.getByRole("img").getAttribute("src")).toBe("/api/attachments/attachment");
     expect(screen.getByRole("link", { name: /Trusted source/ }).getAttribute("href"))
       .toBe("https://example.com/source");
     expect(screen.getByRole("button", { name: "Speak" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Copy" }).classList.contains("hr-chat__copy")).toBe(true);
+  });
+  it("only renders turn controls when an action is available", () => {
+    const initial = createInitialConversationState("conversation" as never);
+    const turn = { turn_id: "turn" as never, continuation_of_turn_id: null, status: "failed" as const,
+      input_message_ids: [], output_message_ids: [], outcome: null, cancellation_reason: null,
+      cancellation_status: null, cancellation_requested_reason: null, remote_may_still_be_running: false,
+      error: { code: "provider_failed", message: "Try again.", retryable: true }, retry_history: [],
+      started_at: null, terminal_at: null, attribution: null };
+    const view = render(<StyledChatPreset state={{ ...initial, turns: [turn] }}/>);
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Stop response" })).toBeNull();
+    view.rerender(<StyledChatPreset state={{ ...initial, turns: [{ ...turn, status: "running", error: null }],
+      active_turn_id: turn.turn_id }}/>);
+    expect(screen.getByRole("button", { name: "Stop response" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   });
   it("binds completion and unread workspace state to the launcher button", () => {
     const snapshot = { selectedConversationId: "second", runningCount: 0, errorCount: 0,
@@ -173,17 +240,26 @@ describe("styled React preset", () => {
   });
   it("keeps New available while another conversation is running", async () => {
     const open = vi.fn(async () => ({} as never));
+    const select = vi.fn();
+    const markRead = vi.fn();
+    const onConversationRead = vi.fn();
     const running = { selectedConversationId: "running", runningCount: 1, errorCount: 0,
       unreadCount: 0, threads: [{ conversationId: "running", runtime: {}, turnStatus: "running",
         unread: false, revision: 2 }] } as never;
     render(<WorkspaceThreadPicker workspace={{ getSnapshot: () => running,
-      subscribe: () => () => undefined, open, select: vi.fn() }}
+      subscribe: () => () => undefined, open, select, markRead }}
+      onConversationRead={onConversationRead}
       createConversation={async () => ({ authorizationContext: {}, conversationId: "new" as never })}/>);
     const create = screen.getByRole("button", { name: "New" });
     expect((create as HTMLButtonElement).disabled).toBe(false);
     expect(screen.getByText("Threads (1 running)")).toBeTruthy();
     fireEvent.click(create);
     await waitFor(() => expect(open).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "new" })));
+    fireEvent.click(screen.getByText("Threads (1 running)"));
+    fireEvent.click(screen.getByRole("button", { name: /running Running/i }));
+    expect(select).toHaveBeenCalledWith("running");
+    expect(markRead).toHaveBeenCalledWith("running");
+    expect(onConversationRead).toHaveBeenCalledWith("running");
   });
   it("hydrates every authorized catalog page and exposes archive and restore lifecycle actions", async () => {
     const active = { conversationId: "active", title: "Active case", lifecycle: "active",
@@ -210,7 +286,7 @@ describe("styled React preset", () => {
       catalogOptions={{ catalog, authorizationContext: { accountId: "authorized" }, pageSize: 1 }}/>);
     const picker = within(view.container);
     await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
-    expect(open).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "active", select: false }));
+    expect(open).not.toHaveBeenCalled();
     fireEvent.click(view.container.querySelector("summary")!);
     fireEvent.click(picker.getByRole("button", { name: "Archive Active case" }));
     await waitFor(() => expect(archive).toHaveBeenCalledWith(expect.objectContaining({

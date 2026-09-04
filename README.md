@@ -46,7 +46,7 @@ reusable template.
 
 `@handrail/ai-assistant` is a headless-first TypeScript SDK for provider-neutral chat
 state, durable event replay, streaming transports, bounded application tools,
-provider-neutral image and PDF attachment references, structured citations,
+provider-neutral image and document attachment references, structured citations,
 optional provider-context compaction, conversation lifecycle contracts, speech,
 retries and cancellation, and normalized usage output. UI is optional: the core
 runtime has no React or styling dependency.
@@ -58,7 +58,7 @@ Node.js 20 or newer is required for package tooling and trusted-server use.
 | Import | Purpose | Runtime boundary |
 | --- | --- | --- |
 | `@handrail/ai-assistant` | Protocol, conversation runtime/store/catalog, citations, provider-context, approval, transcription, realtime voice, web-search, event-store and sync contracts, tools, presence, retry, and usage APIs | Runtime-neutral core; direct-provider construction and side effects are trusted-server only |
-| `@handrail/ai-assistant/browser` | IndexedDB stores plus generalized image/PDF attachment intake, audio capture, and WebRTC voice helpers | Browser only; no provider credentials or server-side tool execution |
+| `@handrail/ai-assistant/browser` | IndexedDB stores plus generalized image/document attachment intake, audio capture, and WebRTC voice helpers | Browser only; no provider credentials or server-side tool execution |
 | `@handrail/ai-assistant/client` | Application-gateway transport and language-neutral wire types | Browser, React Native, and other Fetch/stream clients |
 | `@handrail/ai-assistant/conformance` | Deterministic protocol and adapter qualification helpers | Tests and CI; no production side effects |
 | `@handrail/ai-assistant/react/headless` | Runtime provider, selectors, and actions with no DOM elements or `react-dom` import | React Native and fully custom React renderers |
@@ -391,8 +391,9 @@ authority after dropped notifications or reconnects.
 ### Attachments
 
 `AttachmentReference` and conversation content represent images and documents
-with provider-neutral metadata. Document support currently begins with
-`application/pdf`. Every `content_ref` is an opaque identifier matching
+with provider-neutral metadata. Protocol document types include PDF, XLS/XLSX,
+CSV, and TSV; a provider and host advertise the exact supported subset. Every
+`content_ref` is an opaque identifier matching
 `AI_RUNTIME_CONTENT_REFERENCE_GRAMMAR`; it is neither a URL nor binary content.
 Durable conversation events retain only bounded metadata such as kind, media
 type, byte size, dimensions/page count, and the opaque reference. Binary image
@@ -404,18 +405,27 @@ revocation, and retention. It must apply the exported MIME, byte, and per-reques
 count limits before upload and again at trusted resolution. `AttachmentUploader`
 adds bounded concurrency, progress reporting, retry of explicitly retryable
 failures, and cancellation. Browser helpers include `intakeFileInputImages`,
-`intakeDroppedImages`, `intakeClipboardImages`, `intakeFileInputPdfs`, and
-`intakeDroppedPdfs`; they validate and fingerprint selections without turning
+`intakeDroppedImages`, `intakeClipboardImages`, `intakeFileInputDocuments`, and
+`intakeDroppedDocuments`; the earlier PDF-specific names remain compatibility
+aliases. These helpers validate and fingerprint selections without turning
 local files into durable conversation data.
+
+Later reuse is a host-domain operation, not permission carried by an attachment
+reference. A durable host may retain the authorized binary behind the opaque
+attachment ID and expose tools such as “attach this upload to that record.” The
+tool must reauthorize the source conversation and destination record, require
+the product's normal confirmation policy, and copy through host storage. SDK
+staging is intentionally temporary and must not be treated as durable record
+storage or as authority to reuse a file.
 
 Document behavior is negotiated, never inferred from an adapter class, method,
 or UI control. Inspect `ProviderModelCapabilities` and its `document_input`
 field, the matching transport capability, MIME list, count/byte bounds, and
-`requires_host_resolution` before enabling PDF submission.
+`requires_host_resolution` before enabling document submission.
 
-| Adapter | Current PDF/document behavior | Provider-context compaction |
+| Adapter | Current file-input behavior | Provider-context compaction |
 | --- | --- | --- |
-| OpenAI | Supported only when `OpenAIProviderAdapterOptions.document_input` explicitly configures `application/pdf` and a trusted host supplies `resolve_document_reference`; otherwise unsupported | Supported only when both injected measurement and compaction operations are configured |
+| OpenAI | Supports the explicitly configured protocol document MIME subset when a trusted host supplies `resolve_document_reference`; otherwise unsupported | Supported only when both injected measurement and compaction operations are configured |
 | Anthropic | Explicitly unsupported by the built-in adapter | Explicitly unsupported |
 | Gemini | Explicitly unsupported by the built-in adapter | Explicitly unsupported |
 | xAI | Explicitly unsupported by the built-in adapter | Explicitly unsupported |
@@ -428,7 +438,7 @@ presence.
 #### `imageIntake` to `attachmentIntake` migration
 
 The React composer migration is source-compatible. Use `attachmentIntake` for
-generalized image/PDF selection. When both options are supplied,
+generalized image/document selection. When both options are supplied,
 `attachmentIntake` takes precedence. When `attachmentIntake` is omitted, the
 existing image-only `imageIntake` behavior remains available; no immediate
 versioned migration is required. The checked

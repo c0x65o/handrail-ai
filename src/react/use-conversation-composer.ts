@@ -68,7 +68,7 @@ export interface ConversationComposerImageIntakeOptions {
 }
 
 export interface ConversationComposerAttachmentIntakeOptions {
-  /** Defaults to every protocol image MIME type and application/pdf. */
+  /** Defaults to every protocol image and document MIME type. */
   readonly acceptedMediaTypes?: readonly AttachmentMimeType[];
   /** Per-kind byte limits, bounded by the protocol maxima. */
   readonly maxFileBytes?: Readonly<Partial<Record<AttachmentUploadKind, number>>>;
@@ -100,7 +100,7 @@ export interface UseConversationComposerOptions<TRequest = undefined> {
   /** Overrides the provider store identity for lifecycle switching. */
   readonly conversationId?: ConversationId;
   /**
-   * Opts into mixed image/PDF intake. When present, this option takes precedence
+   * Opts into mixed image/document intake. When present, this option takes precedence
    * over imageIntake, including when both are supplied.
    */
   readonly attachmentIntake?: ConversationComposerAttachmentIntakeOptions;
@@ -912,7 +912,7 @@ export function useConversationComposer<TRequest = undefined>(
       setOperationErrors([{
         source: "send",
         code: "send_failed",
-        message: "The message could not be sent.",
+        message: "The message could not be sent. Check your connection and try again.",
         retryable: true,
       }]);
       return null;

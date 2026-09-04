@@ -80,8 +80,7 @@ qualification-source reductions, not a production retirement claim: the
 legacy selector and server path remain available until the immutable 0.2
 artifact is pinned and the observation gates close.
 
-The checked-in Mills manifest remains on `@handrail/ai` 0.1.91 while the 0.2
-candidate is tested from a local package. It must move to
-`@handrail/ai-assistant` only with the real reviewed 0.2 commit SHA and matching
-lockfile metadata. The conformance checker rejects aliasing the old artifact
-under the new name.
+The checked-in Mills manifest and imports now use canonical
+`@handrail/ai-assistant`, pinned to the reviewed 0.2.1 commit with matching
+lockfile metadata. The UI repair described in the rollout qualification record
+must receive its own reviewed immutable SHA before Mills advances its pin.

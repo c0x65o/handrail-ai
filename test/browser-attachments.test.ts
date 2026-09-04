@@ -4,11 +4,13 @@ import {
   BrowserImageIntakeValidationError,
   BrowserPdfIntakeValidationError,
   fingerprintBrowserImage,
+  fingerprintBrowserDocument,
   fingerprintBrowserPdf,
   intakeClipboardImages,
   intakeDroppedImages,
   intakeDroppedPdfs,
   intakeFileInputImages,
+  intakeFileInputDocuments,
   intakeFileInputPdfs,
   type BrowserImageIntakeOptions,
   type BrowserPdfIntakeOptions,
@@ -355,6 +357,24 @@ describe("browser image intake", () => {
 });
 
 describe("browser PDF intake", () => {
+  it("accepts spreadsheet documents through the generic document API", () => {
+    const spreadsheetType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" as const;
+    const sheet = fakeFile("adjustments.xlsx", spreadsheetType, 120);
+    const result = intakeFileInputDocuments([sheet], {
+      acceptedMediaTypes: [spreadsheetType],
+      maxFileBytes: 1_000,
+      maxSelectionCount: 2,
+    });
+    expect(fingerprintBrowserDocument(sheet)).toMatch(/^browser-pdf:/);
+    expect(result.rejections).toEqual([]);
+    expect(result.selections[0]).toMatchObject({
+      kind: "document",
+      filename: "adjustments.xlsx",
+      mediaType: spreadsheetType,
+      byteSize: 120,
+    });
+  });
+
   it("accepts File and Blob sources without reading bytes and derives stable opaque identities", () => {
     const file = fakeFile("quarterly report.pdf", "application/pdf", 120, {
       lastModified: 123,

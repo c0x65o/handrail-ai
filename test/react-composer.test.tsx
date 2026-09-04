@@ -289,7 +289,7 @@ describe("useConversationComposer", () => {
     }), { wrapper: wrapper(runtime) });
 
     expect(result.current.getFileInputProps().accept).toBe(
-      "image/jpeg,image/png,image/gif,image/webp,application/pdf",
+      "image/jpeg,image/png,image/gif,image/webp,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv,text/tab-separated-values",
     );
     const pickedPdf = file("picked.pdf", "application/pdf", "pdf");
     const pickedImage = file("picked.png", "image/png", "image");
