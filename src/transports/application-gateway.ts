@@ -138,6 +138,7 @@ type GatewayStreamMessage<TEvent> =
   | { readonly type: "terminal"; readonly result: TurnObservationResult };
 
 const encoder = new TextEncoder();
+const GATEWAY_STREAM_HEARTBEAT_MILLISECONDS = 2_000;
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 const EMPTY_CHECKPOINT: TurnResumePoint = {
   lastAppliedEventId: null,
@@ -198,7 +199,20 @@ function publicFailure(error: unknown): Response {
       { domain: "approval_proposals", code: error.code },
     );
   }
-  return json({ ok: false, error: { code: "forbidden", message: "The request is not authorized.", retryable: false } }, 403);
+  return failure({
+    code: "unavailable",
+    message: "The application gateway is temporarily unavailable.",
+    retryable: true,
+  });
+}
+
+function authorizationFailure(error: unknown): Response {
+  if (error instanceof Response) return error;
+  return failure({
+    code: "forbidden",
+    message: "The request is not authorized.",
+    retryable: false,
+  });
 }
 
 async function body<T>(request: Request, maximumBytes: number): Promise<T> {
@@ -219,6 +233,15 @@ function sse<TEvent>(
         const prefix = id ? `id: ${id}\n` : "";
         controller.enqueue(encoder.encode(`${prefix}event: ${message.type}\ndata: ${JSON.stringify(message)}\n\n`));
       };
+      const heartbeat = globalThis.setInterval(() => {
+        try {
+          // SSE comments are ignored by clients but keep ingress/proxy idle
+          // timers from severing a turn while a model or tool is working.
+          controller.enqueue(encoder.encode(": keepalive\n\n"));
+        } catch {
+          globalThis.clearInterval(heartbeat);
+        }
+      }, GATEWAY_STREAM_HEARTBEAT_MILLISECONDS);
       try {
         if (started) send(started);
         for await (const event of observation.events) {
@@ -229,6 +252,8 @@ function sse<TEvent>(
         controller.close();
       } catch (error) {
         controller.error(error);
+      } finally {
+        globalThis.clearInterval(heartbeat);
       }
     },
     cancel() { observation.disconnect(); },
@@ -347,7 +372,12 @@ export function createApplicationGateway<TEvent, TRequest, TContext extends Appl
             action !== "attachments" && request.method !== "POST")) {
           return new Response(null, { status: 405, headers: { allow: action === "capabilities" ? "GET" : "POST" } });
         }
-        const authorizationContext = await options.authorize(request, action);
+        let authorizationContext: TContext;
+        try {
+          authorizationContext = await options.authorize(request, action);
+        } catch (error) {
+          return authorizationFailure(error);
+        }
         if (action === "capabilities") {
           return json({ ok: true, value: capabilitiesFor(await resolveTransport(authorizationContext)) });
         }

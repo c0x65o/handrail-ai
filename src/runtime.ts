@@ -1347,6 +1347,41 @@ export async function createConversationRuntime<TRequest>(
     return true;
   };
 
+  const waitForTransportTurnId = (
+    turnId: ConversationTurnId,
+    signal: AbortSignal,
+  ): Promise<string | null> => new Promise((resolve, reject) => {
+    let settled = false;
+    let unsubscribe = (): void => undefined;
+    const finish = (value: string | null, error?: unknown): void => {
+      if (settled) return;
+      settled = true;
+      unsubscribe();
+      signal.removeEventListener("abort", aborted);
+      if (error !== undefined) reject(error);
+      else resolve(value);
+    };
+    const aborted = (): void => finish(null, signal.reason ?? new ConversationRuntimeDestroyedError());
+    const inspect = (): void => {
+      const transportTurnId = protocolByTurn.get(turnId)?.transportTurnId;
+      if (transportTurnId !== null && transportTurnId !== undefined) {
+        finish(transportTurnId);
+        return;
+      }
+      const turn = store.getSnapshot().turns.find((candidate) => candidate.turn_id === turnId);
+      if (turn === undefined || isTerminalTurnStatus(turn.status)) finish(null);
+    };
+    if (signal.aborted) {
+      aborted();
+      return;
+    }
+    signal.addEventListener("abort", aborted, { once: true });
+    const stopSubscription = store.subscribe(inspect);
+    unsubscribe = stopSubscription;
+    if (settled) stopSubscription();
+    inspect();
+  });
+
   const cancelTurn = (
     turnId: ConversationTurnId,
     reason: ConversationTurnCancellationReason,
@@ -1402,11 +1437,6 @@ export async function createConversationRuntime<TRequest>(
             false,
           );
         }
-        return cancellationResult(turnId, reason, "failed", true, {
-          code: "missing_transport_turn_id",
-          message: "The active turn has no durable transport identity",
-          retryable: true,
-        });
       }
 
       const capability = options.transport.capabilities.authoritativeCancellation;
@@ -1431,8 +1461,12 @@ export async function createConversationRuntime<TRequest>(
         mutationId,
         clientSource(),
       )]);
-      if (!activeObservations.has(turnId)) {
-        retryControllers.get(turnId)?.abort(new CancellationRequestedError());
+      let transportTurnId = protocol?.transportTurnId;
+      if (transportTurnId === null || transportTurnId === undefined) {
+        transportTurnId = await waitForTransportTurnId(turnId, controller.signal);
+        if (transportTurnId === null) {
+          return cancellationResult(turnId, reason, "already_terminal", false);
+        }
       }
 
       let cancelled;
@@ -1440,7 +1474,7 @@ export async function createConversationRuntime<TRequest>(
         cancelled = await raceWithAbort(
           capability.capability.cancelTurn({
             conversationId: options.conversationId,
-            turnId: protocol.transportTurnId,
+            turnId: transportTurnId,
             mutationId,
             idempotencyKey,
             reason,

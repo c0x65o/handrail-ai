@@ -662,6 +662,14 @@ export function useConversationComposer<TRequest = undefined>(
   const updateDraft = useCallback((nextDraft: string): void => {
     draftRef.current = nextDraft;
     setDraftState(nextDraft);
+    // A send/cancel failure describes the previous attempt. Once the user
+    // edits the draft it is no longer actionable and must not linger beside a
+    // new message (intake errors remain until the next intake operation).
+    setOperationErrors((current) => current.some(
+      (error) => error.source === "send" || error.source === "cancel",
+    ) ? current.filter(
+        (error) => error.source !== "send" && error.source !== "cancel",
+      ) : current);
     presence?.noteActivity();
     if (nextDraft.length === 0) presence?.stopTyping("explicit");
     else presence?.setTyping(true);
@@ -942,12 +950,16 @@ export function useConversationComposer<TRequest = undefined>(
       event.metaKey ||
       composing.current ||
       nativeEvent.isComposing ||
-      nativeEvent.keyCode === 229 ||
-      !canSend
+      nativeEvent.keyCode === 229
     ) {
       return;
     }
+    // In send-on-Enter mode, plain Enter has one stable meaning. If a turn is
+    // already active (or the draft is otherwise ineligible), swallow it
+    // instead of unexpectedly inserting a newline. Shift+Enter remains the
+    // explicit newline gesture.
     event.preventDefault();
+    if (!canSend) return;
     void submit();
   }, [canSend, enterBehavior, submit]);
 

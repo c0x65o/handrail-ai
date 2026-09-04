@@ -198,6 +198,11 @@ describe("useConversationComposer", () => {
     });
     expect(presence.stopTyping).toHaveBeenCalledWith("send");
 
+    const ineligible = keyEvent();
+    act(() => result.current.getTextareaProps().onKeyDown(ineligible as never));
+    expect(ineligible.preventDefault).toHaveBeenCalledOnce();
+    expect(sendMessage).toHaveBeenCalledOnce();
+
     act(() => result.current.getTextareaProps().onBlur());
     expect(presence.stopTyping).toHaveBeenCalledWith("blur");
     await expect(result.current.cancel()).resolves.toBe(true);
@@ -606,6 +611,29 @@ describe("useConversationComposer", () => {
     expect(result.current.draft).toBe("");
     expect(result.current.attachments).toEqual([]);
     expect(urls.revoked).toEqual(["blob:composer-1"]);
+  });
+
+  it("clears stale send errors when the user edits the retained draft", async () => {
+    const { runtime, sendMessage } = fakeRuntime<undefined>();
+    sendMessage.mockResolvedValueOnce({
+      ...completed("failed"),
+      error: { code: "provider_failed", message: "Try again.", retryable: true },
+    });
+    const uploader = immediateUploader();
+    const { result } = renderHook(() => useConversationComposer({
+      uploader,
+    }), { wrapper: wrapper(runtime) });
+
+    act(() => result.current.setDraft("first attempt"));
+    await act(() => result.current.submit());
+    expect(result.current.errors).toContainEqual(expect.objectContaining({
+      source: "send",
+      code: "provider_failed",
+    }));
+
+    act(() => result.current.setDraft("revised attempt"));
+    expect(result.current.errors).toEqual([]);
+    expect(result.current.draft).toBe("revised attempt");
   });
 
   it("cleans up previews and typing across conversation switches and unmount", async () => {

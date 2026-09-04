@@ -336,6 +336,51 @@ describe("ConversationRuntime cancellation", () => {
     });
   });
 
+  it("waits for a transport handle when cancellation wins the start race", async () => {
+    let releaseStart!: () => void;
+    const startGate = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    const observation = new ControlledObservation([started()]);
+    const transport = new TestTransport(async () => ({
+      ok: true,
+      value: { status: "cancellation_requested" },
+    }));
+    vi.spyOn(transport, "startTurn").mockImplementation(async (input) => {
+      await startGate;
+      return {
+        ok: true,
+        value: {
+          conversationId: input.conversationId,
+          turnId: "remote-turn",
+          mutationId: input.mutationId,
+          observation,
+        },
+      } satisfies TransportResult<TurnHandle<unknown>>;
+    });
+    const { runtime } = await runtimeFor(transport);
+    const sending = runtime.sendMessage({ content: "Cancel while starting", request });
+    const turnId = await activeTurnId(runtime);
+
+    const cancelling = runtime.cancelTurn(turnId, "user");
+    await Promise.resolve();
+    expect(transport.cancellationInputs).toHaveLength(0);
+
+    releaseStart();
+    await vi.waitFor(() => expect(transport.cancellationInputs).toHaveLength(1));
+    await expect(cancelling).resolves.toMatchObject({
+      status: "cancellation_requested",
+      remoteMayStillBeRunning: true,
+    });
+    expect(transport.cancellationInputs[0]?.turnId).toBe("remote-turn");
+
+    observation.finish(cancelled(), {
+      status: "cancelled",
+      checkpoint: checkpoint(cancelled()),
+    });
+    await expect(sending).resolves.toMatchObject({ status: "cancelled" });
+  });
+
   it("keeps full canonical provider input when direct provider context is unsupported", async () => {
     const callbackAccess = vi.fn();
     const providerContext = new Proxy(

@@ -29,6 +29,76 @@ function point(event: Event): TurnResumePoint {
 }
 
 describe("application-owned gateway transport", () => {
+  it("keeps a quiet turn stream alive while the provider is working", async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const gateway = createApplicationGateway<Event, { prompt: string }, { principalId: string }>({
+      transport: {
+        capabilities: {
+          authoritativeCancellation: { supported: false },
+          documentInput: { supported: false }, attachmentUpload: { supported: false },
+          presence: { supported: false }, synchronization: { supported: false },
+        },
+        async startTurn(input) {
+          return { ok: true as const, value: {
+            conversationId: input.conversationId,
+            turnId: input.conversationTurnId,
+            mutationId: input.mutationId,
+            observation: {
+              events: {
+                [Symbol.asyncIterator]() {
+                  return {
+                    async next() {
+                      await pending;
+                      return { done: true as const, value: undefined };
+                    },
+                  };
+                },
+              },
+              result: pending.then(() => ({
+                status: "completed" as const,
+                checkpoint: {
+                  lastAppliedEventId: null,
+                  lastAppliedCursor: null,
+                  lastAppliedRevision: null,
+                },
+              })),
+              disconnect: release,
+            },
+          } };
+        },
+        async resumeTurn() { return { ok: true as const, value: observation([]) }; },
+      },
+      authorize: async () => ({ principalId: "user-1" }),
+      checkpointForEvent: point,
+    });
+
+    try {
+      const response = await gateway.handle(new Request("https://app.test/ai/turns/start", {
+        method: "POST",
+        body: JSON.stringify({
+          conversationId: "conversation-1",
+          conversationTurnId: "turn-1",
+          mutationId: "mutation-1",
+          idempotencyKey: "start-1",
+          request: { prompt: "hello" },
+        }),
+      }));
+      const reader = response.body!.getReader();
+      const first = await reader.read();
+      expect(new TextDecoder().decode(first.value)).toContain("event: started");
+
+      const heartbeat = reader.read();
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(new TextDecoder().decode((await heartbeat).value)).toBe(": keepalive\n\n");
+      await reader.cancel();
+    } finally {
+      release();
+      vi.useRealTimers();
+    }
+  });
+
   it("diagnoses network failures from typed resource calls", async () => {
     const diagnostics: import("../src/index.js").AiDiagnosticEvent[] = [];
     const failure = new Error("network unavailable");
@@ -229,6 +299,48 @@ describe("application-owned gateway transport", () => {
     const response = await gateway.handle(new Request("https://app.test/ai/capabilities"));
     expect(response.status).toBe(403);
     expect(await response.text()).not.toContain("secret");
+  });
+
+  it("reports unexpected transport failures as retryable unavailability", async () => {
+    const gateway = createApplicationGateway<Event, unknown, { principalId: string }>({
+      transport: {
+        capabilities: {
+          authoritativeCancellation: { supported: false },
+          documentInput: { supported: false },
+          attachmentUpload: { supported: false },
+          presence: { supported: false },
+          synchronization: { supported: false },
+        },
+        async startTurn() {
+          throw new Error("private database failure");
+        },
+        async resumeTurn() {
+          throw new Error("private database failure");
+        },
+      },
+      authorize: async () => ({ principalId: "server-user" }),
+      checkpointForEvent: point,
+    });
+    const response = await gateway.handle(new Request("https://app.test/ai/turns/start", {
+      method: "POST",
+      body: JSON.stringify({
+        conversationId: "conversation-1",
+        conversationTurnId: "turn-1",
+        mutationId: "mutation-1",
+        idempotencyKey: "start-1",
+        request: {},
+      }),
+    }));
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      ok: false,
+      error: {
+        code: "unavailable",
+        message: "The application gateway is temporarily unavailable.",
+        retryable: true,
+      },
+    });
   });
 
   it("preserves normalized resource error semantics without exposing native failures", async () => {
