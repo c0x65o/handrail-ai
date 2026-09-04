@@ -124,6 +124,20 @@ describe("BoundedToolExecutor", () => {
     assertProtocolResult(output, tool);
   });
 
+  it("gives long-running tools the trusted host activity reporter", async () => {
+    const reportActivity = vi.fn();
+    const applicationExecutor = vi.fn<ApplicationToolExecutor<TestContext>>(async (_arguments, execution) => {
+      await execution.reportActivity?.({ summary: "Reviewing revenue accounts",
+        progress: { completed: 18, total: 43, unit: "products" } });
+      return { updated: 18 };
+    });
+    const { bounded, discoveredTools, tool } = setup(applicationExecutor);
+    await bounded.execute({ call: { tool_call_id: "call_progress", name: tool.name,
+      arguments: { query: "revenue" } }, discoveredTools, applicationContext: context, reportActivity });
+    expect(reportActivity).toHaveBeenCalledWith({ summary: "Reviewing revenue accounts",
+      progress: { completed: 18, total: 43, unit: "products" } });
+  });
+
   it("normalizes and stably deduplicates an explicit trusted citation projection", async () => {
     const source = {
       source_id: "source_weather",

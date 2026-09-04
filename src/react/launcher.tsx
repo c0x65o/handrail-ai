@@ -22,6 +22,7 @@ import {
   type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
+import type { ConversationActivityProgress } from "../conversation/activity.js";
 
 export type ChatLauncherConnectionStatus =
   | "connecting"
@@ -31,6 +32,8 @@ export type ChatLauncherConnectionStatus =
 export type ChatLauncherTurnStatus = "idle" | "busy" | "completed" | "error";
 
 export interface ChatLauncherState {
+  activityProgress?: ConversationActivityProgress;
+  activitySummary?: string;
   busy: boolean;
   connectionStatus?: ChatLauncherConnectionStatus;
   error: boolean;
@@ -166,6 +169,9 @@ function cycleFocus(content: HTMLElement, backwards: boolean): void {
 
 function stateData(state: ChatLauncherState) {
   return {
+    "data-activity-completed": state.activityProgress?.completed,
+    "data-activity-total": state.activityProgress?.total,
+    "data-activity-unit": state.activityProgress?.unit,
     "data-busy": state.busy ? "true" : "false",
     "data-connection-status": state.connectionStatus,
     "data-error": state.error ? "true" : "false",
@@ -176,6 +182,8 @@ function stateData(state: ChatLauncherState) {
 }
 
 export interface ChatLauncherRootProps {
+  activityProgress?: ConversationActivityProgress;
+  activitySummary?: string;
   children?: ReactNode;
   connectionStatus?: ChatLauncherConnectionStatus;
   defaultOpen?: boolean;
@@ -190,6 +198,8 @@ export interface ChatLauncherRootProps {
 }
 
 export function ChatLauncherRoot({
+  activityProgress,
+  activitySummary,
   children,
   connectionStatus,
   defaultOpen = false,
@@ -284,6 +294,8 @@ export function ChatLauncherRoot({
     : 0;
   const value = useMemo<LauncherContextValue>(
     () => ({
+      ...(activityProgress === undefined ? {} : { activityProgress }),
+      ...(activitySummary === undefined ? {} : { activitySummary }),
       busy: connectionStatus === "connecting" || turnStatus === "busy",
       ...(connectionStatus === undefined ? {} : { connectionStatus }),
       descriptionId: `handrail-chat-launcher-description-${reactId}`,
@@ -298,6 +310,8 @@ export function ChatLauncherRoot({
     }),
     [
       connectionStatus,
+      activityProgress,
+      activitySummary,
       generatedPanelId,
       instance,
       modal,
@@ -670,6 +684,8 @@ export interface ChatLauncherBadgeProps
 
 function publicState(context: LauncherContextValue): ChatLauncherState {
   return {
+    ...(context.activityProgress === undefined ? {} : { activityProgress: context.activityProgress }),
+    ...(context.activitySummary === undefined ? {} : { activitySummary: context.activitySummary }),
     busy: context.busy,
     ...(context.connectionStatus === undefined
       ? {}
@@ -720,6 +736,12 @@ function statusText(state: ChatLauncherState): string {
       ? "No unread messages"
       : `${state.unreadCount} unread ${state.unreadCount === 1 ? "message" : "messages"}`,
   ];
+  if (state.activitySummary) {
+    const progress = state.activityProgress;
+    parts.push(progress
+      ? `${state.activitySummary}. ${progress.completed} of ${progress.total}${progress.unit ? ` ${progress.unit}` : ""}`
+      : state.activitySummary);
+  }
   if (state.connectionStatus) parts.push(`Connection ${state.connectionStatus}`);
   if (state.turnStatus) parts.push(`Turn ${state.turnStatus}`);
   return parts.join(". ");

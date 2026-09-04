@@ -14,11 +14,13 @@ import { createApplicationGatewayExpressMiddleware, type ExpressLikeNext,
 import { createDurableApplicationTransport, type DurableApplicationTransport } from "../transports/durable.js";
 import type { ConversationCatalog } from "../conversation/catalog.js";
 import { createInMemoryLiveConversationActivityDelivery, type DurableConversationActivityStore,
+  createConversationActivityReporter,
   type LiveConversationActivityDelivery, type LiveConversationActivityPubSub } from "../conversation/activity.js";
 import { ApprovalProposalStoreError, type ApprovalProposalStore } from "../conversation/approval-proposal-store.js";
 import type { PostgresAssistantPersistence, PostgresAssistantPersistenceBundle } from "../postgres/index.js";
-import { createAiApplication, type AiApplication } from "./application.js";
-import type { ApplicationToolExecutor, ApplicationToolPolicy, BoundedToolExecutionOutcome } from "../tools/executor.js";
+import { createAiApplication, type AiApplication, type ApplicationApprovalPolicy } from "./application.js";
+import type { ApplicationToolActivityUpdate, ApplicationToolExecutor, ApplicationToolPolicy,
+  BoundedToolExecutionOutcome } from "../tools/executor.js";
 import type { ToolPlugin } from "../tools/plugin.js";
 import type { ResponseToolCallEvent, ToolDefinition } from "../protocol.js";
 import type { AIRuntimeUsageConfiguration } from "./usage-control.js";
@@ -54,7 +56,8 @@ export interface HandrailAssistantProvider<TContext extends HandrailAssistantAut
     readonly tools: {
       readonly definitions: readonly ToolDefinition[];
       execute(call: Pick<ResponseToolCallEvent, "tool_call_id" | "name" | "arguments">,
-        signal: AbortSignal): Promise<BoundedToolExecutionOutcome>;
+        signal: AbortSignal, location?: { readonly conversationId: string; readonly turnId: string }):
+        Promise<BoundedToolExecutionOutcome>;
       awaitApproval(input: { readonly conversationId: string; readonly turnId: string;
         readonly call: Pick<ResponseToolCallEvent, "tool_call_id" | "name" | "arguments">;
         readonly signal: AbortSignal }): Promise<BoundedToolExecutionOutcome>;
@@ -80,6 +83,17 @@ export interface CreateHandrailAssistantOptions<TContext extends HandrailAssista
   };
   readonly tools?: readonly ToolPlugin<ApplicationToolExecutor<TContext>, TContext, TContext, TContext>[];
   readonly toolPolicy?: ApplicationToolPolicy<TContext>;
+  /** Project-aware confirmation policy for tools declared with approval mode `policy`. */
+  readonly approvalPolicy?: ApplicationApprovalPolicy<TContext>;
+  /** Supplies the first safe summary shown when a tool begins. Long-running tools can report later progress. */
+  readonly activityForToolCall?: (input: {
+    readonly context: TContext;
+    readonly conversationId: string;
+    readonly turnId: string;
+    readonly toolCallId: string;
+    readonly toolName: string;
+    readonly arguments: JsonObject;
+  }) => ApplicationToolActivityUpdate | null | Promise<ApplicationToolActivityUpdate | null>;
   readonly diagnostics?: AiDiagnosticSink;
   readonly workerId?: string;
   readonly toolLoopLimits?: Partial<ToolLoopLimits>;
@@ -317,6 +331,7 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
       application = createAiApplication({
         plugins: options.tools ?? [], installContext: context,
         policy: options.toolPolicy ?? (() => ({ outcome: "allow" })),
+        ...(options.approvalPolicy === undefined ? {} : { approvalPolicy: options.approvalPolicy }),
         toolExecutionLedger: bundle.toolLedger,
         approvalCoordinator: createApprovalExecutionCoordinator<TContext>({
           proposalStore: approvalStoreFor(context), eventStore: bundle.events,
@@ -340,13 +355,48 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
       transport = applicationFor(context).then((application) => {
         const bundle = bundleFor(context);
         const definitions = application.discover({ context });
+        const activityReporter = createConversationActivityReporter({
+          store: bundle.activity,
+          delivery: activityDeliveryFor(context),
+        });
+        const reportActivity = async (
+          conversationId: string,
+          update: ApplicationToolActivityUpdate,
+        ): Promise<void> => {
+          try {
+            await activityReporter.report({ conversationId, summary: update.summary,
+              ...(update.progress === undefined ? {} : { progress: update.progress }) });
+          } catch (cause) {
+            emitAiDiagnostic(options.diagnostics, { domain: "activity", operation: "tool_progress",
+              phase: "failed", conversationId, code: "activity_update_failed", retryable: true, cause });
+          }
+        };
         return options.provider.createTransport({
           context, persistence: bundle, limits, instructions,
           tools: Object.freeze({
             definitions,
-            execute: (call, signal) => application.executeTool({ discovery: { context },
-              applicationContext: context, call, signal }),
+            async execute(call, signal, location) {
+              if (location && options.activityForToolCall) {
+                try {
+                  const initial = await options.activityForToolCall({ context,
+                    conversationId: location.conversationId, turnId: location.turnId,
+                    toolCallId: call.tool_call_id, toolName: call.name, arguments: call.arguments });
+                  if (initial) await reportActivity(location.conversationId, initial);
+                } catch (cause) {
+                  emitAiDiagnostic(options.diagnostics, { domain: "activity", operation: "tool_summary",
+                    phase: "failed", conversationId: location.conversationId, turnId: location.turnId,
+                    toolName: call.name, toolCallId: call.tool_call_id,
+                    code: "activity_summary_failed", retryable: false, cause });
+                }
+              }
+              return application.executeTool({ discovery: { context }, applicationContext: context, call, signal,
+                ...(location === undefined ? {} : {
+                  reportActivity: (update: ApplicationToolActivityUpdate) =>
+                    reportActivity(location.conversationId, update),
+                }) });
+            },
             async awaitApproval({ conversationId, turnId, call, signal }) {
+              await reportActivity(conversationId, { summary: "Waiting for approval to continue" });
               const rawArguments = call.arguments as JsonObject;
               const reference = argumentReference(rawArguments);
               const identity = digest(`${conversationId}\u001f${turnId}\u001f${call.tool_call_id}\u001f${call.name}\u001f${reference}`);
@@ -370,12 +420,14 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
                     argumentBinding: { type: "opaque_reference", argumentReference: reference as never },
                     attribution: SYSTEM_ATTRIBUTION };
                   return application.executeTool({ discovery: { context }, applicationContext: context, call, signal,
+                    reportActivity: (update: ApplicationToolActivityUpdate) => reportActivity(conversationId, update),
                     approval: { ...approval, conversationId: conversationId as never, turnId: turnId as never } });
                 }
                 if (retained.status === "rejected") return approvalError(call, "Tool execution was rejected.");
                 if (retained.status === "expired") return approvalError(call, "Tool approval expired.");
                 if (retained.status === "executed" || retained.status === "executing") {
                   return application.executeTool({ discovery: { context }, applicationContext: context, call, signal,
+                    reportActivity: (update: ApplicationToolActivityUpdate) => reportActivity(conversationId, update),
                     approval: { permissionContext: context, proposalId,
                       expectedProposalVersion: 2, executionId: `execute-${identity.slice(0, 48)}`,
                       argumentBinding: { type: "opaque_reference", argumentReference: reference as never },

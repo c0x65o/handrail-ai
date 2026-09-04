@@ -20,6 +20,7 @@ import type {
 import type { NormalizedUsageReceipt } from "../usage.js";
 import { BoundedToolExecutor } from "./executor.js";
 import type { ApprovalExecutionResume } from "./approval-execution.js";
+import type { ApplicationToolActivityReporter } from "./executor.js";
 
 export interface ToolLoopLimits {
   readonly maxIterations: number;
@@ -88,6 +89,8 @@ export interface RunToolLoopOptions<
   readonly collectUsageReceipts?: (
     result: ConversationRuntimeTurnResult,
   ) => readonly NormalizedUsageReceipt[] | Promise<readonly NormalizedUsageReceipt[]>;
+  /** Shared status sink used by tools that report progress during this run. */
+  readonly reportActivity?: ApplicationToolActivityReporter;
 }
 
 interface ToolLoopResultBase {
@@ -400,6 +403,7 @@ export async function runToolLoop<
           discoveredTools: options.discoveredTools,
           applicationContext: options.applicationContext,
           signal: controller.signal,
+          ...(options.reportActivity === undefined ? {} : { reportActivity: options.reportActivity }),
           ...(approval === undefined || conversationId === null
             ? {}
             : { approval: {

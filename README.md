@@ -543,6 +543,54 @@ restart/resume idempotent; a failed execution can be explicitly reclaimed
 through a new version. Expired, mismatched, stale, rejected, or unauthorized
 proposals cannot execute.
 
+Approval and authorization are separate decisions. A plugin declares each
+tool as `never`, `always`, or `policy`: `never` adds no plugin confirmation
+requirement, `always` always adds one, and `policy` calls the trusted host's
+`approvalPolicy`. The callback receives the authenticated application context,
+so one project can require confirmation while another can allow the same
+authorized bulk tool to run directly. The host execution policy can still deny
+or require confirmation for any tool:
+
+```ts
+const assistant = await createHandrailAssistant({
+  // Authentication and role/tenant authorization still belong here.
+  toolPolicy: authorizeToolExecution,
+  approvalPolicy: ({ applicationContext }) =>
+    applicationContext.project.approvalsRequired
+      ? "require_approval"
+      : "allow_without_approval",
+  // ...provider, persistence, tools, and authorization...
+});
+```
+
+Allowing execution without a confirmation pause does not bypass schema
+validation, authorization, bounded execution, the exactly-once tool ledger, or
+durable tool lifecycle evidence. For a bulk mutation, prefer one domain-level
+tool whose transaction and audit semantics cover the reviewed batch instead of
+creating one approval proposal per row.
+
+Long-running tools may publish one current summary through the executor
+context. The SDK stores it in the same protected, cross-device activity index
+used by the launcher and conversation workspace:
+
+```ts
+executor: async (input, context) => {
+  await context.reportActivity?.({
+    summary: "Tracing prior invoice revenue accounts",
+    progress: { completed: 18, total: 43, unit: "products" },
+  });
+  return reconcileRevenue(input);
+}
+```
+
+`activityForToolCall` on `createHandrailAssistant` can provide the initial safe
+summary before a tool has measured its work. Summaries are trimmed and bounded
+to 240 characters; progress is optional and bounded to non-negative completed
+items not exceeding a positive total. The launcher binding exposes the newest
+running `activitySummary` and `activityProgress`, and `ChatLauncherStatus`
+renders them by default. Activity is status UI, not authorization or an audit
+record; durable tool and approval events remain authoritative.
+
 Model output and tool discovery never authorize side effects. The trusted host
 must perform permission checks at proposal reads/decisions and again before
 execution. `ApprovalReviewRoot` and its companion primitives plus

@@ -65,7 +65,8 @@ export function openaiResponses<TContext extends HandrailAssistantAuthorizationC
           return { request_id: iteration === 0 ? turnId : `${turnId}:provider:${iteration}`,
             trace_id: mutationId, attribution: input.context.attribution, correlation_hints: {} };
         },
-        executeTool: async ({ call, signal }) => input.tools.execute(call, signal),
+        executeTool: async ({ conversationId, turnId, call, signal }) =>
+          input.tools.execute(call, signal, { conversationId, turnId }),
         awaitApproval: async ({ conversationId, turnId, call, signal }) => {
           const outcome = await input.tools.awaitApproval({ conversationId, turnId, call, signal });
           return outcome.status === "completed" ? outcome : { status: "completed" as const, result: {

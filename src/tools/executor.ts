@@ -20,6 +20,7 @@ import type {
 import { ToolRegistry, type ToolRegistration } from "./registry.js";
 import type { ToolDiscoveryQuery } from "./registry.js";
 import { emitAiDiagnostic, type AiDiagnosticSink } from "../diagnostics.js";
+import type { ConversationActivityProgress } from "../conversation/activity.js";
 
 export interface ApplicationToolCall {
   readonly tool_call_id: string;
@@ -32,7 +33,18 @@ export interface ApplicationToolExecutorContext<TContext = unknown> {
   readonly definition: ToolDefinition;
   readonly signal: AbortSignal;
   readonly toolCallId: string;
+  /** Publishes bounded, user-visible progress for the current long-running tool. */
+  readonly reportActivity?: ApplicationToolActivityReporter;
 }
+
+export interface ApplicationToolActivityUpdate {
+  readonly summary: string;
+  readonly progress?: ConversationActivityProgress;
+}
+
+export type ApplicationToolActivityReporter = (
+  update: ApplicationToolActivityUpdate,
+) => void | Promise<void>;
 
 export type ApplicationToolContentOutput =
   | JsonValue
@@ -136,6 +148,8 @@ export interface BoundedToolExecutionRequest<
   };
   /** Awaited after authorization and before a previously unseen side effect begins. */
   readonly onExecutionStarted?: () => void | Promise<void>;
+  /** Trusted host bridge to the conversation's shared activity index. */
+  readonly reportActivity?: ApplicationToolActivityReporter;
 }
 
 export type BoundedToolExecutionOutcome =
@@ -891,6 +905,9 @@ export class BoundedToolExecutor<
               definition: registration.definition,
               signal,
               toolCallId,
+              ...(request.reportActivity === undefined
+                ? {}
+                : { reportActivity: request.reportActivity }),
             }))
             .then((output) => normalizeOutput(output, this.#limits, toolCallId));
           void invocation.then(release, release);

@@ -20,7 +20,7 @@ import type { ConversationCatalog, ConversationCatalogDescriptor } from "../conv
 import type { ConversationWorkspaceOpenInput } from "../conversation/workspace.js";
 import { useConversationLauncherBinding, useConversationWorkspaceSnapshot,
   type ConversationActivityReadable, type ConversationWorkspaceReadable } from "../react/workspace.js";
-import type { ChatLauncherConnectionStatus } from "../react/launcher.js";
+import type { ChatLauncherConnectionStatus, ChatLauncherState } from "../react/launcher.js";
 import {
   AttachmentList, ChatRoot, Composer, ErrorList, FileInput, Form, LiveRegion,
   AssistantActivityIndicator, Message, Retry, Stop, StreamStatus, Submit, Textarea, Transcript, TypingIndicator,
@@ -674,6 +674,16 @@ export interface HandrailChatWorkspaceLauncherProps<TRequest, TAuthorizationCont
   readonly onOpenChange?: (open: boolean) => void;
 }
 
+function launcherStatusText(state: ChatLauncherState): string {
+  if (state.error) return "Error";
+  if (!state.busy) return state.unreadCount > 0 ? "Done" : "";
+  if (!state.activitySummary) return "Running";
+  const progress = state.activityProgress;
+  return progress
+    ? `${state.activitySummary} (${progress.completed}/${progress.total}${progress.unit ? ` ${progress.unit}` : ""})`
+    : state.activitySummary;
+}
+
 /** Drop-in launcher whose button reflects every open background conversation. */
 export function HandrailChatWorkspaceLauncher<TRequest, TAuthorizationContext>(
   props: HandrailChatWorkspaceLauncherProps<TRequest, TAuthorizationContext>,
@@ -702,7 +712,7 @@ export function HandrailChatWorkspaceLauncher<TRequest, TAuthorizationContext>(
   };
   return <ChatLauncherRoot {...binding} onOpenChange={handleOpenChange}><ChatLauncherTrigger className="hr-chat__launcher-trigger">
     {trigger ?? "Open chat"}<ChatLauncherStatus className="hr-chat__launcher-status">{(state) =>
-      state.error ? "Error" : state.busy ? "Running" : state.unreadCount > 0 ? "Done" : ""
+      launcherStatusText(state)
     }</ChatLauncherStatus><ChatLauncherBadge className="hr-chat__launcher-badge">{(state) =>
       state.unreadCount > 0 ? state.unreadCount : null
     }</ChatLauncherBadge>
@@ -979,7 +989,8 @@ export function HandrailAssistantLauncher(props: HandrailAssistantLauncherProps)
     presentation: _presentation, uploaderForConversation: _uploaderForConversation,
     attachmentIntake: _attachmentIntake, ...launcher } = props;
   void _endpoint; void _fetch; void _protected; void _diagnostics; void _clientId; void _deviceId; void _loading;
-  void _failure; void _includeStyles; void _onWorkingChange; void _autoTitle; void _presentation; void _uploaderForConversation;
+  void _failure; void _includeStyles; void _onWorkingChange; void _autoTitle; void _presentation;
+  void _uploaderForConversation; void _attachmentIntake;
   const authorizationContext = EMPTY_ASSISTANT_AUTHORIZATION_CONTEXT;
   const approvals = props.approvals === undefined
     ? <StandardGatewayApprovals client={state.client}/>
@@ -1046,7 +1057,7 @@ export function StyledChatLauncher(props: StyledChatLauncherProps): ReactNode {
   void _workspace; void _connectionStatus; void _activity;
   return <ChatLauncherRoot {...binding}><ChatLauncherTrigger className="hr-chat__launcher-trigger">
     {trigger ?? "Open chat"}<ChatLauncherStatus className="hr-chat__launcher-status">{(state) =>
-      state.error ? "Error" : state.busy ? "Running" : state.unreadCount > 0 ? "Done" : ""
+      launcherStatusText(state)
     }</ChatLauncherStatus><ChatLauncherBadge className="hr-chat__launcher-badge">{(state) =>
       state.unreadCount > 0 ? state.unreadCount : null
     }</ChatLauncherBadge>

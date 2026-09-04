@@ -230,13 +230,15 @@ describe("styled React preset", () => {
     const empty = { selectedConversationId: null, runningCount: 0, errorCount: 0,
       unreadCount: 0, threads: [] } as never;
     const activitySnapshot = [{ conversationId: "remote",
-      turnStatus: "running" as const, unread: false }];
+      turnStatus: "running" as const, unread: false,
+      summary: "Tracing invoice revenue accounts",
+      progress: { completed: 18, total: 43, unit: "products" } }];
     const { container } = render(<StyledChatLauncher workspace={{ getSnapshot: () => empty,
       subscribe: () => () => undefined }} activity={{ getSnapshot: () => activitySnapshot,
         subscribe: () => () => undefined }}/>);
     const trigger = container.querySelector<HTMLButtonElement>(".hr-chat__launcher-trigger")!;
     expect(trigger.dataset.turnStatus).toBe("busy");
-    expect(trigger.textContent).toContain("Running");
+    expect(trigger.textContent).toContain("Tracing invoice revenue accounts (18/43 products)");
   });
   it("keeps New available while another conversation is running", async () => {
     const open = vi.fn(async () => ({} as never));

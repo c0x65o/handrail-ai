@@ -169,6 +169,19 @@ describe("ChatLauncher", () => {
       .toBe("3");
   });
 
+  it("shows the current bulk-work summary and progress in the shared launcher status", () => {
+    render(
+      <ChatLauncherRoot activitySummary="Tracing prior invoice revenue accounts"
+        activityProgress={{ completed: 18, total: 43, unit: "products" }} turnStatus="busy">
+        <ChatLauncherStatus data-testid="bulk-status" />
+      </ChatLauncherRoot>,
+    );
+    const status = screen.getByTestId("bulk-status");
+    expect(status.textContent).toContain("Tracing prior invoice revenue accounts. 18 of 43 products");
+    expect(status.dataset.activityCompleted).toBe("18");
+    expect(status.dataset.activityTotal).toBe("43");
+  });
+
   it("dismisses with Escape, restores focus, and supports outside veto/configuration", async () => {
     render(
       <>

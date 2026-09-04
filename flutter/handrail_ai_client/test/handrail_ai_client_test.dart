@@ -193,6 +193,8 @@ void main() {
                 'turnStatus': 'completed',
                 'unread': true,
                 'updatedAt': '2026-01-01T00:00:00.000Z',
+                'summary': 'Validating the monthly P&L',
+                'progress': {'completed': 3, 'total': 4, 'unit': 'steps'},
               },
             ],
           }),
@@ -204,6 +206,10 @@ void main() {
     expect(activity.single.conversationId, 'remote-1');
     expect(activity.single.status, HandrailTurnStatus.completed);
     expect(activity.single.unread, isTrue);
+    expect(activity.single.summary, 'Validating the monthly P&L');
+    expect(activity.single.progress?.completed, 3);
+    expect(activity.single.progress?.total, 4);
+    expect(activity.single.progress?.unit, 'steps');
     client.close();
   });
 

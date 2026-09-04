@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createConversationActivityHttpHandler,
+  createConversationActivityReporter,
   createInMemoryLiveConversationActivityDelivery,
   InMemoryConversationActivityStore,
   PollingConversationActivity,
@@ -23,6 +24,40 @@ describe("conversation activity", () => {
     expect(store.getSnapshot().find((record) => record.conversationId === "remote-a"))
       .toMatchObject({ turnStatus: "error", unread: true });
     expect(changed).toHaveBeenCalledTimes(4);
+  });
+
+  it("publishes one bounded shared summary with optional numeric progress", async () => {
+    let retained: import("../src/index.js").ConversationActivityRecord | null = null;
+    const delivery = createInMemoryLiveConversationActivityDelivery();
+    const subscription = delivery.subscribe();
+    const reporter = createConversationActivityReporter({
+      store: {
+        async list() { return retained ? [retained] : []; },
+        async upsert(record) { retained = record; return record; },
+        async markRead() { return retained; },
+      },
+      delivery,
+      now: () => new Date("2026-09-04T18:00:00.000Z"),
+    });
+    const published = reporter.report({ conversationId: "bulk-revenue",
+      summary: "Tracing prior invoice revenue accounts",
+      progress: { completed: 18, total: 43, unit: "products" } });
+    const envelope = await subscription[Symbol.asyncIterator]().next();
+    await expect(published).resolves.toEqual(expect.objectContaining({
+      conversationId: "bulk-revenue", turnStatus: "running", unread: false,
+      summary: "Tracing prior invoice revenue accounts",
+      progress: { completed: 18, total: 43, unit: "products" },
+    }));
+    expect(envelope.value?.record).toEqual(retained);
+    subscription.close();
+  });
+
+  it("rejects invalid activity summaries and progress", () => {
+    const store = new InMemoryConversationActivityStore();
+    expect(() => store.upsert({ conversationId: "bulk", turnStatus: "running", unread: false,
+      summary: "x".repeat(241) })).toThrow(/summary/u);
+    expect(() => store.upsert({ conversationId: "bulk", turnStatus: "running", unread: false,
+      summary: "Updating", progress: { completed: 4, total: 3 } })).toThrow(/progress/u);
   });
 
   it("loads a server-backed snapshot through the cross-platform polling adapter", async () => {

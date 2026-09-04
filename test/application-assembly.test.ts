@@ -66,6 +66,57 @@ class ToolThenTextTransport implements ConversationTransport<StreamEvent, ChatRe
 }
 
 describe("trusted AI application assembly", () => {
+  it("enforces fixed plugin approval modes without consulting project policy", async () => {
+    const execute = vi.fn<ApplicationToolExecutor>(async () => ({ ok: true }));
+    const tool = (name: string) => ({ definition: { name, description: name,
+      input_schema: { type: "object", properties: {}, additionalProperties: false } }, executor: execute });
+    const plugin = createToolPlugin({ pluginId: "fixed.approvals", version: "1.0.0",
+      displayName: "Fixed approvals", registrations: [tool("fixed.always"), tool("fixed.never")],
+      approvals: [
+        { toolName: "fixed.always", mode: "always", summarize: () => "Always review" },
+        { toolName: "fixed.never", mode: "never", summarize: () => "No plugin review" },
+      ] });
+    const approvalPolicy = vi.fn(() => "allow_without_approval" as const);
+    const app = await createAiApplication({ plugins: [plugin], installContext: undefined,
+      policy: () => ({ outcome: "allow" }), approvalPolicy });
+    const discovery = { context: undefined };
+    await expect(app.executeTool({ call: { tool_call_id: "always", name: "fixed.always", arguments: {} },
+      discovery, applicationContext: {} })).resolves.toMatchObject({ status: "external_approval_required" });
+    await expect(app.executeTool({ call: { tool_call_id: "never", name: "fixed.never", arguments: {} },
+      discovery, applicationContext: {} })).resolves.toMatchObject({ status: "completed" });
+    expect(approvalPolicy).not.toHaveBeenCalled();
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it("separates project approval settings from tool authorization", async () => {
+    type ProjectContext = { readonly projectId: string; readonly requireApprovals: boolean };
+    const execute = vi.fn<ApplicationToolExecutor<ProjectContext>>(async () => ({ updated: true }));
+    const plugin = createToolPlugin<ApplicationToolExecutor<ProjectContext>, undefined, undefined, ProjectContext>({
+      pluginId: "accounting.bulk", version: "1.0.0", displayName: "Bulk accounting",
+      registrations: [{ definition: { name: "accounting.bulk_update", description: "Bulk update",
+        input_schema: { type: "object", properties: {}, additionalProperties: false } }, executor: execute }],
+      approvals: [{ toolName: "accounting.bulk_update", mode: "policy",
+        summarize: () => "Apply the reviewed accounting updates" }],
+    });
+    const approvalPolicy = vi.fn((input: import("../src/server/application.js").ApplicationApprovalPolicyInput<ProjectContext>) =>
+      input.applicationContext.requireApprovals ? "require_approval" as const : "allow_without_approval" as const);
+    const app = await createAiApplication({ plugins: [plugin], installContext: undefined,
+      policy: () => ({ outcome: "allow" }), approvalPolicy });
+    const tools = app.discover({ context: undefined });
+
+    await expect(app.executeTool({ call: { tool_call_id: "bulk-required", name: "accounting.bulk_update",
+      arguments: {} }, discovery: { context: undefined },
+      applicationContext: { projectId: "controlled", requireApprovals: true } }))
+      .resolves.toMatchObject({ status: "external_approval_required" });
+    await expect(app.executeTool({ call: { tool_call_id: "bulk-direct", name: "accounting.bulk_update",
+      arguments: {} }, discovery: { context: undefined },
+      applicationContext: { projectId: "trusted", requireApprovals: false } }))
+      .resolves.toMatchObject({ status: "completed", result: { is_error: false } });
+    expect(tools).toHaveLength(1);
+    expect(execute).toHaveBeenCalledOnce();
+    expect(approvalPolicy).toHaveBeenCalledTimes(2);
+  });
+
   it("installs a plugin once, exposes a data-only catalog, and runs its bounded tool loop", async () => {
     const diagnostics: import("../src/index.js").AiDiagnosticEvent[] = [];
     const execute = vi.fn<ApplicationToolExecutor<{ companyId: string }>>(async ({ id }, context) => ({

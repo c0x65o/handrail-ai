@@ -128,16 +128,39 @@ class HandrailConversationWorkspaceEntry {
   const HandrailConversationWorkspaceEntry(this.state, {this.unread = false});
 }
 
+class HandrailConversationActivityProgress {
+  final int completed;
+  final int total;
+  final String? unit;
+  const HandrailConversationActivityProgress({
+    required this.completed,
+    required this.total,
+    this.unit,
+  });
+  factory HandrailConversationActivityProgress.fromJson(
+    Map<String, Object?> json,
+  ) =>
+      HandrailConversationActivityProgress(
+        completed: json['completed'] as int,
+        total: json['total'] as int,
+        unit: json['unit'] as String?,
+      );
+}
+
 class HandrailConversationActivityRecord {
   final String conversationId;
   final HandrailTurnStatus status;
   final bool unread;
   final DateTime? updatedAt;
+  final String? summary;
+  final HandrailConversationActivityProgress? progress;
   const HandrailConversationActivityRecord({
     required this.conversationId,
     required this.status,
     required this.unread,
     this.updatedAt,
+    this.summary,
+    this.progress,
   });
   factory HandrailConversationActivityRecord.fromJson(
     Map<String, Object?> json,
@@ -154,6 +177,12 @@ class HandrailConversationActivityRecord {
       unread: json['unread'] == true,
       updatedAt: json['updatedAt'] is String
           ? DateTime.parse(json['updatedAt'] as String).toUtc()
+          : null,
+      summary: json['summary'] as String?,
+      progress: json['progress'] is Map
+          ? HandrailConversationActivityProgress.fromJson(
+              Map<String, Object?>.from(json['progress'] as Map),
+            )
           : null,
     );
   }
@@ -261,6 +290,8 @@ class HandrailConversationWorkspace {
       status: current.status,
       unread: false,
       updatedAt: current.updatedAt,
+      summary: current.summary,
+      progress: current.progress,
     );
     _publish();
   }

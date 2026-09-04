@@ -15,6 +15,7 @@ import {
 import {
   BoundedToolExecutor,
   type ApplicationToolExecutor,
+  type ApplicationToolPolicyInput,
   type ApplicationToolPolicy,
   type ApplicationToolPolicyDecision,
   type BoundedToolExecutionOutcome,
@@ -82,6 +83,24 @@ export interface AiApplicationClientCatalog {
   readonly plugins: readonly AiApplicationPublicPlugin[];
 }
 
+export type ApplicationApprovalPolicyDecision =
+  | "require_approval"
+  | "allow_without_approval";
+
+export interface ApplicationApprovalPolicyInput<TApplicationContext>
+  extends ApplicationToolPolicyInput<TApplicationContext> {
+  readonly pluginId: string;
+  readonly configuredMode: "policy";
+}
+
+/**
+ * Chooses whether a policy-controlled tool pauses for human confirmation.
+ * Authorization remains exclusively owned by ApplicationToolPolicy.
+ */
+export type ApplicationApprovalPolicy<TApplicationContext> = (
+  input: ApplicationApprovalPolicyInput<TApplicationContext>,
+) => ApplicationApprovalPolicyDecision | Promise<ApplicationApprovalPolicyDecision>;
+
 export interface CreateAiApplicationOptions<
   TApplicationContext,
   TDiscoveryContext,
@@ -103,6 +122,8 @@ export interface CreateAiApplicationOptions<
   >[];
   readonly installContext: TInstallContext;
   readonly policy: ApplicationToolPolicy<TApplicationContext>;
+  /** Project-aware confirmation policy for plugin tools whose approval mode is `policy`. */
+  readonly approvalPolicy?: ApplicationApprovalPolicy<TApplicationContext>;
   readonly approvalCoordinator?: ApprovalExecutionCoordinator<TApprovalPermissionContext>;
   /** One host-only sink shared by bounded tool and approval execution. */
   readonly diagnostics?: AiDiagnosticSink;
@@ -216,7 +237,25 @@ export async function createAiApplication<
     const host = await options.policy(input);
     if (host.outcome !== "allow") return host;
     const plugin = ownerByTool.get(input.definition.name);
-    return plugin?.policy ? plugin.policy(input) : ({ outcome: "allow" } satisfies ApplicationToolPolicyDecision);
+    const pluginDecision = plugin?.policy
+      ? await plugin.policy(input)
+      : ({ outcome: "allow" } satisfies ApplicationToolPolicyDecision);
+    if (pluginDecision.outcome !== "allow") return pluginDecision;
+    if (plugin === undefined) return { outcome: "allow" };
+    const approval = plugin.approvals.find((item) => item.toolName === input.definition.name);
+    if (approval === undefined || approval.mode === "never") return { outcome: "allow" };
+    if (approval.mode === "always") return { outcome: "external_approval_required" };
+    const decision = await options.approvalPolicy?.({
+      ...input,
+      pluginId: plugin.pluginId,
+      configuredMode: "policy",
+    }) ?? "allow_without_approval";
+    if (decision !== "require_approval" && decision !== "allow_without_approval") {
+      throw new TypeError("Application approval policy returned an invalid decision");
+    }
+    return decision === "require_approval"
+      ? { outcome: "external_approval_required" }
+      : { outcome: "allow" };
   };
   const executor = new BoundedToolExecutor({
     registry,

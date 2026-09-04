@@ -31,6 +31,7 @@ describe("Mills Family checked adapter", () => {
     for await (const registration of source) registrations.push(registration);
     const read = registrations.find((item) => item.definition.name === "get_household")!;
     const action = registrations.find((item) => item.definition.name === "create_task")!;
+    const reportActivity = vi.fn();
     const applicationContext = { session: { userId: "user-1", householdId: "household-1" },
       requestId: "request-1", conversationId: "conversation-1", interaction: "text_chat" as const };
 
@@ -43,7 +44,7 @@ describe("Mills Family checked adapter", () => {
       })] }),
     }));
     await expect(action.executor({}, { applicationContext, definition: action.definition,
-      signal, toolCallId: "action-1" })).resolves.toEqual({ proposalId: "proposal-1" });
+      signal, toolCallId: "action-1", reportActivity })).resolves.toEqual({ proposalId: "proposal-1" });
 
     expect(execute).toHaveBeenCalledWith(expect.objectContaining({
       session: applicationContext.session, requestId: "request-1", conversationId: "conversation-1",
@@ -52,6 +53,7 @@ describe("Mills Family checked adapter", () => {
       proposal: { proposalId: "proposal-1", action: "create_task" },
       applicationContext, toolName: "create_task", toolCallId: "action-1",
     }));
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ reportActivity }));
     expect(plugin.approvals).toEqual([expect.objectContaining({ toolName: "create_task", mode: "never" })]);
     expect(plugin.presentations).toEqual([
       expect.objectContaining({ toolName: "get_household", rendererKey: "mills.household" }),

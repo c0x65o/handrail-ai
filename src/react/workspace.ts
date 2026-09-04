@@ -29,7 +29,7 @@ export function useConversationWorkspaceSnapshot(
 }
 
 export type ConversationLauncherBinding = Pick<ChatLauncherRootProps,
-  "connectionStatus" | "turnStatus" | "unreadCount">;
+  "activityProgress" | "activitySummary" | "connectionStatus" | "turnStatus" | "unreadCount">;
 
 /** Derive launcher button/badge state from every concurrent conversation. */
 export function useConversationLauncherBinding(
@@ -47,7 +47,11 @@ export function useConversationLauncherBinding(
   const runningCount = snapshot.runningCount + unopened.filter((record) => record.turnStatus === "running").length;
   const errorCount = snapshot.errorCount + unopened.filter((record) => record.turnStatus === "error").length;
   const unreadCount = snapshot.unreadCount + unopened.filter((record) => record.unread).length;
+  const currentActivity = remote.filter((record) => record.turnStatus === "running" && record.summary)
+    .sort((left, right) => (right.updatedAt ?? "").localeCompare(left.updatedAt ?? ""))[0];
   return Object.freeze({
+    ...(currentActivity?.progress === undefined ? {} : { activityProgress: currentActivity.progress }),
+    ...(currentActivity?.summary === undefined ? {} : { activitySummary: currentActivity.summary }),
     ...(connectionStatus === undefined ? {} : { connectionStatus }),
     turnStatus: errorCount > 0 ? "error" as const :
       runningCount > 0 ? "busy" as const :

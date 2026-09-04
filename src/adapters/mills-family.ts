@@ -51,6 +51,7 @@ export interface MillsFamilyToolRuntime<TSession, TProposal = unknown, TCitation
     readonly requestId?: string;
     readonly conversationId?: string;
     readonly interaction?: "text_chat" | "realtime_voice";
+    readonly reportActivity?: import("../tools/executor.js").ApplicationToolActivityReporter;
   }): Promise<MillsFamilyToolOutcome<TProposal, TCitation>>;
 }
 
@@ -129,6 +130,7 @@ export function createMillsFamilyPlugin<TSession, TProposal = unknown, TCitation
         ...(application.requestId === undefined ? {} : { requestId: application.requestId }),
         ...(application.conversationId === undefined ? {} : { conversationId: application.conversationId }),
         ...(application.interaction === undefined ? {} : { interaction: application.interaction }),
+        ...(context.reportActivity === undefined ? {} : { reportActivity: context.reportActivity }),
       });
       if (outcome.kind === "proposal") {
         if (kind !== "proposal") throw new TypeError("Mills runtime returned a proposal for an undisclosed proposal tool");

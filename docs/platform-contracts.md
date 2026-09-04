@@ -29,6 +29,18 @@ For principal- or session-dependent MCP connections, use `createRequestScopedMcp
 
 Disconnecting a stream is not cancellation. Cancellation uses its own authorized, idempotent mutation. Resume only from a checkpoint durably applied on that device. Presence/typing is expiring and non-authoritative and must not enter transcripts, checkpoints, retention exports, or audit claims. Durable events, proposals, and execution results require tenant-scoped keys, atomic optimistic concurrency, defensive parsing, bounded reads, and encrypted transport/storage supplied by the host.
 
+Conversation activity records may carry an optional bounded `summary` and
+`progress` object (`completed`, `total`, and optional `unit`). These fields are
+shared launcher/conversation-list status only. They do not grant authority,
+replace durable tool lifecycle events, or prove that a mutation completed.
+
+Tool authorization and human confirmation policy are independent. The host
+authorization policy can deny execution regardless of approval settings. For
+authorized plugin tools, `never` adds no plugin confirmation requirement,
+`always` adds one, and `policy` delegates the confirmation choice to the
+authenticated project-aware host callback. The host execution policy may
+still require confirmation independently.
+
 Postgres migrations run under an application-controlled role. Production deployments should add retention/partition policies, backups/PITR, monitoring, connection deadlines, row-level security where appropriate, and a transaction wrapper that guarantees rollback. The reference adapter never interpolates identifiers or values into data queries.
 
 The high-level Postgres adapters bind one authenticated tenant/scope, validate canonical records, use optimistic versions and durable idempotency identities, and normalize domain conflicts. The host still owns pool sizing, statement/transaction deadlines, migrations, encryption, RLS, retention, backups, observability, and mapping authenticated actors to tenant/scope IDs.

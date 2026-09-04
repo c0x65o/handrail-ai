@@ -3,11 +3,25 @@ import { emitAiDiagnostic, type AiDiagnosticSink } from "../diagnostics.js";
 
 export type ConversationActivityTurnStatus = "idle" | "running" | "completed" | "error";
 
+export const CONVERSATION_ACTIVITY_LIMITS = Object.freeze({
+  summaryLength: 240,
+  progressUnitLength: 64,
+} as const);
+
+export interface ConversationActivityProgress {
+  readonly completed: number;
+  readonly total: number;
+  readonly unit?: string;
+}
+
 export interface ConversationActivityRecord {
   readonly conversationId: ConversationId | string;
   readonly turnStatus: ConversationActivityTurnStatus;
   readonly unread: boolean;
   readonly updatedAt?: string;
+  /** Short, safe status text suitable for a launcher or conversation list. */
+  readonly summary?: string;
+  readonly progress?: ConversationActivityProgress;
 }
 
 export interface ConversationActivityReadable {
@@ -56,6 +70,44 @@ export interface LiveConversationActivityPubSub {
     channel: string,
     receive: (envelope: LiveConversationActivityEnvelope) => void,
   ): Promise<() => void>;
+}
+
+export interface ConversationActivityReportInput {
+  readonly conversationId: ConversationId | string;
+  readonly summary: string;
+  readonly progress?: ConversationActivityProgress;
+}
+
+export interface ConversationActivityReporter {
+  report(input: ConversationActivityReportInput): Promise<ConversationActivityRecord>;
+}
+
+export interface CreateConversationActivityReporterOptions {
+  readonly store: DurableConversationActivityStore;
+  readonly delivery: LiveConversationActivityDelivery;
+  readonly now?: () => Date;
+}
+
+/** Writes one shared running summary and immediately fans it out to connected clients. */
+export function createConversationActivityReporter(
+  options: CreateConversationActivityReporterOptions,
+): ConversationActivityReporter {
+  const now = options.now ?? (() => new Date());
+  return Object.freeze({
+    async report(input: ConversationActivityReportInput) {
+      const record = parseConversationActivityRecord({
+        conversationId: input.conversationId,
+        turnStatus: "running",
+        unread: false,
+        updatedAt: now().toISOString(),
+        summary: input.summary,
+        ...(input.progress === undefined ? {} : { progress: input.progress }),
+      });
+      const saved = await options.store.upsert(record);
+      await options.delivery.publish(saved);
+      return saved;
+    },
+  });
 }
 
 export interface InMemoryLiveConversationActivityOptions {
@@ -148,6 +200,43 @@ const ACTIVITY_STATUSES = new Set<ConversationActivityTurnStatus>([
   "idle", "running", "completed", "error",
 ]);
 
+function parseActivitySummary(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw new TypeError("Conversation activity summary is invalid");
+  const summary = value.trim();
+  if (!summary || summary.length > CONVERSATION_ACTIVITY_LIMITS.summaryLength) {
+    throw new TypeError("Conversation activity summary is invalid");
+  }
+  return summary;
+}
+
+function parseActivityProgress(
+  value: ConversationActivityProgress | undefined,
+): ConversationActivityProgress | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Conversation activity progress is invalid");
+  }
+  const keys = Object.keys(value);
+  if (keys.some((key) => key !== "completed" && key !== "total" && key !== "unit") ||
+    !Number.isSafeInteger(value.completed) || value.completed < 0 ||
+    !Number.isSafeInteger(value.total) || value.total < 1 || value.completed > value.total) {
+    throw new TypeError("Conversation activity progress is invalid");
+  }
+  let unit: string | undefined;
+  if (value.unit !== undefined) {
+    if (typeof value.unit !== "string") {
+      throw new TypeError("Conversation activity progress is invalid");
+    }
+    unit = value.unit.trim();
+    if (!unit || unit.length > CONVERSATION_ACTIVITY_LIMITS.progressUnitLength) {
+      throw new TypeError("Conversation activity progress is invalid");
+    }
+  }
+  return Object.freeze({ completed: value.completed, total: value.total,
+    ...(unit === undefined ? {} : { unit }) });
+}
+
 export function parseConversationActivityRecord(input: ConversationActivityRecord): ConversationActivityRecord {
   const conversationId = String(input.conversationId).trim();
   if (!conversationId || conversationId.length > 256 || !ACTIVITY_STATUSES.has(input.turnStatus) ||
@@ -155,8 +244,15 @@ export function parseConversationActivityRecord(input: ConversationActivityRecor
   if (input.updatedAt !== undefined && (!Number.isFinite(Date.parse(input.updatedAt)) || input.updatedAt.length > 64)) {
     throw new TypeError("Conversation activity timestamp is invalid");
   }
+  const summary = parseActivitySummary(input.summary);
+  const progress = parseActivityProgress(input.progress);
+  if (progress !== undefined && summary === undefined) {
+    throw new TypeError("Conversation activity progress requires a summary");
+  }
   return Object.freeze({ conversationId, turnStatus: input.turnStatus, unread: input.unread,
-    ...(input.updatedAt === undefined ? {} : { updatedAt: new Date(input.updatedAt).toISOString() }) });
+    ...(input.updatedAt === undefined ? {} : { updatedAt: new Date(input.updatedAt).toISOString() }),
+    ...(summary === undefined ? {} : { summary }),
+    ...(progress === undefined ? {} : { progress }) });
 }
 
 function activitySnapshot(records: Iterable<ConversationActivityRecord>): readonly ConversationActivityRecord[] {

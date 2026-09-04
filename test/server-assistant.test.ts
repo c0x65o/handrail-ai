@@ -90,11 +90,19 @@ describe("createHandrailAssistant", () => {
     const catalog = new InMemoryConversationCatalog<Context>({ authorize: () => "allow",
       createConversationId: () => "conversation-approved" as never });
     const durableTurns = new InMemoryDurableApplicationTurnStore();
+    const activityRecords: import("../src/conversation/activity.js").ConversationActivityRecord[] = [];
     const bundle = { events,
       approvals: new InMemoryApprovalProposalStore<Context>({ authorize: () => "deny" }),
       catalog: new InMemoryConversationCatalog<Context>({ authorize: () => "deny",
         createConversationId: () => "wrong-conversation" as never }),
       durableTurns, toolLedger: new InMemoryToolExecutionLedger(),
+      activity: {
+        async list() { return activityRecords; },
+        async upsert(record: import("../src/conversation/activity.js").ConversationActivityRecord) {
+          activityRecords.push(record); return record;
+        },
+        async markRead() { return null; },
+      },
       usageReceiptSink: null, usageAdmissions: null } as unknown as PostgresAssistantPersistenceBundle<Context>;
     const persistence = { attachmentLimits: { maximumBytes: 1_000, acceptedMediaTypes: ["text/plain"],
       ttlMilliseconds: 60_000 }, persistence: {}, forScope: () => bundle } as unknown as PostgresAssistantPersistence;
@@ -104,10 +112,15 @@ describe("createHandrailAssistant", () => {
       pluginId: "test.approval", version: "1.0.0", displayName: "Approval test",
       registrations: [{ definition: { name: "dangerous", description: "Dangerous operation",
         input_schema: { type: "object" } }, discover: () => true,
-        executor: () => { executions += 1; return { done: true }; } }],
+        executor: async (_arguments, execution) => {
+          await execution.reportActivity?.({ summary: "Applying reviewed updates",
+            progress: { completed: 43, total: 43, unit: "products" } });
+          executions += 1; return { done: true };
+        } }],
     });
     const assistant = await createHandrailAssistant<Context>({ id: "approval-test", authorize: async (request) => context(request),
       persistence, tools: [plugin], toolPolicy: () => ({ outcome: "external_approval_required" }),
+      activityForToolCall: () => ({ summary: "Preparing revenue account updates" }),
       conversationCatalogFor: () => catalog, approvalStoreFor: () => approvals,
       provider: { metadata: { provider_id: "test", model_id: "test", capabilities: {
         streaming: true, text: true, tool_calls: true, parallel_tool_calls: false, reasoning: false,
@@ -129,7 +142,10 @@ describe("createHandrailAssistant", () => {
       }) }));
     expect(await title.json()).toMatchObject({ ok: true, value: "Delete record 42 safely" });
     const call = { tool_call_id: "call-approved", name: "dangerous", arguments: { id: "42" } };
-    expect((await exposed!.execute(call, new AbortController().signal)).status).toBe("external_approval_required");
+    expect((await exposed!.execute(call, new AbortController().signal,
+      { conversationId: "conversation-approved", turnId: "turn-approved" })).status)
+      .toBe("external_approval_required");
+    expect(activityRecords.at(-1)).toMatchObject({ summary: "Preparing revenue account updates" });
     const pending = exposed!.awaitApproval({ conversationId: "conversation-approved", turnId: "turn-approved",
       call, signal: new AbortController().signal });
     let proposalId = "";
@@ -153,6 +169,8 @@ describe("createHandrailAssistant", () => {
     expect(decision.status).toBe(200);
     expect(await pending).toMatchObject({ status: "completed", result: { is_error: false } });
     expect(executions).toBe(1);
+    expect(activityRecords.at(-1)).toMatchObject({ summary: "Applying reviewed updates",
+      progress: { completed: 43, total: 43, unit: "products" } });
     const audit = await events.read({ conversationId: "conversation-approved" as never });
     expect(audit.entries.some(({ event }) => event.payload.type === "approval.proposal_status_changed" &&
       event.payload.status === "confirmed" && event.actor.type === "user" && event.actor.id === "alice" &&
