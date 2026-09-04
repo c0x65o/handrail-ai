@@ -20,7 +20,7 @@ import { ApprovalProposalStoreError, type ApprovalProposalStore } from "../conve
 import type { PostgresAssistantPersistence, PostgresAssistantPersistenceBundle } from "../postgres/index.js";
 import { createAiApplication, type AiApplication, type ApplicationApprovalPolicy } from "./application.js";
 import type { ApplicationToolActivityUpdate, ApplicationToolExecutor, ApplicationToolPolicy,
-  BoundedToolExecutionOutcome } from "../tools/executor.js";
+  BoundedToolExecutionOutcome, BoundedToolExecutorLimits } from "../tools/executor.js";
 import type { ToolPlugin } from "../tools/plugin.js";
 import type { ResponseToolCallEvent, ToolDefinition } from "../protocol.js";
 import type { AIRuntimeUsageConfiguration } from "./usage-control.js";
@@ -97,6 +97,8 @@ export interface CreateHandrailAssistantOptions<TContext extends HandrailAssista
   readonly diagnostics?: AiDiagnosticSink;
   readonly workerId?: string;
   readonly toolLoopLimits?: Partial<ToolLoopLimits>;
+  /** Per-tool execution bounds, separate from the total multi-step turn budget. */
+  readonly toolExecutorLimits?: Partial<BoundedToolExecutorLimits>;
   readonly createConversationId?: () => string;
   /** Disable SDK byte intake while a migrating host retains its authorized upload route. Defaults to true. */
   readonly attachmentUpload?: boolean;
@@ -332,6 +334,7 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
         plugins: options.tools ?? [], installContext: context,
         policy: options.toolPolicy ?? (() => ({ outcome: "allow" })),
         ...(options.approvalPolicy === undefined ? {} : { approvalPolicy: options.approvalPolicy }),
+        ...(options.toolExecutorLimits === undefined ? {} : { executorLimits: options.toolExecutorLimits }),
         toolExecutionLedger: bundle.toolLedger,
         approvalCoordinator: createApprovalExecutionCoordinator<TContext>({
           proposalStore: approvalStoreFor(context), eventStore: bundle.events,
@@ -415,6 +418,7 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
                 const retained = await proposalStore.get({ permissionContext: context, proposalId });
                 if (retained === null) return approvalError(call, "Tool approval is unavailable.");
                 if (retained.status === "confirmed") {
+                  await reportActivity(conversationId, { summary: "Running approved work" });
                   const approval: ApprovalExecutionResume<TContext> = { permissionContext: context, proposalId,
                     expectedProposalVersion: retained.proposal_version, executionId: `execute-${identity.slice(0, 48)}`,
                     argumentBinding: { type: "opaque_reference", argumentReference: reference as never },

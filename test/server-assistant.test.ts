@@ -169,6 +169,7 @@ describe("createHandrailAssistant", () => {
     expect(decision.status).toBe(200);
     expect(await pending).toMatchObject({ status: "completed", result: { is_error: false } });
     expect(executions).toBe(1);
+    expect(activityRecords.some((record) => record.summary === "Running approved work")).toBe(true);
     expect(activityRecords.at(-1)).toMatchObject({ summary: "Applying reviewed updates",
       progress: { completed: 43, total: 43, unit: "products" } });
     const audit = await events.read({ conversationId: "conversation-approved" as never });

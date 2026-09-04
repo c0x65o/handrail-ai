@@ -893,6 +893,7 @@ export class BoundedToolExecutor<
         let executionResult: ApplicationToolResult;
         let failureReason: ApprovalExecutionFailureReason | undefined;
         let executionStartRecorded = request.onExecutionStarted === undefined;
+        let activityActive = true;
         try {
           emitAiDiagnostic(this.#diagnostics, { domain: "tool", operation: "execute",
             phase: "started", toolName: name, toolCallId });
@@ -907,7 +908,16 @@ export class BoundedToolExecutor<
               toolCallId,
               ...(request.reportActivity === undefined
                 ? {}
-                : { reportActivity: request.reportActivity }),
+                : { reportActivity: async (update: ApplicationToolActivityUpdate) => {
+                    if (!activityActive || signal.aborted) return;
+                    try {
+                      await request.reportActivity!(update);
+                    } catch (cause) {
+                      emitAiDiagnostic(this.#diagnostics, { domain: "activity", operation: "tool_progress",
+                        phase: "failed", toolName: name, toolCallId,
+                        code: "activity_update_failed", retryable: true, cause });
+                    }
+                  } }),
             }))
             .then((output) => normalizeOutput(output, this.#limits, toolCallId));
           void invocation.then(release, release);
@@ -945,6 +955,8 @@ export class BoundedToolExecutor<
             executionResult = errorResult(toolCallId, name, "Tool execution failed.");
           }
         }
+
+        activityActive = false;
 
         if (approvalClaim !== undefined && this.#approvalCoordinator !== undefined) {
           const settled = await this.#approvalCoordinator.settle({

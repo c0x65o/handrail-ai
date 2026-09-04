@@ -69,7 +69,7 @@ describe("trusted AI application assembly", () => {
   it("enforces fixed plugin approval modes without consulting project policy", async () => {
     const execute = vi.fn<ApplicationToolExecutor>(async () => ({ ok: true }));
     const tool = (name: string) => ({ definition: { name, description: name,
-      input_schema: { type: "object", properties: {}, additionalProperties: false } }, executor: execute });
+        input_schema: { type: "object" as const, properties: {}, additionalProperties: false } }, executor: execute });
     const plugin = createToolPlugin({ pluginId: "fixed.approvals", version: "1.0.0",
       displayName: "Fixed approvals", registrations: [tool("fixed.always"), tool("fixed.never")],
       approvals: [
@@ -115,6 +115,25 @@ describe("trusted AI application assembly", () => {
     expect(tools).toHaveLength(1);
     expect(execute).toHaveBeenCalledOnce();
     expect(approvalPolicy).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["deny", "external_approval_required"] as const)("preserves host %s when project approvals are disabled", async (outcome) => {
+    const execute = vi.fn<ApplicationToolExecutor>(async () => ({ updated: true }));
+    const approvalPolicy = vi.fn(() => "allow_without_approval" as const);
+    const plugin = createToolPlugin({ pluginId: "bulk.authorization", version: "1.0.0", displayName: "Bulk",
+      registrations: [{ definition: { name: "bulk", description: "Bulk update", input_schema: { type: "object" } },
+        executor: execute }],
+      approvals: [{ toolName: "bulk", mode: "policy", summarize: () => "Update products" }],
+    });
+    const app = await createAiApplication({ plugins: [plugin], installContext: undefined,
+      policy: () => ({ outcome }), approvalPolicy });
+    const result = await app.executeTool({ call: { tool_call_id: outcome, name: "bulk", arguments: {} },
+      discovery: { context: undefined }, applicationContext: {} });
+    expect(result).toMatchObject(outcome === "deny"
+      ? { status: "completed", result: { is_error: true } }
+      : { status: "external_approval_required" });
+    expect(execute).not.toHaveBeenCalled();
+    expect(approvalPolicy).not.toHaveBeenCalled();
   });
 
   it("installs a plugin once, exposes a data-only catalog, and runs its bounded tool loop", async () => {

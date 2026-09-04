@@ -1,4 +1,4 @@
-import { Fragment, createElement, useCallback, useEffect, useRef, useState, type ComponentProps, type CSSProperties, type ReactNode } from "react";
+import { Fragment, createElement, useCallback, useEffect, useRef, useState, useSyncExternalStore, type ComponentProps, type CSSProperties, type ReactNode } from "react";
 import { createHandrailAiClient, type HandrailAiClient } from "../client/bootstrap.js";
 import { createAttachmentUploader, type AttachmentUploader } from "../attachments/uploader.js";
 import type { ApplicationGatewayAttachmentSource, ApplicationGatewayCapabilities } from "../transports/application-gateway.js";
@@ -124,6 +124,8 @@ export interface StyledChatPresetProps {
   readonly composer?: ConversationComposerResult;
   readonly state?: ConversationState;
   readonly presence?: PresenceController;
+  /** Shared server activity; the status line shows only this conversation's current work. */
+  readonly activity?: ConversationActivityReadable;
   readonly conversationPicker?: ReactNode;
   readonly approvals?: ReactNode;
   readonly citations?: ReactNode;
@@ -206,6 +208,14 @@ export function createHandrailChatThemeStyle(theme: HandrailChatTheme = {}): Han
 export function StyledChatPreset(props: StyledChatPresetProps): ReactNode {
   const labels = { ...DEFAULT_LABELS, ...props.labels };
   const resolvedState = useResolvedState(props.state);
+  const activity = props.activity;
+  const subscribeActivity = useCallback((notify: () => void) =>
+    activity?.subscribe(notify) ?? (() => undefined), [activity]);
+  const getActivity = useCallback(() => activity?.getSnapshot().find((record) =>
+    record.conversationId === resolvedState?.conversation_id && record.turnStatus === "running"),
+  [activity, resolvedState?.conversation_id]);
+  const currentActivity = useSyncExternalStore(subscribeActivity, getActivity, getActivity);
+  const activityProgress = currentActivity?.progress;
   const retryableTurn = [...(resolvedState?.turns ?? [])].reverse().find((turn) =>
     (turn.status === "failed" && turn.error?.retryable === true) || turn.status === "cancelled");
   const canStop = Boolean(props.composer?.isSending || resolvedState?.active_turn_id);
@@ -242,7 +252,11 @@ export function StyledChatPreset(props: StyledChatPresetProps): ReactNode {
             className="hr-chat__message-citations" messageId={message.message_id}/>}
           <div className="hr-chat__message-actions"><CopyMessageButton className="hr-chat__copy" message={message}/></div>
         </div> })}>{props.emptyState}</FollowedTranscript>
-      <div className="hr-chat__status"><StreamStatus/><AssistantActivityIndicator className="hr-chat__assistant-activity"/><TypingIndicator/></div>
+      <div className="hr-chat__status">{currentActivity?.summary
+        ? <span role="status" className="hr-chat__assistant-activity">{currentActivity.summary}{activityProgress
+          ? ` (${activityProgress.completed}/${activityProgress.total}${activityProgress.unit ? ` ${activityProgress.unit}` : ""})`
+          : ""}</span>
+        : <><StreamStatus/><AssistantActivityIndicator className="hr-chat__assistant-activity"/></>}<TypingIndicator/></div>
       <LiveRegion/>
     </main>
     {(props.approvals || props.citations) && <aside className="hr-chat__aux">{props.approvals}{props.citations}</aside>}
@@ -694,8 +708,8 @@ export function HandrailChatWorkspaceLauncher<TRequest, TAuthorizationContext>(
     selectedBeforeClose.current = props.workspace.getSnapshot().selectedConversationId;
     props.workspace.select(null);
   }, [props.workspace]);
-  const { trigger, connectionStatus: _connection, activity: _activity, onOpenChange, ...workspaceProps } = props;
-  void _connection; void _activity;
+  const { trigger, connectionStatus: _connection, onOpenChange, ...workspaceProps } = props;
+  void _connection;
   const handleOpenChange = (open: boolean) => {
     if (open) {
       const selected = selectedBeforeClose.current ?? props.workspace.getSnapshot().threads[0]?.conversationId ?? null;
@@ -1052,9 +1066,9 @@ export interface StyledChatLauncherProps extends StyledChatPresetProps {
 
 export function StyledChatLauncher(props: StyledChatLauncherProps): ReactNode {
   const binding = useConversationLauncherBinding(props.workspace, props.connectionStatus, props.activity);
-  const { workspace: _workspace, connectionStatus: _connectionStatus, activity: _activity,
+  const { workspace: _workspace, connectionStatus: _connectionStatus,
     trigger, ...preset } = props;
-  void _workspace; void _connectionStatus; void _activity;
+  void _workspace; void _connectionStatus;
   return <ChatLauncherRoot {...binding}><ChatLauncherTrigger className="hr-chat__launcher-trigger">
     {trigger ?? "Open chat"}<ChatLauncherStatus className="hr-chat__launcher-status">{(state) =>
       launcherStatusText(state)

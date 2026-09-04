@@ -1,10 +1,29 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { createInitialConversationState } from "../src/conversation/state.js";
+import { InMemoryConversationActivityStore } from "../src/conversation/activity.js";
 import { CatalogWorkspaceThreadPicker, HandrailAssistantLauncher, StandardConversationTitleObserver, StandardGatewayApprovals, StyledChatLauncher, StyledChatPreset, StyledChatPresetStyles, WorkspaceThreadPicker, createHandrailChatThemeStyle, gatewayAttachmentIntake, installToolRendererPlugins } from "../src/react-styled/index.js";
 
 describe("styled React preset", () => {
+  it("shows one current summary in the open conversation and clears it on completion", () => {
+    const activity = new InMemoryConversationActivityStore();
+    const state = createInitialConversationState("bulk-revenue" as never);
+    activity.upsert({ conversationId: "other", turnStatus: "running", unread: false,
+      summary: "Other conversation work" });
+    const view = render(<StyledChatPreset state={state} activity={activity}/>);
+    expect(screen.queryByText("Other conversation work")).toBeNull();
+    act(() => activity.upsert({ conversationId: "bulk-revenue", turnStatus: "running", unread: false,
+      summary: "Tracing invoice accounts", progress: { completed: 18, total: 43, unit: "products" } }));
+    expect(screen.getByText("Tracing invoice accounts (18/43 products)").getAttribute("role")).toBe("status");
+    act(() => activity.upsert({ conversationId: "bulk-revenue", turnStatus: "running", unread: false,
+      summary: "Comparing this month and last month" }));
+    expect(screen.queryByText(/Tracing invoice accounts/)).toBeNull();
+    expect(screen.getByText("Comparing this month and last month")).toBeTruthy();
+    act(() => activity.upsert({ conversationId: "bulk-revenue", turnStatus: "completed", unread: true }));
+    expect(screen.queryByText("Comparing this month and last month")).toBeNull();
+    view.unmount();
+  });
   it("boots the production launcher with canonical styles from an endpoint", () => {
     const fetcher: typeof fetch = async () => new Promise<Response>(() => undefined);
     const { container, getByText } = render(<HandrailAssistantLauncher endpoint="/api/assistant/aegis"

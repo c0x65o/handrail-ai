@@ -559,6 +559,9 @@ const assistant = await createHandrailAssistant({
     applicationContext.project.approvalsRequired
       ? "require_approval"
       : "allow_without_approval",
+  // Example budgets for long bulk tools and the complete multi-step request.
+  toolExecutorLimits: { timeoutMs: 5 * 60_000 },
+  toolLoopLimits: { maxElapsedMs: 15 * 60_000, maxIterations: 16, maxTotalToolCalls: 64 },
   // ...provider, persistence, tools, and authorization...
 });
 ```
@@ -590,6 +593,27 @@ items not exceeding a positive total. The launcher binding exposes the newest
 running `activitySummary` and `activityProgress`, and `ChatLauncherStatus`
 renders them by default. Activity is status UI, not authorization or an audit
 record; durable tool and approval events remain authoritative.
+
+The standard chat also shows the selected conversation's summary and counts
+in one status line while it runs, replacing that line as each step changes.
+`HandrailAssistantLauncher` connects activity automatically for both page and
+launcher presentations. Custom `StyledChatPreset` and `HandrailChatWorkspace`
+hosts pass the client's `activity` store. Progress delivery failures are
+diagnosed without failing a mutation, and reports made after tool completion,
+cancellation, or timeout are ignored.
+
+`toolExecutorLimits` sets each tool's timeout (30 seconds by default);
+`toolLoopLimits` sets the overall continuation budget (two minutes by default).
+Configure both for longer requests. Tools must honor their abort signal and
+use application-owned transactions and idempotency for partial work.
+
+For the invoice-revenue example, the application must supply tools that trace
+invoice history, update product accounts, create corrective journal entries,
+and compare the two months' P&L. Each step can replace the same activity summary.
+The SDK supplies execution, optional confirmation, and presentation; it does
+not supply those accounting rules or infer that a P&L comparison proves every
+correction is right. Existing hosts that stage their own per-row proposals
+must adopt policy-controlled batch executors to use this flow.
 
 Model output and tool discovery never authorize side effects. The trusted host
 must perform permission checks at proposal reads/decisions and again before

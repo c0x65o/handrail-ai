@@ -138,6 +138,52 @@ describe("BoundedToolExecutor", () => {
       progress: { completed: 18, total: 43, unit: "products" } });
   });
 
+  it.each(["completed", "cancelled", "timed_out"])("ignores late progress after a tool is %s", async (terminal) => {
+    vi.useFakeTimers();
+    try {
+      const reportActivity = vi.fn();
+      const started = deferred<void>();
+      const finish = deferred<void>();
+      let report: import("../src/tools/executor.js").ApplicationToolActivityReporter | undefined;
+      const { bounded, discoveredTools, tool } = setup(async (_arguments, execution) => {
+        report = execution.reportActivity;
+        await report?.({ summary: "Updating products" });
+        started.resolve();
+        await finish.promise;
+        return { updated: true };
+      });
+      const controller = new AbortController();
+      const pending = bounded.execute({ call: { tool_call_id: `late-${terminal}`, name: tool.name,
+        arguments: { query: "revenue" } }, discoveredTools, applicationContext: context,
+        signal: controller.signal, reportActivity });
+      await started.promise;
+      if (terminal === "completed") finish.resolve();
+      else if (terminal === "cancelled") controller.abort();
+      else await vi.advanceTimersByTimeAsync(30_001);
+      const result = await pending;
+      expect(result.is_error).toBe(terminal !== "completed");
+      await report?.({ summary: "Stale running update" });
+      expect(reportActivity).toHaveBeenCalledOnce();
+      finish.resolve();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("records a progress delivery failure without failing a successful mutation", async () => {
+    const diagnostics = vi.fn();
+    const { bounded, discoveredTools, tool } = setup(async (_arguments, execution) => {
+      await execution.reportActivity?.({ summary: "Products updated" });
+      return { updated: true };
+    }, { diagnostics });
+    const result = await bounded.execute({ call: { tool_call_id: "failed-progress", name: tool.name,
+      arguments: { query: "revenue" } }, discoveredTools, applicationContext: context,
+      reportActivity: async () => { throw new Error("Activity store unavailable"); } });
+    expect(result.is_error).toBe(false);
+    expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({
+      domain: "activity", code: "activity_update_failed" }));
+  });
+
   it("normalizes and stably deduplicates an explicit trusted citation projection", async () => {
     const source = {
       source_id: "source_weather",
