@@ -732,7 +732,7 @@ function canonicalJson(value: unknown): string {
 }
 
 /** Pure ECMAScript SHA-256 keeps the core usable in browsers without Node APIs. */
-function sha256(value: string): string {
+export function sha256Text(value: string): string {
   const bytes = UTF8_ENCODER.encode(value);
   const bitLength = bytes.length * 8;
   const paddedLength = Math.ceil((bytes.length + 9) / 64) * 64;
@@ -822,5 +822,5 @@ export function createProviderContextFingerprint(
   if (UTF8_ENCODER.encode(serialized).byteLength > PROVIDER_CONTEXT_LIMITS.fingerprintSerializedBytes) {
     fail("$fingerprint", `must normalize to at most ${PROVIDER_CONTEXT_LIMITS.fingerprintSerializedBytes} bytes`);
   }
-  return `sha256:${sha256(serialized)}` as ProviderContextFingerprint;
+  return `sha256:${sha256Text(serialized)}` as ProviderContextFingerprint;
 }

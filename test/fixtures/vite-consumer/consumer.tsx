@@ -5,12 +5,12 @@ import {
   AI_RUNTIME_PROTOCOL_VERSION,
   createConversationStore,
   parseChatRequest,
-} from "@handrail/ai";
+} from "@handrail/ai-assistant";
 import {
   IndexedDBConversationEventStore,
   IndexedDBConversationSyncStateStore,
-} from "@handrail/ai/browser";
-import "@handrail/ai/react";
+} from "@handrail/ai-assistant/browser";
+import "@handrail/ai-assistant/react";
 import {
   REACT_PRESENTATION_RECIPES,
   createReactPresentationFixture,
@@ -29,7 +29,7 @@ export {
 export const reactSubpathElement = createElement(
   "span",
   null,
-  "@handrail/ai/react resolved",
+  "@handrail/ai-assistant/react resolved",
 );
 
 /** Vite compiles actual elements for all six checked, consumer-owned recipes. */

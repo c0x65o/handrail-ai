@@ -8,15 +8,15 @@ import {
   type ConversationTransport,
   type StreamEvent,
   type TurnObservation,
-} from "@handrail/ai";
+} from "@handrail/ai-assistant";
 import {
   createHandrailAiClient,
   type HandrailAiClient,
-} from "@handrail/ai/client";
+} from "@handrail/ai-assistant/client";
 import {
   createAssistantGatewayAuthorizer,
   type AssistantGatewayAuthorizationContext,
-} from "@handrail/ai/server/assistant-context";
+} from "@handrail/ai-assistant/server/assistant-context";
 
 export interface GoldenRequest { readonly prompt: string }
 interface Principal { readonly principalId: string; readonly accountId: string }

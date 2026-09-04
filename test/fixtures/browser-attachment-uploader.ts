@@ -3,14 +3,14 @@ import {
   AI_RUNTIME_PROTOCOL_LIMITS,
   createAttachmentUploader,
   type AttachmentUploadAdapter,
-} from "@handrail/ai";
+} from "@handrail/ai-assistant";
 import {
   intakeFileInputImages,
   intakeFileInputPdfs,
   type BrowserAttachmentSource,
   type BrowserImageIntakeResult,
   type BrowserPdfIntakeResult,
-} from "@handrail/ai/browser";
+} from "@handrail/ai-assistant/browser";
 
 /** Minimal headless file-input-to-uploader integration for browser consumers. */
 export function enqueueFileInputImages(

@@ -1,13 +1,13 @@
-import { Fragment, createElement, useEffect, useState, type ComponentProps, type CSSProperties, type ReactNode } from "react";
+import { Fragment, createElement, useCallback, useEffect, useRef, useState, type ComponentProps, type CSSProperties, type ReactNode } from "react";
 import { createHandrailAiClient, type HandrailAiClient } from "../client/bootstrap.js";
 import { createAttachmentUploader, type AttachmentUploader } from "../attachments/uploader.js";
 import type { ApplicationGatewayAttachmentSource } from "../transports/application-gateway.js";
 import { AI_RUNTIME_PROTOCOL_VERSION, type ChatRequest, type StreamEvent } from "../protocol.js";
 import type { ConversationClientId, ConversationDeviceId } from "../conversation/events.js";
 import type { ConversationAttachmentReference } from "../conversation/events.js";
-import type { ConversationMessageRecord, ConversationState, ConversationToolResultRecord } from "../conversation/state.js";
+import type { ConversationApprovalProposalRecord, ConversationMessageRecord, ConversationState, ConversationToolResultRecord } from "../conversation/state.js";
 import type { PresenceController } from "../presence/controller.js";
-import type { AiDiagnosticSink } from "../diagnostics.js";
+import { emitAiDiagnostic, type AiDiagnosticSink } from "../diagnostics.js";
 import type { MessageAttachmentRenderer, MessageContentRenderer, ToolResultRenderer } from "../react/primitives.js";
 import { ConversationProvider } from "../react/context.js";
 import { useConversationComposer, type ConversationComposerResult, type UseConversationComposerOptions } from "../react/use-conversation-composer.js";
@@ -32,6 +32,7 @@ import { ChatDialogContent, ChatDialogOverlay, ChatDialogPortal, ChatDialogRoot,
 import { ChatDrawerContent, ChatDrawerOverlay, ChatDrawerPortal, ChatDrawerRoot, ChatDrawerTrigger, type ChatDrawerSide } from "../react/drawer.js";
 
 export const HANDRAIL_CHAT_PRESET_VERSION = "handrail.react-preset.v1" as const;
+export const HANDRAIL_ASSISTANT_UI_STANDARD_VERSION = "handrail.ai-assistant-ui.v1" as const;
 
 export type StyledChatLayout = "launcher" | "dialog" | "drawer" | "page";
 export type HandrailChatThemeMode = "light" | "dark" | "system";
@@ -172,6 +173,7 @@ export const handrailChatPresetCss = `
 .hr-chat__transcript-wrap{display:grid;min-block-size:0;position:relative}.hr-chat__transcript-wrap>.hr-chat__transcript{min-block-size:0}.hr-chat__jump{inset-block-end:.75rem;inset-inline-end:.75rem;position:absolute;z-index:1}.hr-chat__assistant-activity:not(:empty){font-weight:600}
 .hr-chat__launcher-trigger{align-items:center;display:inline-flex;gap:.45rem}.hr-chat__launcher-status{font-size:.75rem;font-weight:600}.hr-chat__launcher-trigger[data-busy=true] .hr-chat__launcher-status{color:var(--hr-activity)}.hr-chat__launcher-trigger[data-error=true] .hr-chat__launcher-status{color:var(--hr-danger)}.hr-chat__launcher-badge:empty{display:none}.hr-chat__launcher-badge{align-items:center;background:var(--hr-danger);border-radius:999px;color:#fff;display:inline-flex;font-size:.7rem;justify-content:center;min-block-size:1.2rem;min-inline-size:1.2rem;padding-inline:.25rem}
 .hr-chat__workspace-picker{align-items:flex-start;display:flex;gap:.4rem;position:relative}.hr-chat__workspace-picker summary{background:var(--hr-panel,#f6f7fb);border:1px solid var(--hr-border,#dfe3eb);border-radius:9px;cursor:pointer;list-style:none;padding:.6rem .75rem}.hr-chat__workspace-picker summary::-webkit-details-marker{display:none}.hr-chat__workspace-picker ul{background:var(--hr-bg,#fff);border:1px solid var(--hr-border,#dfe3eb);display:grid;gap:.25rem;inset-block-start:100%;inset-inline-end:0;list-style:none;margin:0;max-block-size:16rem;min-inline-size:14rem;overflow:auto;padding:.35rem;position:absolute;z-index:10}.hr-chat__workspace-picker li{margin:0;padding:0}.hr-chat__workspace-picker li button{align-items:center;display:flex;inline-size:100%;justify-content:space-between;max-inline-size:none;text-align:start}.hr-chat__workspace-picker small{color:var(--hr-muted,#687083);margin-inline-start:.5rem}.hr-chat__workspace-picker [data-turn-status=running] small{color:#6750a4}.hr-chat__empty{display:grid;min-block-size:12rem;place-items:center;padding:1rem}
+.hr-chat__approvals{display:grid;gap:.5rem}.hr-chat__approval{background:var(--hr-panel);border:1px solid var(--hr-border);border-radius:var(--hr-radius-control);display:grid;gap:.4rem;padding:.65rem}.hr-chat__approval-actions{display:flex;gap:.5rem}.hr-chat__approval-error{color:var(--hr-danger)}
 `;
 
 export function StyledChatPresetStyles(): ReactNode {
@@ -661,11 +663,130 @@ export interface HandrailAssistantLauncherProps extends Omit<HandrailChatWorkspa
   readonly deviceId?: string;
   readonly loading?: ReactNode;
   readonly failure?: (error: unknown) => ReactNode;
+  readonly onWorkingChange?: (working: boolean) => void;
+  /** Generate and persist a bounded title after a conversation's first completed turn. Defaults to true. */
+  readonly autoTitle?: boolean;
+  /** Render the endpoint-driven workspace directly when the host already owns the surrounding shell. */
+  readonly presentation?: "launcher" | "page";
+  /** Migration/domain seam for an existing authorized upload route. The SDK uploader remains the default. */
+  readonly uploaderForConversation?: (conversationId: ConversationId) => AttachmentUploader<Blob>;
+  /** Inject the canonical scoped preset once with the launcher. Defaults to true. */
+  readonly includeStyles?: boolean;
 }
 
 interface AssistantLauncherState {
   readonly client: HandrailAiClient<StreamEvent, ChatRequest, object>;
   readonly uploader: AttachmentUploader<ApplicationGatewayAttachmentSource>;
+}
+
+function AssistantWorkingObserver({ workspace, onChange }: {
+  readonly workspace: ConversationWorkspaceReadable;
+  readonly onChange?: (working: boolean) => void;
+}) {
+  const snapshot = useConversationWorkspaceSnapshot(workspace);
+  useEffect(() => onChange?.(snapshot.runningCount > 0), [onChange, snapshot.runningCount]);
+  return null;
+}
+
+/** Shared first-turn title QoL; failures are diagnostic-only and never block chat. */
+export function StandardConversationTitleObserver({ client, enabled = true, onTitle, diagnostics }: {
+  readonly client: HandrailAiClient<StreamEvent, ChatRequest, object>;
+  readonly enabled?: boolean;
+  readonly onTitle?: (conversationId: ConversationId, title: string) => void;
+  readonly diagnostics?: AiDiagnosticSink;
+}) {
+  const snapshot = useConversationWorkspaceSnapshot(client.workspace!);
+  const settled = useRef(new Set<ConversationId>());
+  const pending = useRef(new Set<ConversationId>());
+  useEffect(() => {
+    if (!enabled || !client.catalog.capabilities.rename.supported) return;
+    for (const thread of snapshot.threads) {
+      const conversationId = thread.conversationId;
+      if (thread.turnStatus !== "completed" || settled.current.has(conversationId) ||
+          pending.current.has(conversationId)) continue;
+      pending.current.add(conversationId);
+      void (async () => {
+        try {
+          const found = await client.catalog.get({ authorizationContext: EMPTY_ASSISTANT_AUTHORIZATION_CONTEXT,
+            conversationId });
+          if (found.descriptor.title !== null) {
+            settled.current.add(conversationId);
+            onTitle?.(conversationId, found.descriptor.title);
+            return;
+          }
+          const token = String(conversationId).replaceAll(/[^A-Za-z0-9._:-]/gu, "-").slice(0, 96);
+          const generated = await client.resources.generateTitle({ conversationId,
+            idempotencyKey: `assistant-title-v1-${token}` });
+          const renamed = await client.catalog.rename({
+            authorizationContext: EMPTY_ASSISTANT_AUTHORIZATION_CONTEXT,
+            conversationId,
+            expectedVersion: found.descriptor.version,
+            idempotencyKey: `assistant-rename-v1-${token}` as never,
+            title: generated,
+          });
+          settled.current.add(conversationId);
+          onTitle?.(conversationId, renamed.descriptor.title ?? generated);
+        } catch (cause) {
+          emitAiDiagnostic(diagnostics, { domain: "gateway", operation: "automatic_title",
+            phase: "failed", retryable: true, conversationId, cause });
+        } finally {
+          pending.current.delete(conversationId);
+        }
+      })();
+    }
+  }, [client, diagnostics, enabled, onTitle, snapshot.threads]);
+  return null;
+}
+
+/** Default bounded approval review used by the endpoint-only launcher. */
+export function StandardGatewayApprovals({ client }: { readonly client: HandrailAiClient<StreamEvent, ChatRequest, object> }) {
+  const snapshot = useConversationWorkspaceSnapshot(client.workspace!);
+  const conversationId = snapshot.selectedConversationId;
+  const [proposals, setProposals] = useState<readonly ConversationApprovalProposalRecord[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const load = useCallback(async () => {
+    if (conversationId === null) return setProposals([]);
+    try {
+      setProposals(await client.resources.listApprovalGroup({ groupId: conversationId as never }));
+      setFailed(false);
+    } catch {
+      setFailed(true);
+    }
+  }, [client.resources, conversationId]);
+  useEffect(() => {
+    void load();
+    const timer = globalThis.setInterval(() => void load(), 2_000);
+    return () => globalThis.clearInterval(timer);
+  }, [load]);
+  const decide = async (proposal: ConversationApprovalProposalRecord, status: "confirmed" | "rejected") => {
+    if (conversationId === null || busy !== null) return;
+    const identity = `assistant:${proposal.proposal_id}:${proposal.proposal_version}:${status}`;
+    setBusy(proposal.proposal_id);
+    try {
+      await client.resources.transitionApproval({ conversationId, proposalId: proposal.proposal_id,
+        expectedVersion: proposal.proposal_version, status, idempotencyKey: identity,
+        idempotencyFingerprint: identity });
+      await load();
+    } catch {
+      setFailed(true);
+    } finally {
+      setBusy(null);
+    }
+  };
+  const pending = proposals.filter((proposal) => proposal.status === "pending");
+  if (pending.length === 0 && !failed) return null;
+  return <section className="hr-chat__approvals" aria-label="Assistant approvals">
+    {failed ? <span className="hr-chat__approval-error" role="alert">Approvals could not be refreshed.</span> : null}
+    {pending.map((proposal) => <article className="hr-chat__approval" key={proposal.proposal_id}>
+      <strong>{proposal.tool_name.replaceAll("_", " ")}</strong>
+      <span>This action requires your confirmation.</span>
+      <div className="hr-chat__approval-actions">
+        <button disabled={busy !== null} onClick={() => void decide(proposal, "confirmed")}>Confirm</button>
+        <button disabled={busy !== null} onClick={() => void decide(proposal, "rejected")}>Reject</button>
+      </div>
+    </article>)}
+  </section>;
 }
 
 const EMPTY_ASSISTANT_AUTHORIZATION_CONTEXT = Object.freeze({});
@@ -679,6 +800,15 @@ function browserIdentity(prefix: string): string {
 export function HandrailAssistantLauncher(props: HandrailAssistantLauncherProps): ReactNode {
   const [state, setState] = useState<AssistantLauncherState | null>(null);
   const [error, setError] = useState<unknown>(null);
+  const [generatedTitles, setGeneratedTitles] = useState<ReadonlyMap<ConversationId, string>>(new Map());
+  const rememberGeneratedTitle = useCallback((conversationId: ConversationId, title: string) => {
+    setGeneratedTitles((current) => new Map(current).set(conversationId, title));
+  }, []);
+  const hostUploaders = useRef(new Map<ConversationId, AttachmentUploader<Blob>>());
+  useEffect(() => () => {
+    for (const uploader of hostUploaders.current.values()) uploader.dispose();
+    hostUploaders.current.clear();
+  }, []);
   useEffect(() => {
     let disposed = false;
     let owned: AssistantLauncherState | null = null;
@@ -729,26 +859,52 @@ export function HandrailAssistantLauncher(props: HandrailAssistantLauncherProps)
     };
   }, [props.endpoint, props.fetch, props.protectedRequest, props.diagnostics, props.clientId, props.deviceId]);
 
-  if (error !== null) return props.failure?.(error) ?? <span role="alert">Assistant unavailable.</span>;
-  if (state === null || state.client.workspace === null) return props.loading ?? null;
+  const styles = props.includeStyles === false ? null : <StyledChatPresetStyles/>;
+  if (error !== null) return <>{styles}{props.failure?.(error) ?? <span role="alert">Assistant unavailable.</span>}</>;
+  if (state === null || state.client.workspace === null) return <>{styles}{props.loading ?? null}</>;
   const { endpoint: _endpoint, fetch: _fetch, protectedRequest: _protected, diagnostics: _diagnostics, clientId: _clientId,
-    deviceId: _deviceId, loading: _loading, failure: _failure, ...launcher } = props;
-  void _endpoint; void _fetch; void _protected; void _diagnostics; void _clientId; void _deviceId; void _loading; void _failure;
+    deviceId: _deviceId, loading: _loading, failure: _failure, includeStyles: _includeStyles,
+    onWorkingChange: _onWorkingChange, autoTitle: _autoTitle,
+    presentation: _presentation, uploaderForConversation: _uploaderForConversation, ...launcher } = props;
+  void _endpoint; void _fetch; void _protected; void _diagnostics; void _clientId; void _deviceId; void _loading;
+  void _failure; void _includeStyles; void _onWorkingChange; void _autoTitle; void _presentation; void _uploaderForConversation;
   const authorizationContext = EMPTY_ASSISTANT_AUTHORIZATION_CONTEXT;
-  return <HandrailChatWorkspaceLauncher {...launcher} workspace={state.client.workspace}
-    {...(state.client.activity === null ? {} : { activity: state.client.activity })}
-    catalogOptions={{ catalog: state.client.catalog, authorizationContext }}
-    presenceForConversation={state.client.presenceControllerFor}
-    createConversation={async () => {
+  const approvals = props.approvals === undefined
+    ? <StandardGatewayApprovals client={state.client}/>
+    : props.approvals;
+  const workspaceProps = {
+    ...launcher,
+    workspace: state.client.workspace,
+    ...(state.client.activity === null ? {} : { activity: state.client.activity }),
+    catalogOptions: { catalog: state.client.catalog, authorizationContext },
+    getThreadLabel: (conversationId: ConversationId) => generatedTitles.get(conversationId)
+      ?? props.getThreadLabel?.(conversationId),
+    presenceForConversation: state.client.presenceControllerFor,
+    createConversation: async () => {
       const created = await state.client.catalog.create({ authorizationContext,
         idempotencyKey: browserIdentity("conversation") as never });
       return { authorizationContext, conversationId: created.descriptor.conversationId };
-    }}
-    composerForConversation={(runtime, conversationId) => ({
-      uploader: state.uploader,
+    },
+    composerForConversation: (runtime: ConversationRuntime<ChatRequest>, conversationId: ConversationId) => ({
+      uploader: props.uploaderForConversation === undefined ? state.uploader
+        : hostUploaders.current.get(conversationId) ?? (() => {
+            const uploader = props.uploaderForConversation!(conversationId);
+            hostUploaders.current.set(conversationId, uploader);
+            return uploader;
+          })(),
       conversationId,
       createRequest: ({ text, attachments }) => state.client.buildRequest({ content: text, attachments }),
-    })}/>
+    }),
+    approvals,
+  } satisfies HandrailChatWorkspaceProps<ChatRequest, object>;
+  const workspace = props.presentation === "page"
+    ? <HandrailChatWorkspace {...workspaceProps} layout="page"/>
+    : <HandrailChatWorkspaceLauncher {...workspaceProps}/>;
+  return <>{styles}<AssistantWorkingObserver workspace={state.client.workspace}
+    {...(props.onWorkingChange === undefined ? {} : { onChange: props.onWorkingChange })}/>
+    <StandardConversationTitleObserver client={state.client} enabled={props.autoTitle !== false}
+      onTitle={rememberGeneratedTitle}
+      {...(props.diagnostics === undefined ? {} : { diagnostics: props.diagnostics })}/>{workspace}</>;
 }
 
 export interface StyledChatLauncherProps extends StyledChatPresetProps {

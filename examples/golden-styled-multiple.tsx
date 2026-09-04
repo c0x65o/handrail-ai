@@ -1,4 +1,4 @@
-import { HandrailChatWorkspaceLauncher, StyledChatPresetStyles } from "@handrail/ai/react/styled";
+import { HandrailChatWorkspaceLauncher, StyledChatPresetStyles } from "@handrail/ai-assistant/react/styled";
 import { goldenComposer, type GoldenClient } from "./golden-authenticated-app.js";
 
 async function createConversation(client: GoldenClient) {

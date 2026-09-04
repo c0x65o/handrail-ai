@@ -20,7 +20,7 @@ import {
   type TurnObservation,
   type TurnObservationResult,
   type TurnResumePoint,
-} from "@handrail/ai";
+} from "@handrail/ai-assistant";
 import {
   AttachmentList,
   ChatDialogClose,
@@ -70,7 +70,7 @@ import {
   useConversationActions,
   useConversationComposer,
   useConversationSelector,
-} from "@handrail/ai/react";
+} from "@handrail/ai-assistant/react";
 
 export interface ExampleChatRequest {
   readonly text: string;

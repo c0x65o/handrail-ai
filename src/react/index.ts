@@ -1,4 +1,4 @@
-/** Optional React entry point for @handrail/ai. */
+/** Optional React entry point for @handrail/ai-assistant. */
 export {
   ConversationProvider,
   type ConversationFactoryProviderProps,

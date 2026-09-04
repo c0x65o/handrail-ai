@@ -1,11 +1,17 @@
-# @handrail/ai
+# @handrail/ai-assistant
+
+`@handrail/ai-assistant` is the canonical package name beginning with `0.2.0`.
+See the [package rename guide](./docs/package-rename.md) when migrating an
+immutable `@handrail/ai` pin. New and migrated hosts must follow the
+[adoption standard](./docs/adoption-standard.md), which is also the source for
+Handrail's implementation Knowledge Base entry.
 
 ## Production assistant in one boundary
 
 ```ts
-import { createHandrailAssistant, openaiResponses } from "@handrail/ai/server/assistant";
-import { postgres } from "@handrail/ai/persistence/postgres";
-import { usageFromEnvironment } from "@handrail/ai/server/usage-control";
+import { createHandrailAssistant, openaiResponses } from "@handrail/ai-assistant/server/assistant";
+import { postgres } from "@handrail/ai-assistant/persistence/postgres";
+import { usageFromEnvironment } from "@handrail/ai-assistant/server/usage-control";
 
 const assistant = await createHandrailAssistant({
   id: "aegis",
@@ -15,7 +21,7 @@ const assistant = await createHandrailAssistant({
   persistence: postgres(pool),
   tools: [erpTools],
   usage: usageFromEnvironment(),
-  // Durable Postgres receipts drain at startup and retry every 30 seconds.
+  // Use only when the host can enumerate server-trusted contexts at boot.
   recoveryContexts: listAuthorizedWorkerContexts,
 });
 
@@ -23,7 +29,7 @@ app.use("/api/assistant/aegis", assistant.express({ origin: applicationOrigin })
 ```
 
 ```tsx
-import { HandrailAssistantLauncher } from "@handrail/ai/react/styled";
+import { HandrailAssistantLauncher } from "@handrail/ai-assistant/react/styled";
 
 <HandrailAssistantLauncher endpoint="/api/assistant/aegis" />
 ```
@@ -31,14 +37,14 @@ import { HandrailAssistantLauncher } from "@handrail/ai/react/styled";
 The constructor owns the authenticated gateway, normalized streaming, bounded
 provider/tool continuation, durable replay and cancellation, approvals,
 attachments, conversation synchronization, activity/presence, title fallback,
-usage admission and receipts, diagnostics, and capability negotiation. The
+usage admission and receipts, authenticated-scope recovery, diagnostics, and capability negotiation. The
 application continues to own authentication, domain tools/policy, provider
 credentials, and its Postgres pool. See the
 [Aegis qualification fixture](./examples/spartan-aegis-high-level.ts) for an
 under-100-line migration target; legacy dual-write is deliberately outside the
 reusable template.
 
-`@handrail/ai` is a headless-first TypeScript SDK for provider-neutral chat
+`@handrail/ai-assistant` is a headless-first TypeScript SDK for provider-neutral chat
 state, durable event replay, streaming transports, bounded application tools,
 provider-neutral image and PDF attachment references, structured citations,
 optional provider-context compaction, conversation lifecycle contracts, speech,
@@ -51,30 +57,30 @@ Node.js 20 or newer is required for package tooling and trusted-server use.
 
 | Import | Purpose | Runtime boundary |
 | --- | --- | --- |
-| `@handrail/ai` | Protocol, conversation runtime/store/catalog, citations, provider-context, approval, transcription, realtime voice, web-search, event-store and sync contracts, tools, presence, retry, and usage APIs | Runtime-neutral core; direct-provider construction and side effects are trusted-server only |
-| `@handrail/ai/browser` | IndexedDB stores plus generalized image/PDF attachment intake, audio capture, and WebRTC voice helpers | Browser only; no provider credentials or server-side tool execution |
-| `@handrail/ai/client` | Application-gateway transport and language-neutral wire types | Browser, React Native, and other Fetch/stream clients |
-| `@handrail/ai/conformance` | Deterministic protocol and adapter qualification helpers | Tests and CI; no production side effects |
-| `@handrail/ai/react/headless` | Runtime provider, selectors, and actions with no DOM elements or `react-dom` import | React Native and fully custom React renderers |
-| `@handrail/ai/react` | Optional unstyled React bindings and accessible composition seams for chat, citations, conversation picking, approvals, transcription, and realtime voice | Browser/React; React is an optional peer |
-| `@handrail/ai/react/styled` | Optional responsive styled launcher/dialog/drawer/page preset | Browser/React; theme variables and renderers are application-owned |
-| `@handrail/ai/server/application-gateway` | Express-compatible adapter for the web-standard streaming gateway | Trusted application server only |
-| `@handrail/ai/server/application` | One-call trusted assembly for plugins, MCP connectors, policy, approvals, bounded tools, runtime, and gateway routing | Trusted application server only |
-| `@handrail/ai/server/assistant` | High-level authenticated assistant, provider, durable persistence, usage worker, and HTTP assembly | Trusted application server only |
-| `@handrail/ai/server/assistant-context` | Server-owned principal, attribution, model-profile, tool-context, presence, and untrusted-correlation separation | Trusted application server only |
-| `@handrail/ai/server/managed` | Optional Handrail AI Runtime v1 streaming transport | Trusted server only |
-| `@handrail/ai/server/usage-control` | Server-only AI Runtime admission, hard-denial, and idempotent receipt-settlement client | Trusted server only |
-| `@handrail/ai/server/trusted-server` | Framework-neutral request protection contracts | Trusted server only |
-| `@handrail/ai/connectors/mcp` | Injected-client MCP tool-plugin/discovery adapter | Optional connector boundary |
-| `@handrail/ai/adapters/spartan-aegis` | Supported proposal-only adapter for Spartan's existing Aegis definitions and action registry | Trusted Spartan application server only |
-| `@handrail/ai/adapters/mills-family` | Supported proposal-only adapter for Mills' existing tool runtime, citations, and proposal boundary | Trusted Mills application server only |
-| `@handrail/ai/persistence/postgres` | Injected-client reference Postgres persistence | Optional database boundary |
-| `@handrail/ai/providers/openai` | OpenAI Chat Completions and Responses adapters, including hosted/deferred tool projection | Trusted server only |
-| `@handrail/ai/providers/openai/transcription` | OpenAI transcription capability | Trusted server only |
-| `@handrail/ai/providers/openai/realtime` | OpenAI realtime bootstrap, event normalization, and session authority | Trusted server only |
-| `@handrail/ai/providers/anthropic` | Anthropic provider adapter | Trusted server only |
-| `@handrail/ai/providers/gemini` | Gemini provider adapter | Trusted server only |
-| `@handrail/ai/providers/xai` | xAI provider adapter | Trusted server only |
+| `@handrail/ai-assistant` | Protocol, conversation runtime/store/catalog, citations, provider-context, approval, transcription, realtime voice, web-search, event-store and sync contracts, tools, presence, retry, and usage APIs | Runtime-neutral core; direct-provider construction and side effects are trusted-server only |
+| `@handrail/ai-assistant/browser` | IndexedDB stores plus generalized image/PDF attachment intake, audio capture, and WebRTC voice helpers | Browser only; no provider credentials or server-side tool execution |
+| `@handrail/ai-assistant/client` | Application-gateway transport and language-neutral wire types | Browser, React Native, and other Fetch/stream clients |
+| `@handrail/ai-assistant/conformance` | Deterministic protocol and adapter qualification helpers | Tests and CI; no production side effects |
+| `@handrail/ai-assistant/react/headless` | Runtime provider, selectors, and actions with no DOM elements or `react-dom` import | React Native and fully custom React renderers |
+| `@handrail/ai-assistant/react` | Optional unstyled React bindings and accessible composition seams for chat, citations, conversation picking, approvals, transcription, and realtime voice | Browser/React; React is an optional peer |
+| `@handrail/ai-assistant/react/styled` | Optional responsive styled launcher/dialog/drawer/page preset | Browser/React; theme variables and renderers are application-owned |
+| `@handrail/ai-assistant/server/application-gateway` | Express-compatible adapter for the web-standard streaming gateway | Trusted application server only |
+| `@handrail/ai-assistant/server/application` | One-call trusted assembly for plugins, MCP connectors, policy, approvals, bounded tools, runtime, and gateway routing | Trusted application server only |
+| `@handrail/ai-assistant/server/assistant` | High-level authenticated assistant, provider, durable persistence, usage worker, and HTTP assembly | Trusted application server only |
+| `@handrail/ai-assistant/server/assistant-context` | Server-owned principal, attribution, model-profile, tool-context, presence, and untrusted-correlation separation | Trusted application server only |
+| `@handrail/ai-assistant/server/managed` | Optional Handrail AI Runtime v1 streaming transport | Trusted server only |
+| `@handrail/ai-assistant/server/usage-control` | Server-only AI Runtime admission, hard-denial, and idempotent receipt-settlement client | Trusted server only |
+| `@handrail/ai-assistant/server/trusted-server` | Framework-neutral request protection contracts | Trusted server only |
+| `@handrail/ai-assistant/connectors/mcp` | Injected-client MCP tool-plugin/discovery adapter | Optional connector boundary |
+| `@handrail/ai-assistant/adapters/spartan-aegis` | Supported proposal-only adapter for Spartan's existing Aegis definitions and action registry | Trusted Spartan application server only |
+| `@handrail/ai-assistant/adapters/mills-family` | Supported proposal-only adapter for Mills' existing tool runtime, citations, and proposal boundary | Trusted Mills application server only |
+| `@handrail/ai-assistant/persistence/postgres` | Injected-client reference Postgres persistence | Optional database boundary |
+| `@handrail/ai-assistant/providers/openai` | OpenAI Chat Completions and Responses adapters, including hosted/deferred tool projection | Trusted server only |
+| `@handrail/ai-assistant/providers/openai/transcription` | OpenAI transcription capability | Trusted server only |
+| `@handrail/ai-assistant/providers/openai/realtime` | OpenAI realtime bootstrap, event normalization, and session authority | Trusted server only |
+| `@handrail/ai-assistant/providers/anthropic` | Anthropic provider adapter | Trusted server only |
+| `@handrail/ai-assistant/providers/gemini` | Gemini provider adapter | Trusted server only |
+| `@handrail/ai-assistant/providers/xai` | xAI provider adapter | Trusted server only |
 
 The provider subpaths accept application-injected request functions rather than
 installing provider SDKs. This keeps the application in control of provider SDK
@@ -107,7 +113,7 @@ runtime per conversation. `createConversationRuntime` hydrates its store by
 replaying durable history before it resolves; it does not start a network
 observation. The process-local store below is suitable for examples and tests.
 Use an application-owned durable adapter in production (or
-`IndexedDBConversationEventStore` from `@handrail/ai/browser` for local browser
+`IndexedDBConversationEventStore` from `@handrail/ai-assistant/browser` for local browser
 persistence).
 
 ```ts
@@ -118,7 +124,7 @@ import {
   type ConversationId,
   type ConversationState,
   type ConversationTransport,
-} from "@handrail/ai";
+} from "@handrail/ai-assistant";
 
 declare const transport: ConversationTransport<unknown, AppRequest>;
 declare const request: AppRequest;
@@ -170,7 +176,7 @@ in conversation history.
 ## Unstyled React presentation recipes
 
 The checked [`examples/react-presentations.tsx`](./examples/react-presentations.tsx)
-uses the public `@handrail/ai` and `@handrail/ai/react` declarations to compose
+uses the public `@handrail/ai-assistant` and `@handrail/ai-assistant/react` declarations to compose
 one credential-free headless runtime as six presentations:
 
 - `ChatDialogRecipe` for a modal;
@@ -189,7 +195,7 @@ deterministic and perform no network, provider, or Handrail control-plane call.
 The unstyled entry injects no CSS, fonts, branding, layout, or theme. Applications
 that want a ready surface can import the one-component `HandrailChat` (runtime,
 uploader, and request builder in; complete chat surface out) or `StyledChatPreset` and
-`StyledChatPresetStyles` from `@handrail/ai/react/styled`; every visual can still
+`StyledChatPresetStyles` from `@handrail/ai-assistant/react/styled`; every visual can still
 be replaced through the unstyled entry, CSS custom properties, slots, and tool
 result renderer keys.
 
@@ -239,8 +245,8 @@ The Mills tool-runtime and rollback-safe adoption path is in
 [`docs/mills-family-migration.md`](./docs/mills-family-migration.md).
 
 React Native applications should import the transport, typed runtime/state, and
-resource APIs from `@handrail/ai/client`, and provider/selectors/actions from
-`@handrail/ai/react/headless`. That entry imports neither DOM components nor
+resource APIs from `@handrail/ai-assistant/client`, and provider/selectors/actions from
+`@handrail/ai-assistant/react/headless`. That entry imports neither DOM components nor
 `react-dom`; render ordinary native `View`, `Text`, and `TextInput` components.
 Inject the platform's protected `fetch`, Blob upload support, and a durable
 `ConversationEventStore` backed by application-owned storage. The browser
@@ -279,7 +285,7 @@ The checked
 [`examples/trusted-server-transports.ts`](./examples/trusted-server-transports.ts)
 accepts a `ProviderAdapter` from the host and builds the direct transport
 without a live provider call or credential literal. Provider-specific adapter
-factories are available from the four `@handrail/ai/providers/*` entry points
+factories are available from the four `@handrail/ai-assistant/providers/*` entry points
 listed above.
 
 The direct transport supports authoritative cancellation for active turns in
@@ -290,7 +296,7 @@ cancellation.
 
 ### Optional managed runtime on a trusted server
 
-`createManagedRuntimeTransport` from `@handrail/ai/server/managed` calls the
+`createManagedRuntimeTransport` from `@handrail/ai-assistant/server/managed` calls the
 public Handrail AI Runtime v1 endpoint. Its `fetch` and per-request `getHeaders`
 dependencies must be injected by trusted-server infrastructure so rotation and
 authorization policy stay outside browser/mobile bundles. The checked trusted
@@ -356,7 +362,7 @@ durable log and may expire, coalesce, or disappear across disconnects. Do not
 reconstruct authoritative messages or turn state from presence records.
 
 For multi-instance Node deployments that already use PostgreSQL,
-`createPostgresLivePubSubFromPool` from `@handrail/ai/persistence/postgres`
+`createPostgresLivePubSubFromPool` from `@handrail/ai-assistant/persistence/postgres`
 adapts an injected `pg`-compatible pool to both live activity and presence
 delivery. Pass the returned bridge as `pubSub` to
 `createInMemoryLiveConversationActivityDelivery` and
@@ -443,7 +449,7 @@ annotations and provider-native payloads are not durable provenance. Runtime
 turns persist normalized citation/source events alongside their target facts.
 Optional `CitationList` and `CitationItem` React seams are accessible,
 unstyled, and accept host render/activation policy; the React-free citation
-model remains in `@handrail/ai`.
+model remains in `@handrail/ai-assistant`.
 
 ### Provider-context measurement and compaction
 
@@ -540,7 +546,7 @@ with negotiated format/size/duration limits, an abort signal, and a stable
 idempotency key. A trusted host resolves bytes only for the operation and maps
 failures to safe errors. Retries must reuse the logical identity; cancellation
 does not authorize a retry under a new identity. The OpenAI implementation is
-available from `@handrail/ai/providers/openai/transcription` through
+available from `@handrail/ai-assistant/providers/openai/transcription` through
 `createOpenAITranscriptionCapability` with injected resolution and request
 functions.
 
@@ -615,7 +621,7 @@ metering settlement, credits, billing, ledgers, databases, and authoritative
 control-plane policy remain owned by Handrail and are not implemented in this
 package.
 
-`createAIRuntimeUsageClient` from `@handrail/ai/server/usage-control` submits
+`createAIRuntimeUsageClient` from `@handrail/ai-assistant/server/usage-control` submits
 normalized receipt batches from a trusted application server. Pair it with
 `createAIRuntimeUsageReceiptSink` and a host-implemented durable
 `AIRuntimeUsageOutbox`, then pass that sink as `ConversationRuntime`'s
@@ -623,7 +629,8 @@ normalized receipt batches from a trusted application server. Pair it with
 transient delivery leaves the stable receipt identity queued for startup or
 worker `flush()` retries. `createHandrailAssistant` wires that Postgres outbox
 through its high-level persistence boundary, drains configured recovery scopes
-at startup, and runs a non-overlapping retry worker by default. Tune this with
+at startup, recovers opaque user-bound scopes when they are next authenticated,
+and runs a non-overlapping retry worker by default. Tune this with
 `usageDelivery`, call `flushUsage()` for an explicit drain, and call
 `stopUsageWorker()` during process shutdown. The token and exact service-environment binding remain
 server-only. Empty receipt batches are accepted only when a request is finalized

@@ -1455,8 +1455,15 @@ export function postgres(
   pool: PostgresPoolLike,
   options: PostgresAssistantPersistenceOptions = {},
 ): PostgresAssistantPersistence {
-  const client = createDiagnosedPostgresSqlClient(createPostgresSqlClientFromPool(pool), options.diagnostics);
-  const persistence = new PostgresAiPersistence(client);
+  return postgresFromClient(createPostgresSqlClientFromPool(pool), options);
+}
+
+/** Adapt an application's transactional SQL client without requiring `pg`. */
+export function postgresFromClient(
+  client: PostgresSqlClient,
+  options: PostgresAssistantPersistenceOptions = {},
+): PostgresAssistantPersistence {
+  const persistence = new PostgresAiPersistence(createDiagnosedPostgresSqlClient(client, options.diagnostics));
   const attachmentLimits = Object.freeze(options.attachmentLimits ?? DEFAULT_ASSISTANT_ATTACHMENT_LIMITS);
   return Object.freeze({
     persistence,

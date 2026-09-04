@@ -1,4 +1,4 @@
 export {
   IndexedDBConversationEventStore,
   IndexedDBConversationSyncStateStore,
-} from "@handrail/ai/browser";
+} from "@handrail/ai-assistant/browser";

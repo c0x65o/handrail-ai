@@ -90,7 +90,11 @@ describe("createHandrailAssistant", () => {
     const catalog = new InMemoryConversationCatalog<Context>({ authorize: () => "allow",
       createConversationId: () => "conversation-approved" as never });
     const durableTurns = new InMemoryDurableApplicationTurnStore();
-    const bundle = { events, approvals, catalog, durableTurns, toolLedger: new InMemoryToolExecutionLedger(),
+    const bundle = { events,
+      approvals: new InMemoryApprovalProposalStore<Context>({ authorize: () => "deny" }),
+      catalog: new InMemoryConversationCatalog<Context>({ authorize: () => "deny",
+        createConversationId: () => "wrong-conversation" as never }),
+      durableTurns, toolLedger: new InMemoryToolExecutionLedger(),
       usageReceiptSink: null, usageAdmissions: null } as unknown as PostgresAssistantPersistenceBundle<Context>;
     const persistence = { attachmentLimits: { maximumBytes: 1_000, acceptedMediaTypes: ["text/plain"],
       ttlMilliseconds: 60_000 }, persistence: {}, forScope: () => bundle } as unknown as PostgresAssistantPersistence;
@@ -104,6 +108,7 @@ describe("createHandrailAssistant", () => {
     });
     const assistant = await createHandrailAssistant<Context>({ id: "approval-test", authorize: async (request) => context(request),
       persistence, tools: [plugin], toolPolicy: () => ({ outcome: "external_approval_required" }),
+      conversationCatalogFor: () => catalog, approvalStoreFor: () => approvals,
       provider: { metadata: { provider_id: "test", model_id: "test", capabilities: {
         streaming: true, text: true, tool_calls: true, parallel_tool_calls: false, reasoning: false,
         document_input: { supported: false }, provider_context: { supported: false, reason: "provider_not_supported" },
@@ -134,6 +139,9 @@ describe("createHandrailAssistant", () => {
       proposalId = created?.event.payload.type === "approval.proposal_created" ? created.event.payload.proposal_id : "";
       expect(proposalId).not.toBe("");
     });
+    expect((await approvals.listGroup({ permissionContext: context(new Request("https://example.test")),
+      groupId: "conversation-approved" as never })).map((proposal) => proposal.proposal_id))
+      .toEqual([proposalId]);
     expect(executions).toBe(0);
     const decision = await assistant.handle(new Request("https://example.test/approvals/transition", {
       method: "POST", headers: { "x-user": "alice", "content-type": "application/json" }, body: JSON.stringify({
@@ -149,6 +157,38 @@ describe("createHandrailAssistant", () => {
     expect(audit.entries.some(({ event }) => event.payload.type === "approval.proposal_status_changed" &&
       event.payload.status === "confirmed" && event.actor.type === "user" && event.actor.id === "alice" &&
       event.source.type === "runtime")).toBe(true);
+  });
+
+  it("recovers a durable scope when its trusted context is first authenticated", async () => {
+    type Context = HandrailAssistantAuthorizationContext;
+    const context: Context = { principalId: "alice", tenantId: "tenant", scopeId: "alice",
+      attribution: { organization: { id: "org", source: "server_derived", trust: "authoritative" },
+        project: { id: "project", source: "server_derived", trust: "authoritative" },
+        service_environment: { id: "env", source: "server_derived", trust: "authoritative" },
+        known_user: { id: "alice", source: "server_derived", trust: "authoritative" },
+        session: { id: "session", source: "server_derived", trust: "authoritative" },
+        automation: { id: null, source: "server_derived", trust: "authoritative" } } };
+    const durableTurns = new InMemoryDurableApplicationTurnStore();
+    const recoverable = vi.spyOn(durableTurns, "listRecoverable");
+    const bundle = { events: new InMemoryConversationEventStore(),
+      approvals: new InMemoryApprovalProposalStore<Context>({ authorize: () => "allow" }),
+      catalog: new InMemoryConversationCatalog<Context>({ authorize: () => "allow" }),
+      durableTurns, toolLedger: new InMemoryToolExecutionLedger(), activity: {}, attachments: {},
+      usageReceiptSink: null, usageAdmissions: null } as unknown as PostgresAssistantPersistenceBundle<Context>;
+    const assistant = await createHandrailAssistant<Context>({ id: "context-recovery", authorize: () => context,
+      persistence: { attachmentLimits: { maximumBytes: 1_000, acceptedMediaTypes: ["text/plain"],
+        ttlMilliseconds: 60_000 }, persistence: {}, forScope: () => bundle } as unknown as PostgresAssistantPersistence,
+      provider: { metadata: { provider_id: "test", model_id: "test", capabilities: {
+        streaming: true, text: true, tool_calls: true, parallel_tool_calls: false, reasoning: false,
+        document_input: { supported: false }, provider_context: { supported: false, reason: "provider_not_supported" },
+        context_window_tokens: null, max_output_tokens: null } }, createTransport: () => transport } });
+
+    expect(recoverable).not.toHaveBeenCalled();
+    expect((await assistant.handle(new Request("https://example.test/capabilities"))).status).toBe(200);
+    expect(recoverable).toHaveBeenCalledOnce();
+    expect(recoverable).toHaveBeenCalledWith(25);
+    expect((await assistant.handle(new Request("https://example.test/capabilities"))).status).toBe(200);
+    expect(recoverable).toHaveBeenCalledOnce();
   });
 
   it("drains durable usage on startup and retries failed delivery in the worker", async () => {

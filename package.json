@@ -1,9 +1,12 @@
 {
-  "name": "@handrail/ai",
-  "version": "0.1.91",
+  "name": "@handrail/ai-assistant",
+  "version": "0.2.1",
   "description": "Provider-neutral TypeScript primitives and runtime tooling for building AI applications with Handrail.",
   "license": "UNLICENSED",
   "type": "module",
+  "bin": {
+    "handrail-ai-assistant": "./scripts/adopt.mjs"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -131,6 +134,8 @@
   "files": [
     "dist",
     "docs",
+    "scripts/adopt.mjs",
+    "templates",
     "flutter/handrail_ai_client/lib",
     "flutter/handrail_ai_client/pubspec.yaml",
     "flutter/handrail_ai_client/README.md",
@@ -145,6 +150,7 @@
     "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json",
     "prepare": "npm run build",
     "check:examples": "npm run build && node scripts/check-readme-examples.mjs",
+    "check:adoption-tool": "node --test test/adopt-cli.test.mjs",
     "check:protected-web-search-example": "npm run build && node scripts/check-protected-web-search-example.mjs",
     "check:package-contract": "npm run build && node --test test/package-contract.test.mjs",
     "check:public-surface": "node scripts/check-provider-public-surface.mjs",

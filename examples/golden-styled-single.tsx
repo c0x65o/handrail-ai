@@ -1,4 +1,4 @@
-import { HandrailChat, StyledChatPresetStyles } from "@handrail/ai/react/styled";
+import { HandrailChat, StyledChatPresetStyles } from "@handrail/ai-assistant/react/styled";
 import { goldenComposer, type GoldenClient } from "./golden-authenticated-app.js";
 
 /** Styled UI stays optional: this file is the only layer importing the styled entry. */

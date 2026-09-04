@@ -1,5 +1,5 @@
-import { createApplicationGateway } from "@handrail/ai";
-import { createApplicationGatewayExpressMiddleware } from "@handrail/ai/server/application-gateway";
+import { createApplicationGateway } from "@handrail/ai-assistant";
+import { createApplicationGatewayExpressMiddleware } from "@handrail/ai-assistant/server/application-gateway";
 
 // `transport` is the trusted server's provider/managed transport. Authentication
 // remains application-owned. Mount after express.json({limit:"1mb"}) and the

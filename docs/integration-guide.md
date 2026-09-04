@@ -9,9 +9,9 @@ application server.
 
 | Need | Configuration | UI import |
 | --- | --- | --- |
-| Custom web/native UI or no UI | `conversations: { mode: "single", ... }` or `mode: "multiple"` | none or `@handrail/ai/react/headless` |
-| One ready-made web chat | `conversations: { mode: "single", ... }` | `@handrail/ai/react/styled` |
-| Thread picker and background turns | `conversations: { mode: "multiple", ... }` | `@handrail/ai/react/styled` |
+| Custom web/native UI or no UI | `conversations: { mode: "single", ... }` or `mode: "multiple"` | none or `@handrail/ai-assistant/react/headless` |
+| One ready-made web chat | `conversations: { mode: "single", ... }` | `@handrail/ai-assistant/react/styled` |
+| Thread picker and background turns | `conversations: { mode: "multiple", ... }` | `@handrail/ai-assistant/react/styled` |
 
 The checked, credential-free golden path is split by deployment boundary:
 
@@ -32,7 +32,7 @@ not otherwise change when the gateway moves to HTTPS.
 ## Identity and context
 
 Use `createAssistantGatewayAuthorizer` from
-`@handrail/ai/server/assistant-context`. It deliberately separates:
+`@handrail/ai-assistant/server/assistant-context`. It deliberately separates:
 
 1. `principal`: authenticated server identity used by gateway authorization;
 2. `attribution`: authoritative organization/project/environment/user/session

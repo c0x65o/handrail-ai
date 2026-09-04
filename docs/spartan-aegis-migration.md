@@ -1,176 +1,134 @@
-# Spartan Aegis integration reference
+# Spartan Aegis 0.2 migration and qualification record
 
-This is a migration seam, not a rewrite of Spartan's business domain. It was derived from the current Aegis implementation in `src/server/aegis` and `src/client/features/aegis-assistant`. Spartan may consume the adapter directly or through a pinned integration artifact while the release is being qualified.
+Spartan consumes the same supported integration as Mills: the high-level
+`createHandrailAssistant` server and endpoint-only
+`HandrailAssistantLauncher`. Aegis remains Spartan's product name and domain
+adapter; it is not a second SDK or UI implementation.
 
-## Production target
+## Current composition
 
-The migration destination is the high-level constructor, not a copy of Aegis's
-current orchestration. The checked
-[`spartan-aegis-high-level.ts`](../examples/spartan-aegis-high-level.ts) is the
-qualification fixture and is under 100 lines of integration code:
+Production wiring constructs `createSpartanAegisAssistant` once in
+`src/server/features.ts` and mounts its protected gateway at
+`/api/aegis/handrail-ai`. `src/server/aegis/handrail-ai-gateway.ts` maps the
+standard `ChatRequest` into the existing Aegis service request. The SDK owns:
 
-```ts
-const assistant = await createHandrailAssistant({
-  id: "aegis",
-  instructions,
-  authorize: resolveAuthenticatedUser,
-  provider: openaiResponses({ model, maximumInputMessages: 30 }),
-  persistence: postgres(pool),
-  tools: [erpTools],
-  usage: usageFromEnvironment(),
-});
+- gateway negotiation and resource routing;
+- synchronization, canonical activity, replay, cancellation, and durable turn
+  state;
+- scoped catalog/approval resource exposure through explicit migration seams;
+- normalized usage receipt capture and the durable Postgres outbox;
+- presence/activity delivery, including Spartan's existing Postgres pub-sub;
+- browser workspace lifecycle, background turns, approvals, citations,
+  Markdown, Copy, Stop, Retry, and automatic titles.
 
-app.use("/api/assistant/aegis", assistant.express({ origin: applicationOrigin }));
-```
+Spartan continues to own and test:
 
-The browser integration is only:
+- opaque-session authentication and same-origin enforcement;
+- company/principal/session derivation and cross-company denial;
+- Aegis prompts, provider behavior, bounded transcript/tool policy, hosted
+  search, citations, and request-scoped Handrail connector;
+- role-filtered tool discovery, Zod validation, proposal staging, confirmed
+  mutations, business audit, and existing Aegis records;
+- protected attachment upload and resolution;
+- provider/model configuration and the application database/pool lifecycle;
+- Aegis name, orange theme, navigation, and the temporary legacy fallback.
 
-```tsx
-<HandrailAssistantLauncher endpoint="/api/assistant/aegis" />
-```
+The domain service still records `aegis_turn_activity` during the rollback
+window. The high-level adapter disables the former generic live-activity and
+durable-transport wrappers, so only the SDK publishes canonical gateway
+activity and owns generic durability. Remove the domain rollback record only
+after its observation gate closes.
 
-The reusable path contains no Aegis-owned SSE, retry policy, provider tool loop,
-cancellation protocol, replay logic, usage receipts/outbox, or conversation
-repository. Legacy dual-write is an Aegis rollout and rollback concern only; it
-must wrap the migration outside `createHandrailAssistant` and must never become
-part of the new-project template.
+## Standard browser surface
 
-The checked [`spartan-aegis-conformance.ts`](../examples/spartan-aegis-conformance.ts)
-runs the shared `@handrail/ai/conformance` contract against the mounted Aegis
-endpoint and an isolated Postgres schema. Its adapter must measure real durable
-rows and business-side-effect counts; it must not return hard-coded evidence.
+`src/client/features/aegis-assistant/HandrailAiAssistant.tsx` is a thin
+`HandrailAssistantLauncher` composition. It supplies the endpoint, protected
+request hook, stable client/device identities, theme, authorized uploader,
+page text, and fallback. It does not implement a second runtime, synchronizer,
+thread picker, approval panel, citation renderer, or title coordinator.
 
-## Keep domain ownership in Spartan
+The default is multi-conversation. Closing the launcher never cancels a turn;
+only Stop does. Attachment upload remains Spartan-owned temporarily because it
+must resolve the existing authenticated binary route. The legacy Aegis button
+remains a one-step rollback while the release and observation gates are open.
+`AEGIS_HANDRAIL_AI_CLIENT=handrail_ai` is the standard default once the durable
+gateway is available; `legacy` is the explicit client rollback.
 
-- Keep read definitions, source labels, actor/company filtering, and execution in `tools.ts` and `tool-catalog.ts`.
-- Keep Zod action descriptors, validation, actor summaries, and side effects in `actions.ts` and the domain action modules.
-- Keep the rule that action tools create proposals rather than performing an unconfirmed mutation. Map descriptors to `createToolPlugin({ registrations, policy, approvals, presentations })`; `summarizeForActor` becomes the safe approval summary.
-- Keep repository authorization and company scoping before tool discovery and again before execution. Pass only the resulting actor-authorized definitions into `createDeferredToolDiscoveryPlan`.
-- Keep Aegis-specific system instructions, tool-call budget (currently 75), transcript bound (currently 30), output bound, and source semantics as application policy. The authoritative source is Spartan `src/server/aegis/provider.ts` (`MAX_TOOL_CALLS = 75`, audited 2026-08-30). Inject these values from Spartan configuration so a future application-policy change does not require an SDK release.
+## Telemetry contract
 
-## Move generic machinery to handrail-ai
+Handrail auto-provides the AI Runtime binding. Spartan calls
+`usageFromEnvironment()` and derives authoritative organization, project,
+service-environment, known-user, and session attribution from the trusted
+binding plus authenticated actor. It does not inspect ordinary env inventory
+to decide whether telemetry is available.
 
-| Existing Aegis concern | Reusable handrail-ai boundary |
-| --- | --- |
-| `provider.ts` Responses loop and normalized stream | `createOpenAIResponsesProviderAdapter` plus `runToolLoop({ limits: { maxTotalToolCalls: 75 } })`; configure `maximumInputMessages: 30` |
-| `tool-catalog.ts` namespace projection | `createDeferredToolDiscoveryPlan`; Spartan supplies stable namespace membership |
-| `handrail-bridge.ts` MCP discovery/execution glue | `@handrail/ai/connectors/mcp` |
-| routes, protected request plumbing, cancellation, replay | `createDurableApplicationTransport` behind `createApplicationGateway` plus `@handrail/ai/server/application-gateway` |
-| thread/event/catalog persistence | `PostgresConversationEventStore`, `PostgresConversationCatalog`, `PostgresDurableApplicationTurnStore`, `PostgresConversationActivityStore`, and `PostgresConversationSyncStateStore` |
-| action request persistence and confirmation UI | approval proposal store and plugin approval presentation |
-| bespoke launcher/dialog/transcript/composer | unstyled `@handrail/ai/react` or optional `@handrail/ai/react/styled` |
-| typing animation and multi-device state | `createAssistantActivityTransport`, live presence delivery/pub-sub, and protected activity; never the durable event log |
-| browser API wrappers | `@handrail/ai/client`; Flutter uses `flutter/handrail_ai_client` |
+Every provider invocation, including unavailable usage on failed/cancelled
+invocations, becomes a normalized receipt with stable turn, attempt, and
+continuation identities. Capture resolves after the receipt is durable; a
+best-effort flush, startup drain, interval worker, and graceful-shutdown flush
+deliver it. Telemetry failure cannot fail the user turn. Retryable delivery
+keeps the row pending, permanent rejection dead-letters it, and the receiver
+deduplicates by `usage_receipt_id`.
 
-## Minimal plugin mapping
+Qualification includes a mounted high-level Aegis turn that checks the actual
+Telemetry receipts endpoint and authoritative provider/model/tenant/user/
+session/token fields. SDK tests separately prove startup drain, transient
+retry, durable pending attempts, acknowledgement, and permanent-failure
+handling. Handrail's AI Runtime report is the final runtime receipt proof.
 
-```ts
-const aegisPlugin = createDescriptorToolPlugin({
-  pluginId: "spartan.aegis.erp",
-  version: "1.0.0",
-  displayName: "Spartan Aegis ERP",
-  descriptors: [...readDescriptors, ...proposalDescriptors],
-  policy: enforceCompanyAndActionPolicy,
-});
+## Recovery and multi-instance behavior
 
-const application = await createAiApplication({
-  plugins: [aegisPlugin],
-  connectors: [optionalHandrailMcpConnector],
-  installContext: undefined,
-  policy: enforceCompanyAndActionPolicy,
-  toolLoopLimits: { maxTotalToolCalls: spartanPolicy.maxToolCalls },
-});
-```
+Spartan must not persist or reconstruct an opaque application session token at
+boot. `recoverPendingOnContext` therefore performs a bounded recovery scan when
+that trusted session is next authenticated. The existing Postgres notification
+bridge is passed to the high-level assistant for cross-instance activity and
+presence. Durable activity snapshots and polling remain convergence fallback
+when notifications are delayed or dropped.
 
-Registration conversion must retain the Zod parser as the execution trust boundary. JSON Schema is only model guidance. The executor receives validated arguments and calls the unchanged domain service. Never serialize the executor, policy, actor context, or approval summarizer to clients/providers.
+Shutdown order is: flush/stop the assistant usage worker, stop remaining app
+services, close live pub-sub, then close the database pool.
 
-## Hosted search compatibility
+## Rollback and removal
 
-The existing provider sends `web_search`, deferred `namespace` function tools, and `tool_search`, uses `store:false`, retains reasoning items, permits no parallel calls, and validates the returned namespace/name against its advertised set. Preserve all of those properties. `projectOpenAIResponsesTools` produces the same deferred layout from the actor-filtered plan and includes hosted web search when configured. For a model without tool search, it intentionally exposes only the plan's bounded eager tools; it does not silently send all 89 schemas. OpenAI documents namespace tools, `defer_loading`, hosted/client tool search, and web search in the [Responses API reference](https://developers.openai.com/api/reference/cli/resources/beta/subresources/responses).
+The former low-level gateway and legacy Aegis UI/routes remain reachable only
+as bounded rollback paths. They must not receive new generic features. Rollback
+selects the previous client/server path and immutable package pin; it does not
+delete SDK tables or rewrite reconciled domain rows.
 
-Configure `createOpenAIResponsesProviderAdapter` with
-`toolChoice: (invocation) => invocation.continuation_of ? "auto" : "required"`,
-`includeReasoningEncryptedContent: true`, and the application-selected
-`reasoningEffort`. This preserves Spartan's first-turn grounding rule while
-allowing a continuation to finish in prose, and retains the encrypted reasoning
-item required by a `store:false` tool continuation.
+Do not remove the rollback path until all of these are true:
 
-## Suggested cutover
+1. the real `@handrail/ai-assistant` 0.2 artifact is pinned by full commit SHA
+   with a clean lockfile install;
+2. package and real-consumer conformance gates pass;
+3. representative roles preserve tool discovery, proposals, confirmations,
+   hosted search, citations, attachment authorization, and provider policy;
+4. reconnect, cancellation, restart recovery, multi-device convergence, and
+   multi-instance pub-sub pass;
+5. successful, failed, and cancelled receipt parity matches the Handrail report
+   through the observation window;
+6. a rollback rehearsal succeeds without data repair.
 
-1. Wrap existing descriptors as one plugin and assert that the discovered name set is identical for representative roles.
-2. Replace only namespace projection, preserving provider code and golden request tests.
-3. Put the current routes behind the gateway transport. Wrap the application/provider transport with `createDurableApplicationTransport`; use an opaque request codec backed by Spartan-owned messages rather than storing prompt text in the turn document. Use `DualWriteConversationEventStore` and `DualWriteApprovalProposalStore`; their primary stores remain authoritative and their reconciliation methods never overwrite divergence.
-4. Migrate the client to the headless runtime, then the styled preset or a Spartan-owned UI. Keep old routes during rollback.
-5. Cut persistence reads over after event/revision, proposal, attachment, and catalog reconciliation. Remove duplicated generic code only after parity tests.
+Only then delete the old custom client bootstrap, low-level generic gateway,
+duplicate sync/activity/usage code, and their tests. Never delete Spartan's
+domain authorization, Zod schemas, tool policy, provider policy, proposal/
+confirmation authority, business audit, or retention rules as SDK cleanup.
 
-The checked [`examples/spartan-aegis-adapter.ts`](../examples/spartan-aegis-adapter.ts) accepts Spartan's existing `AEGIS_TOOL_DEFINITIONS`, `AegisToolExecutor.run`, and `AEGIS_ACTION_REGISTRY` structural contracts. `createSpartanAegisPlugin` maps action calls to a Spartan-owned `proposeAction` callback; it never invokes the business action executor. The checked default uses the current authoritative 75-call budget, while production should inject that value from Spartan policy.
+## Checked evidence
 
-Required parity tests cover every role's discovered tools, denied cross-company access, proposal-only actions, idempotent confirmation, configured tool-call budget, hosted web citations, attachment limits, archive/restore/new threads, stream reconnect, cancellation, and multi-device convergence.
+- `tests/aegis-handrail-ai-ui.test.ts` proves the client uses the standard
+  launcher and only Spartan-owned seams.
+- `tests/aegis.test.ts` proves protected high-level capabilities, same-origin
+  and authentication denial, a real PGlite durable turn, provider execution,
+  and authoritative Telemetry receipt payload.
+- `tests/aegis-handrail-ai-postgres-live-delivery.test.ts` proves Postgres
+  cross-instance activity fan-out and listener cleanup.
+- the SDK `test/server-assistant.test.ts` proves trusted-context recovery and
+  usage worker startup/retry behavior.
+- the SDK `test/postgres-assistant-foundation.test.ts` proves durable receipt
+  enqueue, retry attempts, dead-lettering, and acknowledgement.
 
-The current Spartan qualification consumer routes new gateway turns through
-`createApplicationTurnTransport` and `createDurableApplicationTransport` with
-the Postgres turn store, while retaining the former transport as an explicit
-rollback implementation. It stages attachment bytes in the expiring Postgres
-blob store, exposes persisted activity with live SSE plus polling fallback,
-publishes automatic assistant presence, and uses
-`createRequestScopedMcpSession` inside the existing per-message Handrail bridge.
-The packaged qualification release also composes
-`createPostgresLivePubSubFromPool` from Spartan's existing `pg` pool, so live
-launcher activity and typing/presence fan out across application instances.
-The bridge is explicitly closed before the pool during shutdown; authoritative
-activity snapshots and polling remain the dropped-notification recovery path.
-Spartan's service remains authoritative for its Zod validation, actor/company
-scope, role-filtered tools, system prompt, proposals, confirmation side effects,
-hosted search/citations, and legacy records.
-
-Spartan can now opt into the drop-in browser workspace with
-`AEGIS_HANDRAIL_AI_CLIENT=handrail_ai`. The default remains `legacy`, and the
-server refuses to advertise the new client unless dual-write persistence and
-the protected application gateway are both available. The opt-in client uses
-the gateway's server-authoritative synchronized event store, keeps background
-threads alive, shows Running/Done/Error on the launcher, supports image/PDF
-upload, copy actions, streamed typing state, and protected proposal
-confirmation. Failure
-to load or negotiate the SDK leaves the legacy assistant available as the
-explicit fallback. A host can inject shared activity and presence delivery
-(Redis, NATS, Postgres NOTIFY, and similar) instead of the process-local
-default.
-
-The protected gateway now advertises writable synchronization only inside the
-explicit Handrail qualification mode. Browser envelopes are proposals: Spartan
-authorizes the conversation, assigns canonical identity/actor/source/time and
-revision, validates the proposed batch against replayed state, and proves every
-assistant frame against the durable application-turn record. Provider execution
-cannot start until the canonical user message, attachment metadata, turn, and
-mutation identity are admitted. Runtime and usage proposals remain denied by
-the shared adapter unless a host explicitly enables and verifies them.
-
-Focused qualification proves one canonical active turn through attachments,
-streamed deltas, usage, citations and terminal state; exact idempotent replay;
-forged assistant denial; a second device hydrating the same transcript;
-observer disconnect without cancellation; cancellation from another gateway;
-and resume from the last applied frame. Shared Postgres reads also clamp a
-lagging aggregate revision to rows already observed, while atomic appends
-corroborate a lagging latest-revision lookup under the conversation lock.
-This establishes multi-device convergence for the opt-in path, but it does not
-authorize deleting legacy rows or routes: legacy Aegis remains the rollback and
-business-side-effect authority until reconciliation reports are converged.
-
-Do not remove `provider.ts`, current Aegis routes, or old persistence during these steps. Cut reads over independently after the matching reconciliation report is converged. Binary attachment authorization/resolution, Zod schemas, company/actor construction, system instructions, proposal confirmation side effects, retention, and rollout flags remain Spartan-owned boundaries.
-
-Git dependencies require the package `prepare` script because public exports point at generated `dist` files. Production should pin an immutable tag or package integrity. Spartan's qualification seam pins one reviewed artifact while retaining its preceding artifact and the legacy transport for rollback. A temporary vendored tarball is acceptable for cross-repository qualification when its source revision, package version, and lockfile integrity are reviewed together. This artifact contains the Responses grounding/reasoning request options documented above, although removal of the legacy provider/persistence path remains independently gated by reconciliation and parity evidence.
-
-## 0.1.74 rollout record
-
-Spartan's production `AegisService` now constructs an actor-scoped
-`createAiApplication` with `createSpartanAegisPlugin` for every live request.
-ERP reads and proposal staging pass through SDK discovery, AJV plus Spartan Zod
-validation, host/plugin policy, bounded execution, cancellation, diagnostics,
-and call-id deduplication. The independently authenticated request-scoped MCP
-bridge remains isolated and confirmation still exclusively invokes Spartan's
-existing exactly-once business executor.
-
-Legacy generic code retired in this rollout: **0 lines**. The legacy provider,
-routes, and persistence remain reachable rollback paths. They must not be
-removed until the production observation window proves reconciliation,
-multi-instance delivery/failover, and all qualification cases above.
+The tracked Spartan manifest intentionally remains on immutable
+`@handrail/ai` 0.1.91 while 0.2 is qualified from a local package. Rename the
+dependency and every import to `@handrail/ai-assistant` only with the real,
+reviewed 0.2 commit SHA and regenerated lockfile. Aliasing the 0.1 artifact
+under the new name is forbidden and is rejected by the adoption checker.

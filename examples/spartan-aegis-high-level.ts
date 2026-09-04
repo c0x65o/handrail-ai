@@ -1,8 +1,8 @@
-import { createToolPlugin, type ApplicationToolExecutor, type JsonValue } from "@handrail/ai";
-import { postgres, type PostgresPoolLike } from "@handrail/ai/persistence/postgres";
+import { createToolPlugin, type ApplicationToolExecutor, type JsonValue } from "@handrail/ai-assistant";
+import { postgres, type PostgresPoolLike } from "@handrail/ai-assistant/persistence/postgres";
 import { createHandrailAssistant, openaiResponses,
-  type HandrailAssistantAuthorizationContext } from "@handrail/ai/server/assistant";
-import { usageFromEnvironment } from "@handrail/ai/server/usage-control";
+  type HandrailAssistantAuthorizationContext } from "@handrail/ai-assistant/server/assistant";
+import { usageFromEnvironment } from "@handrail/ai-assistant/server/usage-control";
 
 interface AegisActor { readonly userId: string; readonly companyId: string }
 interface AegisContext extends HandrailAssistantAuthorizationContext { readonly actor: AegisActor }

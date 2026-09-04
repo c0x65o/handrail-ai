@@ -1,4 +1,4 @@
-import type { BrowserRealtimeVoiceController } from "@handrail/ai/browser";
+import type { BrowserRealtimeVoiceController } from "@handrail/ai-assistant/browser";
 import {
   RealtimeVoiceCancel,
   RealtimeVoiceCapabilities,
@@ -11,7 +11,7 @@ import {
   RealtimeVoiceStopMicrophone,
   RealtimeVoiceUnmute,
   useRealtimeVoiceControls,
-} from "@handrail/ai/react";
+} from "@handrail/ai-assistant/react";
 
 /**
  * Credential-free recipe. The host constructs the provider-neutral browser

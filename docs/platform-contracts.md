@@ -4,13 +4,13 @@ The stable contract versions introduced by this platform layer are `handrail.too
 
 ## Boundaries
 
-- `@handrail/ai` is provider/framework neutral: canonical events, runtime, transport/store contracts, tool plugins, deferred plans, and presence semantics.
-- `@handrail/ai/client` is React-free and usable by browser/React Native environments.
-- `@handrail/ai/react` remains unstyled; `@handrail/ai/react/styled` is optional and fully themeable.
-- `@handrail/ai/server/application-gateway` adapts web-standard handlers to Express-like servers without depending on Express.
-- `@handrail/ai/server/application` is the trusted assembly closure for plugins, connectors, host/plugin policy, approvals, bounded execution, runtime, and gateway creation. Its client catalog is data-only.
-- `@handrail/ai/connectors/mcp` depends only on an injected MCP client subset.
-- `@handrail/ai/persistence/postgres` depends only on an injected SQL client subset.
+- `@handrail/ai-assistant` is provider/framework neutral: canonical events, runtime, transport/store contracts, tool plugins, deferred plans, and presence semantics.
+- `@handrail/ai-assistant/client` is React-free and usable by browser/React Native environments.
+- `@handrail/ai-assistant/react` remains unstyled; `@handrail/ai-assistant/react/styled` is optional and fully themeable.
+- `@handrail/ai-assistant/server/application-gateway` adapts web-standard handlers to Express-like servers without depending on Express.
+- `@handrail/ai-assistant/server/application` is the trusted assembly closure for plugins, connectors, host/plugin policy, approvals, bounded execution, runtime, and gateway creation. Its client catalog is data-only.
+- `@handrail/ai-assistant/connectors/mcp` depends only on an injected MCP client subset.
+- `@handrail/ai-assistant/persistence/postgres` depends only on an injected SQL client subset.
 - Provider-specific payloads stay in provider entry points. Database, UI, provider, MCP, and application framework packages must never be imported by the runtime-neutral core.
 
 ## Capability negotiation

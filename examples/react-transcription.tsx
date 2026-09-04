@@ -10,13 +10,13 @@ import {
   type TranscriptionRequest,
   type TranscriptionRequestId,
   type TranscriptionResult,
-} from "@handrail/ai";
+} from "@handrail/ai-assistant";
 import {
   type BrowserAudioCaptureController,
   type BrowserAudioCaptureListener,
   type BrowserAudioCaptureResult,
   type BrowserAudioCaptureState,
-} from "@handrail/ai/browser";
+} from "@handrail/ai-assistant/browser";
 import {
   TranscriptionControlsCancel,
   TranscriptionControlsRetry,
@@ -26,7 +26,7 @@ import {
   TranscriptionControlsStop,
   useTranscriptionControls,
   type TranscriptionCaptureFactoryInput,
-} from "@handrail/ai/react";
+} from "@handrail/ai-assistant/react";
 
 const format = Object.freeze({
   media_type: "audio/webm",

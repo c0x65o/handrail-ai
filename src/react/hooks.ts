@@ -107,7 +107,7 @@ export function useConversationActions<TRequest = unknown>(): ConversationAction
     const requireMutableStore = (): ConversationMutableStore => {
       if (hasMutationCapabilities(binding.store)) return binding.store;
       throw new Error(
-        "@handrail/ai/react: useConversationActions applyEvent/applyEvents " +
+        "@handrail/ai-assistant/react: useConversationActions applyEvent/applyEvents " +
           "require <ConversationProvider store={store}> with a mutable " +
           "ConversationStore, a runtime, or an owned factory returning either.",
       );
@@ -115,7 +115,7 @@ export function useConversationActions<TRequest = unknown>(): ConversationAction
     const requireRuntime = (): ConversationRuntime<TRequest> => {
       if (runtime !== null) return runtime;
       throw new Error(
-        "@handrail/ai/react: useConversationActions runtime actions require " +
+        "@handrail/ai-assistant/react: useConversationActions runtime actions require " +
           "<ConversationProvider runtime={runtime}> or an owned runtime factory.",
       );
     };
@@ -144,7 +144,7 @@ function useConversationBinding(hookName: string) {
   const binding = useContext(ConversationContext);
   if (binding === null) {
     throw new Error(
-      `@handrail/ai/react: ${hookName} must be used within a ` +
+      `@handrail/ai-assistant/react: ${hookName} must be used within a ` +
         "<ConversationProvider>. Pass a store, runtime, or owned create factory.",
     );
   }

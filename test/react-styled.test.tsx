@@ -2,14 +2,72 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { createInitialConversationState } from "../src/conversation/state.js";
-import { CatalogWorkspaceThreadPicker, HandrailAssistantLauncher, StyledChatLauncher, StyledChatPreset, StyledChatPresetStyles, WorkspaceThreadPicker, createHandrailChatThemeStyle, installToolRendererPlugins } from "../src/react-styled/index.js";
+import { CatalogWorkspaceThreadPicker, HandrailAssistantLauncher, StandardConversationTitleObserver, StandardGatewayApprovals, StyledChatLauncher, StyledChatPreset, StyledChatPresetStyles, WorkspaceThreadPicker, createHandrailChatThemeStyle, installToolRendererPlugins } from "../src/react-styled/index.js";
 
 describe("styled React preset", () => {
-  it("boots the production launcher from an endpoint without project-owned runtime wiring", () => {
+  it("boots the production launcher with canonical styles from an endpoint", () => {
     const fetcher: typeof fetch = async () => new Promise<Response>(() => undefined);
-    const { getByText } = render(<HandrailAssistantLauncher endpoint="/api/assistant/aegis"
+    const { container, getByText } = render(<HandrailAssistantLauncher endpoint="/api/assistant/aegis"
       fetch={fetcher} loading={<span>Connecting assistant</span>}/>);
     expect(getByText("Connecting assistant")).toBeTruthy();
+    expect(container.querySelector("style[data-handrail-ai-preset]")).toBeTruthy();
+  });
+
+  it("allows a host to inject canonical styles once at an application boundary", () => {
+    const fetcher: typeof fetch = async () => new Promise<Response>(() => undefined);
+    const { container } = render(<HandrailAssistantLauncher endpoint="/api/assistant/aegis"
+      fetch={fetcher} includeStyles={false} loading={<span>Connecting assistant</span>}/>);
+    expect(container.querySelector("style[data-handrail-ai-preset]")).toBeNull();
+  });
+
+  it("generates and persists a title after the first completed turn", async () => {
+    const conversationId = "conversation-1" as never;
+    const descriptor = { conversationId, title: null, lifecycle: "active", archivedAt: null,
+      createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
+      version: 1, metadata: {} };
+    const get = vi.fn(async () => ({ operation: "get", status: "found", descriptor }));
+    const rename = vi.fn(async () => ({ operation: "rename", status: "updated",
+      descriptor: { ...descriptor, title: "Quarterly cash planning", version: 2 } }));
+    const generateTitle = vi.fn(async () => "Quarterly cash planning");
+    const onTitle = vi.fn();
+    const snapshot = { selectedConversationId: conversationId,
+      runningCount: 0, errorCount: 0, unreadCount: 1,
+      threads: [{ conversationId, runtime: {}, turnStatus: "completed", unread: true, revision: 4 }] };
+    const workspace = { getSnapshot: () => snapshot,
+      subscribe: () => () => undefined };
+    const view = render(<StandardConversationTitleObserver client={{ workspace,
+      catalog: { capabilities: { rename: { supported: true } }, get, rename },
+      resources: { generateTitle } } as never} onTitle={onTitle}/>);
+    await waitFor(() => expect(rename).toHaveBeenCalledWith(expect.objectContaining({
+      conversationId, expectedVersion: 1, title: "Quarterly cash planning",
+    })));
+    expect(generateTitle).toHaveBeenCalledOnce();
+    expect(onTitle).toHaveBeenCalledWith(conversationId, "Quarterly cash planning");
+    view.unmount();
+  });
+
+  it("loads and confirms conversation-grouped approvals in the standard UI", async () => {
+    const proposal = { proposal_id: "proposal-1", group_id: "conversation-1", turn_id: "turn-1",
+      tool_call_id: "call-1", tool_name: "update_household", reviewed_arguments: {
+        type: "redacted_json", value: {} }, status: "pending", proposal_version: 1,
+      expires_at: "2099-01-01T00:00:00.000Z", created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z", created_attribution: {}, latest_attribution: {},
+      decision_at: null, decision_attribution: null, decision_reason: null, failure_reason: null } as never;
+    const listApprovalGroup = vi.fn(async () => [proposal]);
+    const transitionApproval = vi.fn(async () => proposal);
+    const workspaceSnapshot = { selectedConversationId: "conversation-1",
+      runningCount: 0, errorCount: 0, unreadCount: 0, threads: [] };
+    const workspace = { getSnapshot: () => workspaceSnapshot,
+      subscribe: () => () => undefined };
+    const view = render(<StandardGatewayApprovals client={{ workspace,
+      resources: { listApprovalGroup, transitionApproval } } as never}/>);
+    expect(await screen.findByText("update household")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    await waitFor(() => expect(transitionApproval).toHaveBeenCalledWith(expect.objectContaining({
+      conversationId: "conversation-1", proposalId: "proposal-1", expectedVersion: 1,
+      status: "confirmed",
+    })));
+    view.unmount();
   });
 
   it("maps typed theme tokens and mode to stable CSS properties", () => {

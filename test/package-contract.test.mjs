@@ -11,6 +11,12 @@ const packageJson = JSON.parse(
   readFileSync(path.join(packageRoot, "package.json"), "utf8"),
 );
 
+test("uses the canonical AI Assistant package identity", () => {
+  assert.equal(packageJson.name, "@handrail/ai-assistant");
+  assert.match(packageJson.version, /^0\.2\./u);
+  assert.equal(packageJson.bin["handrail-ai-assistant"], "./scripts/adopt.mjs");
+});
+
 test("git installs build the declared dist exports", () => {
   assert.equal(packageJson.scripts.prepare, "npm run build");
 });
@@ -444,17 +450,22 @@ test("dry pack contains only intended package assets", () => {
     "dist/providers/gemini.d.ts",
     "dist/providers/xai.js",
     "dist/providers/xai.d.ts",
+    "scripts/adopt.mjs",
+    "templates/standard-react-node/server.ts",
+    "templates/standard-react-node/client.tsx",
+    "templates/standard-react-node/README.md",
   ]) {
     assert.ok(packedFiles.has(expected), `missing packed file ${expected}`);
   }
 
   for (const filePath of packedFiles) {
     assert.doesNotMatch(filePath, /(?:^|\/)\.dart_tool\//u);
-    assert.doesNotMatch(filePath, /^(?:scripts|src|test)\//u);
+    assert.doesNotMatch(filePath, /^(?:src|test)\//u);
+    if (filePath.startsWith("scripts/")) assert.equal(filePath, "scripts/adopt.mjs");
     assert.doesNotMatch(
       filePath,
       /\.(?:css|less|sass|scss|eot|otf|ttf|woff2?)$/u,
     );
-    assert.match(filePath, /^(?:dist\/|docs\/|flutter\/handrail_ai_client\/|LICENSE$|README\.md$|package\.json$)/u);
+    assert.match(filePath, /^(?:dist\/|docs\/|flutter\/handrail_ai_client\/|scripts\/adopt\.mjs$|templates\/standard-react-node\/|LICENSE$|README\.md$|package\.json$)/u);
   }
 });

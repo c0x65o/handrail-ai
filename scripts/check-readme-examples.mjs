@@ -49,8 +49,8 @@ const referencedExamples = referencedExamplePaths.map((relativePath) => {
 
 for (const [exportPath, conditions] of Object.entries(packageJson.exports)) {
   const packageEntry = exportPath === "."
-    ? "@handrail/ai"
-    : `@handrail/ai/${exportPath.slice(2)}`;
+    ? "@handrail/ai-assistant"
+    : `@handrail/ai-assistant/${exportPath.slice(2)}`;
   assert.match(
     readme,
     new RegExp(

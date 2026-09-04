@@ -1,6 +1,5 @@
-import { createHash } from "node:crypto";
-
 import { parseStreamEvent, type ChatRequest, type StreamEvent } from "../protocol.js";
+import { sha256Text } from "../provider-context.js";
 import type { DurableApplicationTurnStore } from "../transports/durable.js";
 import type { ConversationTransport } from "../transports/types.js";
 import type { ConversationEvent, ConversationEventPayload, ConversationId } from "../conversation/events.js";
@@ -177,7 +176,7 @@ function withoutTarget(value: { readonly citation_id: string; readonly source_id
 function byAttachmentId(left: { readonly attachment_id: string }, right: { readonly attachment_id: string }): number {
   return left.attachment_id.localeCompare(right.attachment_id);
 }
-function digest(value: string): string { return createHash("sha256").update(value).digest("hex").slice(0, 32); }
+function digest(value: string): string { return sha256Text(value).slice(0, 32); }
 function json(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(json).join(",")}]`;

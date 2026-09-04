@@ -34,7 +34,7 @@ const bundledCode = outputs
   .join("\n");
 
 if (bundledCode.length === 0) {
-  throw new Error("Vite produced no JavaScript chunks for the @handrail/ai consumer fixture");
+  throw new Error("Vite produced no JavaScript chunks for the @handrail/ai-assistant consumer fixture");
 }
 
 if (!bundledCode.includes("parseChatRequest")) {

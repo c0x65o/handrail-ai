@@ -26,7 +26,7 @@ import {
   type TurnObservation,
   type TurnObservationResult,
   type TurnResumePoint,
-} from "@handrail/ai";
+} from "@handrail/ai-assistant";
 
 const EMPTY_CHECKPOINT: TurnResumePoint = {
   lastAppliedEventId: null,

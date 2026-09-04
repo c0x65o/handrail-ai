@@ -2,14 +2,14 @@ import {
   createDirectProviderTransport,
   type DirectProviderTransport,
   type ProviderAdapter,
-} from "@handrail/ai";
+} from "@handrail/ai-assistant";
 import {
   createManagedRuntimeTransport,
   type ManagedRuntimeFetch,
   type ManagedRuntimeHeadersProvider,
   type ManagedRuntimeTransport,
   type ManagedRuntimeUsageReceiptIdentityProvider,
-} from "@handrail/ai/server/managed";
+} from "@handrail/ai-assistant/server/managed";
 
 interface TrustedAttributionIds {
   readonly organizationId: string;

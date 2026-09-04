@@ -1,5 +1,5 @@
 import { runHandrailAssistantConformance,
-  type HandrailAssistantConformanceAdapter } from "@handrail/ai/conformance";
+  type HandrailAssistantConformanceAdapter } from "@handrail/ai-assistant/conformance";
 
 /**
  * Spartan's qualification environment supplies these probes against its mounted

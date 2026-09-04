@@ -84,9 +84,27 @@ export interface CreateHandrailAssistantOptions<TContext extends HandrailAssista
   readonly workerId?: string;
   readonly toolLoopLimits?: Partial<ToolLoopLimits>;
   readonly createConversationId?: () => string;
+  /** Disable SDK byte intake while a migrating host retains its authorized upload route. Defaults to true. */
+  readonly attachmentUpload?: boolean;
+  /** Migration seam for a host-owned authorized catalog. New integrations use the SDK Postgres catalog. */
+  readonly conversationCatalogFor?: (input: {
+    readonly context: TContext;
+    readonly persistence: PostgresAssistantPersistenceBundle<TContext>;
+  }) => ConversationCatalog<TContext>;
+  /** Migration seam for an existing approval authority. New integrations use the SDK Postgres store. */
+  readonly approvalStoreFor?: (input: {
+    readonly context: TContext;
+    readonly persistence: PostgresAssistantPersistenceBundle<TContext>;
+  }) => ApprovalProposalStore<TContext>;
   /** Enumerates server-trusted scopes at worker startup so pending turns and usage can recover after restart. */
   readonly recoveryContexts?: () => Iterable<TContext> | AsyncIterable<TContext> |
     Promise<Iterable<TContext> | AsyncIterable<TContext>>;
+  /**
+   * Recover pending work when a trusted context is first authenticated after a
+   * restart. Defaults to true. This is the safe recovery path for hosts that
+   * cannot reconstruct (and must not persist) opaque user credentials at boot.
+   */
+  readonly recoverPendingOnContext?: boolean;
   readonly authorizeConversation?: Parameters<PostgresAssistantPersistence["forScope"]>[1]["authorizeConversation"];
   readonly authorizeApproval?: Parameters<PostgresAssistantPersistence["forScope"]>[1]["authorizeApproval"];
   readonly approvalTimeoutMilliseconds?: number;
@@ -285,6 +303,12 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
     }
     return delivery;
   };
+  const catalogFor = (context: TContext) => options.conversationCatalogFor?.({
+    context, persistence: bundleFor(context),
+  }) ?? bundleFor(context).catalog;
+  const approvalStoreFor = (context: TContext) => options.approvalStoreFor?.({
+    context, persistence: bundleFor(context),
+  }) ?? bundleFor(context).approvals;
   const applicationFor = (context: TContext) => {
     const key = executionKeyFor(context);
     let application = applications.get(key);
@@ -295,7 +319,7 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
         policy: options.toolPolicy ?? (() => ({ outcome: "allow" })),
         toolExecutionLedger: bundle.toolLedger,
         approvalCoordinator: createApprovalExecutionCoordinator<TContext>({
-          proposalStore: bundle.approvals, eventStore: bundle.events,
+          proposalStore: approvalStoreFor(context), eventStore: bundle.events,
           authorize: () => "allow",
           verifyArguments: ({ binding, reviewedArguments, arguments: arguments_ }) => {
             if (binding.type !== "opaque_reference" || reviewedArguments.type !== "opaque_reference") return "mismatch";
@@ -328,7 +352,9 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
               const identity = digest(`${conversationId}\u001f${turnId}\u001f${call.tool_call_id}\u001f${call.name}\u001f${reference}`);
               const proposalId = `proposal-${identity.slice(0, 48)}` as never;
               const createdAt = Date.now();
-              const proposal = await bundle.approvals.create({ permissionContext: context, proposalId,
+              const proposalStore = approvalStoreFor(context);
+              const proposal = await proposalStore.create({ permissionContext: context, proposalId,
+                groupId: conversationId as never,
                 turnId: turnId as never, toolCallId: call.tool_call_id as never, toolName: call.name,
                 reviewedArguments: { type: "opaque_reference", argument_ref: reference as never },
                 expiresAt: new Date(createdAt + approvalTimeoutMilliseconds).toISOString() as never,
@@ -336,7 +362,7 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
                 idempotencyFingerprint: `approval:${identity}` });
               await recordProposalCreated(bundle.events, conversationId, proposal);
               while (!signal.aborted && Date.now() - createdAt < approvalTimeoutMilliseconds) {
-                const retained = await bundle.approvals.get({ permissionContext: context, proposalId });
+                const retained = await proposalStore.get({ permissionContext: context, proposalId });
                 if (retained === null) return approvalError(call, "Tool approval is unavailable.");
                 if (retained.status === "confirmed") {
                   const approval: ApprovalExecutionResume<TContext> = { permissionContext: context, proposalId,
@@ -363,7 +389,7 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
           }),
           ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
         });
-      }).then((delegate) => {
+      }).then(async (delegate) => {
         const durable = createDurableApplicationTransport<StreamEvent, ChatRequest, ChatRequest>({
           delegate: qualifyDurableApplicationTurnStarts(delegate, bundleFor(context).events),
           store: bundleFor(context).durableTurns as never,
@@ -377,6 +403,14 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
           ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
         });
         durableTransports.set(key, durable);
+        if (options.recoverPendingOnContext !== false) {
+          try {
+            await durable.recoverPending(25);
+          } catch (cause) {
+            emitAiDiagnostic(options.diagnostics, { domain: "gateway", operation: "context_recovery_scan",
+              phase: "failed", code: "recovery_scan_failed", retryable: true, cause });
+          }
+        }
         const activity = withDurableActivity(durable, bundleFor(context).activity, activityDeliveryFor(context),
           options.diagnostics);
         return createAssistantActivityTransport({ delegate: activity, delivery: presenceDelivery,
@@ -395,15 +429,15 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
       archive: { supported: true as const }, restore: { supported: true as const },
       permanentDelete: { supported: true as const },
     }),
-    list: (input: Parameters<ConversationCatalog<TContext>["list"]>[0]) => bundleFor(input.authorizationContext).catalog.list(input),
-    create: (input: Parameters<ConversationCatalog<TContext>["create"]>[0]) => bundleFor(input.authorizationContext).catalog.create(input),
-    get: (input: Parameters<ConversationCatalog<TContext>["get"]>[0]) => bundleFor(input.authorizationContext).catalog.get(input),
-    rename: (input: Parameters<ConversationCatalog<TContext>["rename"]>[0]) => bundleFor(input.authorizationContext).catalog.rename(input),
-    clear: (input: Parameters<ConversationCatalog<TContext>["clear"]>[0]) => bundleFor(input.authorizationContext).catalog.clear(input),
-    archive: (input: Parameters<ConversationCatalog<TContext>["archive"]>[0]) => bundleFor(input.authorizationContext).catalog.archive(input),
-    restore: (input: Parameters<ConversationCatalog<TContext>["restore"]>[0]) => bundleFor(input.authorizationContext).catalog.restore(input),
+    list: (input: Parameters<ConversationCatalog<TContext>["list"]>[0]) => catalogFor(input.authorizationContext).list(input),
+    create: (input: Parameters<ConversationCatalog<TContext>["create"]>[0]) => catalogFor(input.authorizationContext).create(input),
+    get: (input: Parameters<ConversationCatalog<TContext>["get"]>[0]) => catalogFor(input.authorizationContext).get(input),
+    rename: (input: Parameters<ConversationCatalog<TContext>["rename"]>[0]) => catalogFor(input.authorizationContext).rename(input),
+    clear: (input: Parameters<ConversationCatalog<TContext>["clear"]>[0]) => catalogFor(input.authorizationContext).clear(input),
+    archive: (input: Parameters<ConversationCatalog<TContext>["archive"]>[0]) => catalogFor(input.authorizationContext).archive(input),
+    restore: (input: Parameters<ConversationCatalog<TContext>["restore"]>[0]) => catalogFor(input.authorizationContext).restore(input),
     permanentlyDelete: (input: Parameters<ConversationCatalog<TContext>["permanentlyDelete"]>[0]) =>
-      bundleFor(input.authorizationContext).catalog.permanentlyDelete(input),
+      catalogFor(input.authorizationContext).permanentlyDelete(input),
   });
   const approvals: ApprovalProposalStore<TContext> = Object.freeze({
     create: (input: Parameters<ApprovalProposalStore<TContext>["create"]>[0]) => {
@@ -411,9 +445,9 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
       return Promise.reject(new ApprovalProposalStoreError("permission_denied", "create"));
     },
     get: (input: Parameters<ApprovalProposalStore<TContext>["get"]>[0]) =>
-      bundleFor(input.permissionContext).approvals.get(input),
+      approvalStoreFor(input.permissionContext).get(input),
     listGroup: (input: Parameters<ApprovalProposalStore<TContext>["listGroup"]>[0]) =>
-      bundleFor(input.permissionContext).approvals.listGroup(input),
+      approvalStoreFor(input.permissionContext).listGroup(input),
     async transition(input: Parameters<ApprovalProposalStore<TContext>["transition"]>[0]) {
       const supplied = input as typeof input & { readonly conversationId?: unknown };
       if (typeof supplied.conversationId !== "string" ||
@@ -421,14 +455,15 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
         throw new ApprovalProposalStoreError("invalid_input", "transition");
       }
       const bundle = bundleFor(input.permissionContext);
-      await bundle.catalog.get({ authorizationContext: input.permissionContext,
+      const proposalStore = approvalStoreFor(input.permissionContext);
+      await catalogFor(input.permissionContext).get({ authorizationContext: input.permissionContext,
         conversationId: supplied.conversationId as never });
       const history = await bundle.events.read({ conversationId: supplied.conversationId as never });
       if (!history.entries.some(({ event }) => event.payload.type === "approval.proposal_created" &&
         event.payload.proposal_id === input.proposalId)) {
         throw new ApprovalProposalStoreError("not_found", "transition");
       }
-      const coordinator = createApprovalCoordinator<TContext>({ proposalStore: bundle.approvals,
+      const coordinator = createApprovalCoordinator<TContext>({ proposalStore,
         eventStore: bundle.events, authorize: () => "allow" });
       const result = await coordinator.decide({ permissionContext: input.permissionContext,
         conversationId: supplied.conversationId as never, proposalId: input.proposalId,
@@ -440,7 +475,7 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
         ...(input.decisionReason === undefined ? {} : { decisionReason: input.decisionReason }),
         signal: new AbortController().signal });
       if (result.outcome === "accepted" || result.outcome === "already_decided") {
-        const retained = await bundle.approvals.get({ permissionContext: input.permissionContext,
+        const retained = await proposalStore.get({ permissionContext: input.permissionContext,
           proposalId: input.proposalId });
         if (retained !== null) return retained;
       }
@@ -457,7 +492,7 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
     createConversationActivityHttpHandler(bundleFor(context).activity,
       { delivery: activityDeliveryFor(context) })(request);
   const ownsConversation = async (context: TContext, conversationId: string) => {
-    await bundleFor(context).catalog.get({ authorizationContext: context, conversationId: conversationId as never });
+    await catalogFor(context).get({ authorizationContext: context, conversationId: conversationId as never });
     return true;
   };
   const attachments = async (request: Request, context: TContext) => {
@@ -516,9 +551,10 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
     conversations: catalog as unknown as ConversationCatalog<TContext>,
     approvals,
     titleGeneration: { generate: generateTitle },
-    handlers: { activity, attachments, synchronization, presence },
+    handlers: { activity, ...(options.attachmentUpload === false ? {} : { attachments }), synchronization, presence },
     capabilities: { activity: true, presence: true, synchronization: true,
-      attachments: { maximumFiles: 16, maximumBytesPerFile: options.persistence.attachmentLimits.maximumBytes,
+      attachments: options.attachmentUpload === false ? false : {
+        maximumFiles: 16, maximumBytesPerFile: options.persistence.attachmentLimits.maximumBytes,
         acceptedMediaTypes: options.persistence.attachmentLimits.acceptedMediaTypes, uploadUrl: "attachments" },
       documentInput: options.provider.metadata.capabilities.document_input.supported
       ? options.provider.metadata.capabilities.document_input.capability : false,

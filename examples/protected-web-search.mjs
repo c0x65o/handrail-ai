@@ -2,12 +2,12 @@ import {
   WEB_SEARCH_LIMITS,
   WebSearchService,
   createWebSearchCitationRecords,
-} from "@handrail/ai";
+} from "@handrail/ai-assistant";
 import {
   TRUSTED_SERVER_REQUEST_PROTECTION_VERSION,
   TrustedServerOperationFailureV1,
   createTrustedServerRequestProtectorV1,
-} from "@handrail/ai/server/trusted-server";
+} from "@handrail/ai-assistant/server/trusted-server";
 
 /**
  * Framework-neutral trusted-server recipe for exactly one web-search action.
@@ -34,7 +34,7 @@ const ENCODER = new globalThis.TextEncoder();
  * @typedef {object} ProtectedWebSearchInput
  * @property {string} requestId
  * @property {string} origin
- * @property {import("@handrail/ai/server/trusted-server").TrustedServerPublicResourceV1} resource
+ * @property {import("@handrail/ai-assistant/server/trusted-server").TrustedServerPublicResourceV1} resource
  * @property {string} idempotencyKey
  * @property {unknown} bodyText
  * @property {ExampleAuthentication} authentication
@@ -75,7 +75,7 @@ function parseSearchBody(bodyText, idempotencyKey) {
 
 /**
  * @param {unknown} bodyText
- * @param {import("@handrail/ai/server/trusted-server").TrustedServerPublicResourceV1} resource
+ * @param {import("@handrail/ai-assistant/server/trusted-server").TrustedServerPublicResourceV1} resource
  */
 async function describeBody(bodyText, resource) {
   if (typeof bodyText !== "string") {
@@ -98,13 +98,13 @@ async function describeBody(bodyText, resource) {
 }
 
 /**
- * @param {import("@handrail/ai").WebSearchResultSet} resultSet
+ * @param {import("@handrail/ai-assistant").WebSearchResultSet} resultSet
  * @param {string} requestId
  */
 function normalizedPublicValue(resultSet, requestId) {
   const records = createWebSearchCitationRecords(resultSet, {
     type: "tool_result",
-    tool_call_id: /** @type {import("@handrail/ai").CitationToolCallId} */ (requestId),
+    tool_call_id: /** @type {import("@handrail/ai-assistant").CitationToolCallId} */ (requestId),
   });
   return {
     results: resultSet.results.map((result) => ({
@@ -139,11 +139,11 @@ function normalizedPublicValue(resultSet, requestId) {
  * policy, result policy, and the host search adapter are all injected seams.
  *
  * @param {object} options
- * @param {import("@handrail/ai/server/trusted-server").TrustedServerProtectionHooksV1<ExampleAuthentication, ExamplePrincipal, ExampleReservation, ExampleLease>} options.hooks
- * @param {import("@handrail/ai").WebSearchAdapter} options.adapter
- * @param {import("@handrail/ai").WebSearchAuthorization<SearchContext>} options.authorizeSearch
- * @param {import("@handrail/ai").WebSearchUrlPolicy<SearchContext>} options.validateUrl
- * @param {import("@handrail/ai").WebSearchResultPolicy<SearchContext>} options.acceptResult
+ * @param {import("@handrail/ai-assistant/server/trusted-server").TrustedServerProtectionHooksV1<ExampleAuthentication, ExamplePrincipal, ExampleReservation, ExampleLease>} options.hooks
+ * @param {import("@handrail/ai-assistant").WebSearchAdapter} options.adapter
+ * @param {import("@handrail/ai-assistant").WebSearchAuthorization<SearchContext>} options.authorizeSearch
+ * @param {import("@handrail/ai-assistant").WebSearchUrlPolicy<SearchContext>} options.validateUrl
+ * @param {import("@handrail/ai-assistant").WebSearchResultPolicy<SearchContext>} options.acceptResult
  */
 export function createProtectedWebSearchRecipe(options) {
   const search = new WebSearchService({
@@ -223,23 +223,23 @@ export function createDeterministicProtectedWebSearchHarness() {
   const trace = [];
   /** @type {string[]} */
   const outerGateSnapshots = [];
-  /** @type {import("@handrail/ai/server/trusted-server").TrustedServerTerminalRecordV1[]} */
+  /** @type {import("@handrail/ai-assistant/server/trusted-server").TrustedServerTerminalRecordV1[]} */
   const retained = [];
   /** @type {{ query: string, maxResults: number, idempotencyKey: string }[]} */
   const adapterCalls = [];
-  /** @type {Map<string, { fingerprint: string, status: "in_flight" | "completed" | "failed", result?: import("@handrail/ai/server/trusted-server").TrustedServerStoredResultV1 }>} */
+  /** @type {Map<string, { fingerprint: string, status: "in_flight" | "completed" | "failed", result?: import("@handrail/ai-assistant/server/trusted-server").TrustedServerStoredResultV1 }>} */
   const entries = new Map();
   let leaseHeld = false;
   /** @type {{ promise: Promise<void>, resolve: () => void, entered: Promise<void>, markEntered: () => void } | undefined} */
   let adapterBarrier;
 
-  /** @param {string} label @param {import("@handrail/ai/server/trusted-server").TrustedServerHookContextV1} context */
+  /** @param {string} label @param {import("@handrail/ai-assistant/server/trusted-server").TrustedServerHookContextV1} context */
   function observeOuterGate(label, context) {
     trace.push(label);
     outerGateSnapshots.push(JSON.stringify(context.request));
   }
 
-  /** @type {import("@handrail/ai/server/trusted-server").TrustedServerProtectionHooksV1<ExampleAuthentication, ExamplePrincipal, ExampleReservation, ExampleLease>} */
+  /** @type {import("@handrail/ai-assistant/server/trusted-server").TrustedServerProtectionHooksV1<ExampleAuthentication, ExamplePrincipal, ExampleReservation, ExampleLease>} */
   const hooks = {
     validateOrigin: (context) => {
       observeOuterGate("origin", context);
