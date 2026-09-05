@@ -254,6 +254,15 @@ export function createApprovalCoordinator<TPermissionContext>(
       return mapTransitionFailure(error, snapshot, options.proposalStore);
     }
 
+    // A host-owned approval authority may also execute the approved action
+    // before returning. Its execution state is authoritative, but it is not a
+    // new confirmation decision event. The host retains its execution history.
+    if (transitioned.status === "executing" || transitioned.status === "executed" || transitioned.status === "failed") {
+      return frozen({ outcome: "already_decided", proposalId,
+        proposalVersion: transitioned.proposal_version,
+        currentStatus: transitioned.status });
+    }
+
     return appendDecisionEvent(
       options.eventStore,
       snapshot,

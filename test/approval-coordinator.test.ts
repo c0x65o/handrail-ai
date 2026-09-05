@@ -77,6 +77,25 @@ describe("ApprovalCoordinator", () => {
     ]);
   });
 
+  it.each(["executing", "executed", "failed"] as const)("retains a host execution outcome of %s without inventing another decision event", async (status) => {
+    const fixture = createFixture();
+    await fixture.create("host-action");
+    const pending = await fixture.get("host-action");
+    const coordinator = createApprovalCoordinator({
+      proposalStore: {
+        create: fixture.proposals.create.bind(fixture.proposals),
+        get: fixture.proposals.get.bind(fixture.proposals),
+        listGroup: fixture.proposals.listGroup.bind(fixture.proposals),
+        transition: async () => ({ ...pending, status, proposal_version: 4 }),
+      },
+      eventStore: fixture.events,
+      authorize: () => "allow",
+    });
+    const result = await coordinator.decide(decisionInput("host-action", "confirm", "host-key"));
+    expect(result).toEqual({ outcome: "already_decided", proposalId: "host-action", proposalVersion: 4, currentStatus: status });
+    expect((await fixture.events.read({ conversationId })).entries).toEqual([]);
+  });
+
   it("expires a due proposal through the optimistic transition and appends its event", async () => {
     const fixture = createFixture();
     await fixture.create("expire-me");

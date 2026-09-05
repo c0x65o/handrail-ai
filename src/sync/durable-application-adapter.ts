@@ -54,8 +54,10 @@ export function qualifyDurableApplicationTurnStarts(
     capabilities: transport.capabilities,
     async startTurn(input) {
       try {
-        const { state } = await replayConversation({ conversationId: input.conversationId as ConversationId,
+        const replay = await replayConversation({ conversationId: input.conversationId as ConversationId,
           eventStore, checkpointPolicy: false });
+        const state = replay.state;
+        replay.store.destroy();
         const turn = state.turns.find((candidate) => candidate.turn_id === input.conversationTurnId);
         const message = turn?.input_message_ids.length === 1
           ? state.messages.find((candidate) => candidate.message_id === turn.input_message_ids[0]) : undefined;
@@ -74,7 +76,7 @@ export function qualifyDurableApplicationTurnStarts(
           byte_size: part.attachment.byte_size, filename: part.attachment.filename ?? null,
         })).sort(byAttachmentId);
         if (json(retainedAttachments) !== json(requestedAttachments)) deny();
-        return transport.startTurn(input);
+        return guardCanonicalTurnExecution(transport, eventStore).startTurn(input);
       } catch (error) {
         return { ok: false as const, error: { code: "invalid_request" as const, retryable: false,
           message: error instanceof Error ? error.message : "Canonical turn admission is invalid." } };
@@ -83,6 +85,41 @@ export function qualifyDurableApplicationTurnStarts(
     resumeTurn: (input) => transport.resumeTurn(input),
   };
   return Object.freeze(qualified);
+}
+
+/**
+ * Install inside the durable worker, immediately around the provider delegate.
+ * Retained durable results can still replay; new execution requires an active
+ * canonical turn, including after recovery or a delayed start request.
+ */
+export function guardCanonicalTurnExecution<TEvent, TRequest>(
+  transport: ConversationTransport<TEvent, TRequest>,
+  eventStore: ConversationEventStore,
+): ConversationTransport<TEvent, TRequest> {
+  return Object.freeze({
+    capabilities: transport.capabilities,
+    async startTurn(input: Parameters<typeof transport.startTurn>[0]) {
+      try {
+        const replay = await replayConversation({ conversationId: input.conversationId as ConversationId,
+          eventStore, checkpointPolicy: false });
+        try {
+          const turn = replay.state.turns.find((candidate) => candidate.turn_id === input.conversationTurnId);
+          if (replay.state.replay_error !== null || !turn ||
+            replay.state.active_turn_id !== input.conversationTurnId ||
+            !turn.remote_may_still_be_running || turn.cancellation_status === "requested" ||
+            !["queued", "running", "waiting_for_tool_result"].includes(turn.status)) {
+            return { ok: false as const, error: { code: "invalid_request" as const, retryable: false,
+              message: "The saved turn is no longer active and cannot execute." } };
+          }
+        } finally { replay.store.destroy(); }
+      } catch {
+        return { ok: false as const, error: { code: "unavailable" as const, retryable: true,
+          message: "The saved turn could not be verified before execution." } };
+      }
+      return transport.startTurn(input);
+    },
+    resumeTurn: (input: Parameters<typeof transport.resumeTurn>[0]) => transport.resumeTurn(input),
+  });
 }
 
 async function canonicalize(

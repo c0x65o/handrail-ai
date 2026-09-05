@@ -676,7 +676,14 @@ failures to safe errors. Retries must reuse the logical identity; cancellation
 does not authorize a retry under a new identity. The OpenAI implementation is
 available from `@handrail/ai-assistant/providers/openai/transcription` through
 `createOpenAITranscriptionCapability` with injected resolution and request
-functions.
+functions. The adapter requests `json`, which supports text-only responses from
+the transcription models. A BCP 47 language hint is reduced to its two-letter
+primary subtag when available; otherwise the provider detects the language.
+Detected language is nullable, including multilingual results. If the provider
+omits duration, output metadata uses the trusted audio resolver's validated
+duration. This display metadata is not a provider usage receipt. The host request
+function must capture actual provider usage separately; the capability does not
+currently provide durable voice telemetry automatically.
 
 `createBrowserAudioCaptureController` and `intakeBrowserAudio` provide bounded
 browser capture/intake without provider credentials. `TranscriptionControlsRoot`
@@ -840,3 +847,19 @@ The supplied executor must retain its existing authorization, validation,
 approval and idempotency rules. Pass the stable provider tool-call identity
 through to that executor. New applications should use SDK tool plugins and the
 bounded SDK tool executor directly.
+
+When an existing application owns confirmation and execution, publish its saved
+proposal before waiting inside the observed tool. Call
+`toolActivity.waitForApproval({ conversationId, turnId, signal, expiresAt, read })`
+with an absolute persisted expiry in milliseconds. The `read(signal)` callback
+returns `{ status: "pending" }` until the existing domain endpoint finishes, then
+`{ status: "settled", value: savedResult }`; throw for rejection, missing state,
+or failed execution. The SDK serializes reads, reports waiting/settlement, and
+bounds slow reads and activity writes by cancellation and expiry (at most fifteen
+minutes per observation). It does not execute the approved action again.
+
+`waitForApplicationApproval` from `@handrail/ai-assistant/server/assistant` provides
+the same observation without activity reporting. Hosts retain proposal identity,
+expiry, authorization, execution evidence, and cancellation policy. Ending a wait
+does not revoke an approval or undo an action already executing. Provider time
+budgets must explicitly account for the separately bounded human wait.

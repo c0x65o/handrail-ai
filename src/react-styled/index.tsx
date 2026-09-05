@@ -906,38 +906,79 @@ export function StandardConversationTitleObserver({ client, enabled = true, onTi
 export function StandardGatewayApprovals({ client }: { readonly client: HandrailAiClient<StreamEvent, ChatRequest, object> }) {
   const snapshot = useConversationWorkspaceSnapshot(client.workspace!);
   const conversationId = snapshot.selectedConversationId;
-  const [proposals, setProposals] = useState<readonly ConversationApprovalProposalRecord[]>([]);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
-  const load = useCallback(async () => {
-    if (conversationId === null) return setProposals([]);
-    try {
-      setProposals(await client.resources.listApprovalGroup({ groupId: conversationId as never }));
-      setFailed(false);
-    } catch {
-      setFailed(true);
-    }
-  }, [client.resources, conversationId]);
+  return conversationId === null ? null : <ConversationGatewayApprovals
+    key={conversationId} resources={client.resources} conversationId={conversationId}/>;
+}
+
+function ConversationGatewayApprovals({ resources, conversationId }: {
+  readonly resources: HandrailAiClient<StreamEvent, ChatRequest, object>["resources"];
+  readonly conversationId: string;
+}) {
+  const [state, setState] = useState({ resources,
+    proposals: [] as readonly ConversationApprovalProposalRecord[], busy: null as string | null, failed: false });
+  const lifecycle = useRef<{
+    active: boolean; busy: boolean; revision: number; refresh: () => void;
+  } | null>(null);
   useEffect(() => {
+    let loading = false;
+    let refreshAfterLoad = false;
+    const current = { active: true, busy: false, revision: 0, refresh: () => { void load(); } };
+    lifecycle.current = current;
+    setState({ resources, proposals: [], busy: null, failed: false });
+    async function load() {
+      if (!current.active) return;
+      if (loading) { refreshAfterLoad = true; return; }
+      loading = true;
+      const revision = current.revision;
+      try {
+        const proposals = await resources.listApprovalGroup({ groupId: conversationId as never });
+        if (current.active && revision === current.revision) {
+          setState((previous) => ({ ...previous, resources, proposals, failed: false }));
+        }
+      } catch {
+        if (current.active && revision === current.revision) {
+          setState((previous) => ({ ...previous, failed: true }));
+        }
+      } finally {
+        loading = false;
+        if (refreshAfterLoad && current.active) { refreshAfterLoad = false; void load(); }
+      }
+    }
     void load();
-    const timer = globalThis.setInterval(() => void load(), 2_000);
-    return () => globalThis.clearInterval(timer);
-  }, [load]);
+    const timer = globalThis.setInterval(current.refresh, 2_000);
+    return () => { current.active = false; globalThis.clearInterval(timer); };
+  }, [resources, conversationId]);
   const decide = async (proposal: ConversationApprovalProposalRecord, status: "confirmed" | "rejected") => {
-    if (conversationId === null || busy !== null) return;
+    const current = lifecycle.current;
+    if (!current?.active || current.busy) return;
     const identity = `assistant:${proposal.proposal_id}:${proposal.proposal_version}:${status}`;
-    setBusy(proposal.proposal_id);
+    current.busy = true;
+    current.revision++;
+    setState((previous) => ({ ...previous, busy: proposal.proposal_id, failed: false }));
     try {
-      await client.resources.transitionApproval({ conversationId, proposalId: proposal.proposal_id,
+      await resources.transitionApproval({ conversationId, proposalId: proposal.proposal_id,
         expectedVersion: proposal.proposal_version, status, idempotencyKey: identity,
         idempotencyFingerprint: identity });
-      await load();
+      if (current.active) {
+        // A read started before confirmation settled must not restore its pending card.
+        current.revision++;
+        setState((previous) => ({ ...previous,
+          proposals: previous.proposals.filter((item) => item.proposal_id !== proposal.proposal_id) }));
+        current.refresh();
+      }
     } catch {
-      setFailed(true);
+      if (current.active) {
+        current.revision++;
+        setState((previous) => ({ ...previous, failed: true }));
+      }
     } finally {
-      setBusy(null);
+      current.busy = false;
+      if (current.active) setState((previous) => ({ ...previous, busy: null }));
     }
   };
+  // A new credential/resource boundary must never display the old boundary's proposals.
+  const { proposals, busy, failed } = state.resources === resources
+    ? state : { proposals: [], busy: null, failed: false };
   const pending = proposals.filter((proposal) => proposal.status === "pending");
   if (pending.length === 0 && !failed) return null;
   return <section className="hr-chat__approvals" aria-label="Assistant approvals">

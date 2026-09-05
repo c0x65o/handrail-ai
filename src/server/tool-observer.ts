@@ -1,9 +1,15 @@
+import { waitForApplicationApproval, type ApplicationApprovalWaitOptions } from "./application-approval-wait.js";
 import type { ConversationEventStore } from "../conversation/event-store.js";
 import type { ResponseToolCallEvent } from "../protocol.js";
 import type { ApplicationToolActivityUpdate } from "../tools/executor.js";
 import { recordToolLifecycle } from "./tool-lifecycle.js";
 
 export interface HandrailAssistantToolObserver {
+  /** Observe a host-owned approval inside an active tool without executing it again. */
+  waitForApproval<T>(input: ApplicationApprovalWaitOptions<T> & {
+    readonly conversationId: string;
+    readonly turnId: string;
+  }): Promise<T>;
   /**
    * Migration seam for a host-owned, authorized and idempotent tool executor.
    * Records execution evidence, without changing domain approval or retry policy.
@@ -27,6 +33,24 @@ export function createToolActivityObserver(input: {
   readonly report: (conversationId: string, turnId: string, update: ApplicationToolActivityUpdate) => Promise<void>;
 }): HandrailAssistantToolObserver {
   return Object.freeze({
+    async waitForApproval<T>(options: ApplicationApprovalWaitOptions<T> & {
+      readonly conversationId: string; readonly turnId: string;
+    }): Promise<T> {
+      let announced = false;
+      return waitForApplicationApproval({ ...options, read: async (signal) => {
+        if (!announced) {
+          await input.report(options.conversationId, options.turnId, { summary: "Waiting for approval to continue" });
+          announced = true;
+        }
+        signal.throwIfAborted();
+        const result = await options.read(signal);
+        signal.throwIfAborted();
+        if (result.status === "settled") {
+          await input.report(options.conversationId, options.turnId, { summary: "Approval action settled; continuing" });
+        }
+        return result;
+      } });
+    },
     async observe<T>(location: Parameters<HandrailAssistantToolObserver["observe"]>[0], execute: (
       report: (update: ApplicationToolActivityUpdate) => Promise<void>,
     ) => Promise<{ readonly value: T; readonly isError?: boolean }>): Promise<T> {

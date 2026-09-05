@@ -133,15 +133,128 @@ describe("createDurableApplicationTransport", () => {
     await vi.waitFor(() => expect(innerA.startTurn.mock.calls.length + innerB.startTurn.mock.calls.length).toBe(1));
   });
 
+  it("does not invoke the provider when cancellation arrives during request decoding", async () => {
+    let release!: () => void, entered!: () => void, decodeSignal: AbortSignal | undefined;
+    const decoding = new Promise<void>((resolve) => { entered = resolve; });
+    const continueDecode = new Promise<void>((resolve) => { release = resolve; });
+    const store = new InMemoryDurableApplicationTurnStore<Request, Event>();
+    const inner = delegate([]);
+    const transport = createDurableApplicationTransport({ delegate: inner.transport, store,
+      workerId: "decode-worker", pollMilliseconds: 25,
+      requestCodec: { encode: (request: Request) => request,
+        async decode(request: Request, context) { decodeSignal = context?.signal; entered(); await continueDecode; return request; },
+        fingerprint: (request: Request) => request.ref }, checkpointForEvent: (event) => checkpoint(event.id) });
+    const started = await transport.startTurn(input);
+    if (!started.ok) throw new Error(started.error.message);
+    await decoding;
+    const cancellation = transport.capabilities.authoritativeCancellation;
+    if (!cancellation.supported) throw new Error("Missing cancellation");
+    expect(await cancellation.capability.cancelTurn({ conversationId: input.conversationId,
+      turnId: input.conversationTurnId, mutationId: "cancel-decoding", idempotencyKey: "cancel-decoding",
+      reason: "user" })).toMatchObject({ ok: true });
+    try {
+      await vi.waitFor(async () => expect((await store.load(input.conversationId, input.conversationTurnId))?.record.status).toBe("cancelled"));
+    } finally { release(); }
+    await collect(started.value.observation.events);
+    expect(await started.value.observation.result).toMatchObject({ status: "cancelled" });
+    expect(inner.startTurn).not.toHaveBeenCalled();
+    expect(decodeSignal?.aborted).toBe(true);
+  });
+
+  it("does not execute a decoded request after another worker takes its expired lease", async () => {
+    let clock = 1_000, release!: () => void, entered!: () => void;
+    const decoding = new Promise<void>((resolve) => { entered = resolve; });
+    const continueDecode = new Promise<void>((resolve) => { release = resolve; });
+    const store = new InMemoryDurableApplicationTurnStore<Request, Event>();
+    const firstDelegate = delegate([{ id: "wrong", text: "old worker" }]);
+    const secondDelegate = delegate([{ id: "winner", text: "new worker" }]);
+    const first = createDurableApplicationTransport({ delegate: firstDelegate.transport, store,
+      workerId: "old-worker", now: () => clock, leaseMilliseconds: 1_000, pollMilliseconds: 25,
+      requestCodec: { encode: (request: Request) => request,
+        async decode(request: Request) { entered(); await continueDecode; return request; },
+        fingerprint: (request: Request) => request.ref }, checkpointForEvent: (event) => checkpoint(event.id) });
+    const second = createDurableApplicationTransport({ delegate: secondDelegate.transport, store,
+      workerId: "new-worker", now: () => clock, leaseMilliseconds: 1_000, pollMilliseconds: 25,
+      requestCodec: { encode: (request: Request) => request, decode: (request: Request) => request,
+        fingerprint: (request: Request) => request.ref }, checkpointForEvent: (event) => checkpoint(event.id) });
+    const started = await first.startTurn(input);
+    if (!started.ok) throw new Error(started.error.message);
+    await decoding;
+    clock = 3_000;
+    await second.recoverTurn(input.conversationId, input.conversationTurnId);
+    await vi.waitFor(async () => expect((await store.load(input.conversationId, input.conversationTurnId))?.record.status).toBe("completed"));
+    release();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(await collect(started.value.observation.events)).toEqual([{ id: "winner", text: "new worker" }]);
+    expect(firstDelegate.startTurn).not.toHaveBeenCalled();
+    expect(secondDelegate.startTurn).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the preparation lease live while an input lookup is still pending", async () => {
+    let clock = 1_000, release!: () => void, entered!: () => void;
+    const decoding = new Promise<void>((resolve) => { entered = resolve; });
+    const continueDecode = new Promise<void>((resolve) => { release = resolve; });
+    const store = new InMemoryDurableApplicationTurnStore<Request, Event>();
+    const inner = delegate([]), contenderDelegate = delegate([]);
+    const transport = createDurableApplicationTransport({ delegate: inner.transport, store,
+      workerId: "preparing-worker", now: () => clock, leaseMilliseconds: 1_000, pollMilliseconds: 25,
+      requestCodec: { encode: (request: Request) => request,
+        async decode(request: Request) { entered(); await continueDecode; return request; },
+        fingerprint: (request: Request) => request.ref }, checkpointForEvent: (event) => checkpoint(event.id) });
+    const contender = createDurableApplicationTransport({ delegate: contenderDelegate.transport, store,
+      workerId: "contender", now: () => clock, leaseMilliseconds: 1_000, pollMilliseconds: 25,
+      requestCodec: { encode: (request: Request) => request, decode: (request: Request) => request,
+        fingerprint: (request: Request) => request.ref }, checkpointForEvent: (event) => checkpoint(event.id) });
+    const started = await transport.startTurn(input);
+    if (!started.ok) throw new Error(started.error.message);
+    await decoding;
+    clock = 1_600;
+    try {
+      await vi.waitFor(async () => expect((await store.load(input.conversationId, input.conversationTurnId))?.record.lease?.expiresAt)
+        .toBe(new Date(2_600).toISOString()));
+      clock = 2_100;
+      expect(await contender.recoverTurn(input.conversationId, input.conversationTurnId))
+        .toMatchObject({ ok: true, value: { status: "already_running" } });
+      expect(contenderDelegate.startTurn).not.toHaveBeenCalled();
+    } finally { release(); }
+    await collect(started.value.observation.events);
+    expect(inner.startTurn).toHaveBeenCalledOnce();
+  });
+
+  it("renews an expired decode lease before provider dispatch", async () => {
+    let clock = 1_000, release!: () => void, entered!: () => void, dispatchExpiry: string | undefined;
+    const decoding = new Promise<void>((resolve) => { entered = resolve; });
+    const continueDecode = new Promise<void>((resolve) => { release = resolve; });
+    const store = new InMemoryDurableApplicationTurnStore<Request, Event>();
+    const inner = delegate([]);
+    const transport = createDurableApplicationTransport({ delegate: { ...inner.transport,
+      async startTurn(value) {
+        dispatchExpiry = (await store.load(value.conversationId, value.conversationTurnId))?.record.lease?.expiresAt;
+        return inner.transport.startTurn(value);
+      } }, store, workerId: "decode-worker", now: () => clock, leaseMilliseconds: 1_000, pollMilliseconds: 25,
+      requestCodec: { encode: (request: Request) => request,
+        async decode(request: Request) { entered(); await continueDecode; return request; },
+        fingerprint: (request: Request) => request.ref }, checkpointForEvent: (event) => checkpoint(event.id) });
+    const started = await transport.startTurn(input);
+    if (!started.ok) throw new Error(started.error.message);
+    await decoding;
+    clock = 3_000;
+    release();
+    await collect(started.value.observation.events);
+    expect(dispatchExpiry).toBe(new Date(4_000).toISOString());
+    expect((await started.value.observation.result).status).toBe("completed");
+  });
+
   it("persists cancellation, forwards it once, and emits nothing after the cancelled terminal", async () => {
-    let finish!: () => void, cancellationCalls = 0;
+    let finish!: () => void, entered!: () => void, cancellationCalls = 0;
+    const providerStarted = new Promise<void>((resolve) => { entered = resolve; });
     const cancelled = new Promise<void>((resolve) => { finish = resolve; });
     const inner: ConversationTransport<Event, Request> = {
       capabilities: { ...capabilities, authoritativeCancellation: { supported: true, capability: {
         async cancelTurn() { cancellationCalls += 1; finish();
           return { ok: true as const, value: { status: "cancellation_requested" as const } }; },
       } } },
-      async startTurn(value) { return { ok: true, value: { conversationId: value.conversationId,
+      async startTurn(value) { entered(); return { ok: true, value: { conversationId: value.conversationId,
         turnId: "provider-turn", mutationId: value.mutationId, observation: {
           events: (async function* () { await cancelled; yield* [] as Event[]; })(),
           result: cancelled.then(() => ({ status: "cancelled" as const, checkpoint: checkpoint(null) })),
@@ -152,6 +265,7 @@ describe("createDurableApplicationTransport", () => {
     const transport = durable(new InMemoryDurableApplicationTurnStore<Request, Event>(), inner, "worker-cancel");
     const started = await transport.startTurn(input);
     if (!started.ok) throw new Error(started.error.message);
+    await providerStarted;
     const cancellation = transport.capabilities.authoritativeCancellation;
     if (!cancellation.supported) throw new Error("cancellation missing");
     expect(await cancellation.capability.cancelTurn({ conversationId: input.conversationId,

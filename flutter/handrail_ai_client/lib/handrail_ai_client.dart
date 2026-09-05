@@ -692,7 +692,8 @@ class HandrailAiClient {
       ..fields['mediaType'] = mediaType
       ..fields['idempotencyKey'] = idempotencyKey
       ..files.add(
-        http.MultipartFile.fromBytes('file', bytes, filename: filename),
+        http.MultipartFile.fromBytes('file', bytes,
+            filename: filename, contentType: http.MediaType.parse(mediaType)),
       );
     final response = await http.Response.fromStream(await _http.send(request));
     return _success(response);

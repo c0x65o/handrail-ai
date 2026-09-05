@@ -20,8 +20,8 @@ tests alone does not establish live host parity.
 | SDK migrations and version compatibility | Schema V1 plus migrate method exist. Review upgrade locking/history/compatibility and host migration ordering. |
 | Mills web integration with both modes | Protected high-level gateway and legacy route are qualified with simulated provider/domain flows; UI retains Try new UI / Use legacy UI. Final live provider/browser and migration evidence remain pending. |
 | Spartan web integration with both modes | Protected mounted gateway tests cover both approval modes, actual SQL action persistence, usage attribution, canonical completion, and failure after streamed progress. UI retains Try new UI / Use legacy. Final live provider/browser and migration evidence remain pending. |
-| Mills and Spartan mobile integration | Shared Dart canonical recovery and stable new-turn admission now pass actual SDK HTTP gateway tests with a simulated provider. Both native apps now vendor the Dart candidate and expose authenticated SDK client factories; targeted cookie/session tests passed. Pending-send storage, UI/mode wiring and real device/host qualification remain outstanding. |
-| Reproducible adoption and test instructions | Both web hosts now vendor the same immutable 0.2.5 candidate with provenance and matching file dependencies/lock integrity. Fresh production/dev installs, SDK import checks, byte comparisons, and scoped host compilation passed. Migration/live runtime sign-off and final mobile instructions remain pending. No commits/pushes/PRs or releases authorized by this goal. |
+| Mills and Spartan mobile integration | Shared Dart canonical recovery and stable new-turn admission now pass actual SDK HTTP gateway tests with a simulated provider. Both native apps now vendor the Dart candidate and expose authenticated SDK client factories; targeted cookie/session tests passed. Mills now wires its SDK repository, secure pending storage, activity and legacy/SDK selector into the existing screen. Spartan now also wires its SDK repository, account-scoped journal, activity and persisted selector into the rich phone/tablet screen. Full real device/host qualification remains outstanding. |
+| Reproducible adoption and test instructions | Both web hosts now vendor the same immutable 0.2.6 candidate with provenance and matching file dependencies/lock integrity. Fresh production/dev installs passed for the earlier 0.2.5 candidate; subsequent 0.2.6 candidates have matching dependency contracts, archive byte comparisons and scoped host compilation. Final clean-install proof must use the final artifact. Migration/live runtime sign-off and final mobile instructions remain pending. No commits/pushes/PRs or releases authorized by this goal. |
 
 ## Work log
 
@@ -810,3 +810,505 @@ integration and the remaining mobile/voice/runtime qualification requirements.
   and final scoped Mills analysis passed; whitespace checks passed. Both mobile
   vendored candidates now contain ten matching source/doc/manifest files with
   updated provenance. SDK base HEAD remains 7527d886f67fb970dc58a42e9c001cd6a8d389ec.
+
+
+### Mills mobile selectable SDK mode and authoritative screen state
+
+- Added AssistantModeScreen to authenticated /assistant routing. Default remains
+  legacy; Try SDK / Use legacy switch the same rich AssistantScreen between
+  repositories. API/household/user-scoped FlutterSecureStorage retains the mode
+  and backs the shared pending journal. Same-account session replacement rebuilds
+  the protected client while preserving mode; account changes restore that
+  account's own preference. Failed preference saves report that the change is
+  only retained for the current visit.
+- AssistantScreen now subscribes to SDK repository changes and computes running
+  from local admission plus server state. A widget test caught the remaining
+  legacy Stop visibility condition requiring an optimistic send; SDK Stop now
+  appears for a server-active turn after reload. Server cancellation requests do
+  not optimistically mark the run idle. Navigation/mode/thread changes cancel
+  only the local wait and SDK observations; durable server work remains owned by
+  the server. Independent sessions remain available through Conversations.
+- SDK activity has one summary/count with collapsed tool-name details and a host
+  showActivityDetails switch. Terminal status replaces stale running summaries.
+  SDK rendering uses saved domain messages instead of briefly duplicating them
+  through legacy optimistic-success insertion. Legacy presentation remains.
+- Finalized attachment sends in SDK mode now call SdkAssistantRepository's shared
+  admission path, translating the validated UUID to att_/ref_ wire identities.
+  Existing upload/finalization, citation/proposal rendering, authorized proposal
+  decisions, transcription and realtime voice factories remain application-owned.
+  Matching retained text/attachment intent resumes the saved submission; changed
+  intent cannot overwrite it. Full mounted-host attachment/send qualification is
+  still required; existing voice integrations are not new SDK telemetry proof.
+- Validation: two SDK widget tests passed for mode persistence/switch-back and
+  reload-running/Stop/canonical completion; the activity expansion assertion was
+  added to the latter. All 68 assistant screen tests passed, including existing
+  attachments, proposals, voice, navigation and role/auth behavior. Production
+  scoped analysis passed; test import ordering was corrected for final analysis.
+- Owner steps are now in Mills mobile docs/assistant-sdk-qualification.md. Source
+  mode is selectable but no deployment or real device/provider run was performed.
+  Spartan mobile still has only its authenticated client factory and vendored SDK;
+  its repository/controller/screen composition is the next integration priority.
+- Before final cancellation sign-off, reproduce the admission-to-durable-start
+  cancellation race: the shared TypeScript admission qualifier validates message
+  identity but currently lacks an explicit terminal-turn-state rejection. SDK
+  retry checks terminal state, but another client may cancel between checks.
+  This audit is still open; do not claim complete cancellation parity yet.
+- Full goal remains active with required-approval continuation, voice/transcription
+  telemetry, migration compatibility and live protected host evidence still open.
+  No commit, push, PR, publication, deployment or project config change occurred.
+- Final scoped analysis of the Mills route, mode wrapper, screen, repositories
+  and screen tests passed with no issues. The two focused SDK widget tests passed
+  again after adding explicit collapsed/expanded activity checks. The full screen
+  suite's 68 passing tests remain the legacy-regression evidence for this change.
+  Documentation and both native candidate README hashes were synchronized; no
+  package release or web hash-named archive rewrite was performed.
+
+
+### Spartan mobile selectable SDK mode and shared attachment MIME correction
+
+- Continued from the saved Mills milestone; no restart, commit, push or deployment.
+  Spartan main -> authenticated application shell -> Ask Aegis now supplies the
+  protected SDK factory and principal scope. AegisModeScreen defaults to legacy,
+  persists Try SDK / Use legacy with secure storage, and reuses the existing
+  domain screen. Account namespace includes gateway URI and principal; no new
+  company-switching contract was invented.
+- AegisSdkRepository delegates domain reads, lifecycle, titles, actions and file
+  downloads to the existing repository. Shared sessions own canonical recovery,
+  admission/start, cancellation and activity. File staging uses SDK upload followed
+  by the retained exact admission/start request. New sends cannot replace a
+  pending journal; reload retries the original IDs.
+- SDK controller accepts canonical domain projections while work runs and permits
+  thread navigation/new threads independently. Late completion cannot change the
+  selected thread or its draft. Caught and tested a delayed domain projection race:
+  responses must match both navigation generation and selected thread identity.
+- Default SDK screen has a single activity summary/count, collapsed safe tool-name
+  details, optional hidden details, authoritative Stop, and Running/Unread thread
+  labels. Legacy controller/screen paths and domain action/attachment views remain.
+  Title generation retains its existing non-blocking domain endpoint.
+- Closing the wrapper starts disposal of every SDK session immediately, stopping
+  all timers before awaiting stream cleanup. Widget qualification caught timers
+  otherwise remaining alive behind asynchronous observer cancellation. Closing
+  observers or switching modes never requests server cancellation.
+- Found the Dart upload client did not set the MIME type on the multipart file
+  part. It now sends the caller's media type, which Spartan validates. Both native
+  source vendors/provenance were refreshed and byte-verified (10 files each).
+  Shared Dart analysis/all 31 tests passed, including seven actual SDK gateway
+  tests with simulated provider and a new file-part MIME regression assertion.
+- Five new repository tests pass. Three SDK controller/widget tests cover thread
+  navigation while running, restored Stop, optional tool details and mode/account
+  persistence. Eight existing controller and seventeen existing screen tests pass.
+  Initial SDK widget cleanup stalled under the simulated clock; explicit async
+  teardown plus immediate production timer stopping resolved it.
+- Owner steps and limitations are in Spartan mobile docs/assistant-sdk-qualification.md.
+  No protected deployed host/device/provider/telemetry evidence claimed. Thread
+  creation retries retain their key only in the current adapter; uncertain creates
+  across process recreation remain unqualified. Staged unsent uploads expire on
+  the server. Required human-approval continuation, voice/STT telemetry, canonical
+  admission/start cancellation and migration compatibility remain open full-goal
+  work. The web packed candidate still contains the older bundled Flutter source;
+  refresh its immutable filename/provenance before any coordinated release.
+
+Final validation for the Spartan mobile continuation: scoped analysis of all eight
+changed integration/test entrypoints passed. The final repository + SDK screen
+batch passed all eight tests, including collapsed/expanded/hidden details and
+absence of private tool arguments. Existing controller (8) and screen (17) checks
+passed, plus shared Dart checks (31), for 64 distinct targeted tests. Both mobile
+vendors' ten files were byte-compared to the SDK and their SHA-256 provenance
+verified. Diff whitespace checks passed. Goal remains active; no live/runtime,
+voice/billing, required-approval continuation or release qualification claimed.
+
+
+### Canonical cancellation before delayed execution
+
+- Previous goal turn made source and test progress; this turn continued the saved
+  cancellation audit. Reproduced provider execution after a canonical cancelled
+  turn through a real shared durable worker and in-memory canonical event store.
+- Added exported guardCanonicalTurnExecution inside the execution boundary. It
+  requires the matching canonical active turn, valid replay, running eligibility
+  and no canonical cancellation request. Canonical terminal turns cannot execute.
+  The outer durable transport still replays existing completed records; replay
+  does not invoke the guarded provider delegate. Replay stores are disposed.
+- Shared generic qualifier uses the guard. Both standalone host durable transports
+  install it around their delegate; both mounted high-level hosts inherit it from
+  the SDK. A Mills regression now cancels before a durable row exists, then sends
+  a delayed start and verifies zero provider calls. Spartan's mounted SQL gateway
+  case admits and canonically cancels first, then verifies no provider/domain
+  mutation or telemetry call and retained canonical cancellation.
+- SDK typecheck/build and scoped lint passed. Five new cases cover canonical
+  cancelled/completed/failed/requested cancellation and completed result replay.
+  These plus durable (9) and high-level assistant (5) tests pass (19 total).
+  Mills gateway file passes 13 tests. Spartan mounted required/automatic,
+  interrupted-auto and cancelled-before-start cases pass four tests.
+- Inspected authoritative workspace SDK version 0.2.6 and base HEAD
+  0e738cea0af426ea87a8c83f981cca0f01d37831. This thread did not create that commit.
+  Built/packed a new immutable candidate and updated both web manifests, lockfiles
+  and provenance. Current artifact: handrail-ai-assistant-0.2.6-parity.792d8d1852f5.tgz;
+  SHA-256 792d8d1852f5192a9196a4dd5c1bbaf7727881c61796ac5fda89551af183c47a.
+  Source tree SHA-256 6eb2e8fe57bda1412bc1ae278aa057a597d0553caa80f5cb2c40159a9ade6628.
+  Includes current Flutter 0.1.1 and MIME correction; previous archive retained.
+  Both installed packages were byte-compared with the extracted archive; dependency
+  and peer contracts match the earlier candidate. No release/deploy/commit/push.
+- The first adoption script hit the system Python's older tar API and then npm's
+  bin-path normalization difference; both were corrected before adoption completed.
+  An initial host check against the old installed SDK consequently failed on its
+  missing export; the complete gateway suite passed after candidate installation.
+- Remaining cancellation audit: durable run() reads cancellation/lease from its
+  claim before awaiting requestCodec.decode(). Cancellation or lease takeover
+  during a slow decode may require a fresh fenced check before invoking the
+  delegate. This is not yet qualified. Full live runtime, voice/STT billing,
+  required-human-approval continuation and migrations remain open goal work.
+
+Final checks for this continuation: both host qualification TypeScript projects
+and scoped host lint passed. Spartan's test initially used an unbranded numeric
+expected revision; it now reads the authoritative typed revision from its event
+store, and the cancelled-before-start mounted case passed again. The shared Dart
+actual-HTTP-gateway batch passed all seven tests against the rebuilt JS gateway.
+Total distinct targeted tests this turn: 43 (SDK TS 19, Mills 13, Spartan 4, Dart 7).
+Both installed guard exports resolve; both archive SHA-256 and npm SHA-512 match;
+current SDK src still matches the recorded candidate source-tree hash. Diff checks
+passed. Fresh full-host npm-ci runs previously qualified the older candidate;
+this turn verified unchanged dependency contracts and archive installation bytes,
+not a new full-host clean-install run. Goal remains active and full completion
+unproven. Next concrete work is cancellation/lease changes during request decode.
+
+
+### Cancellable request preparation and lease ownership
+
+- Previous turn made verified progress. Continued by reproducing two provider
+  calls that should not happen: cancellation during requestCodec.decode(), and
+  an old decoder returning after another worker took its expired lease.
+- Durable transport now renews/revalidates its current attempt with CAS after
+  decoding, before invoking the provider delegate. A cancelled, terminal or
+  replaced attempt cannot dispatch. Retained durable replay is unchanged.
+- Strengthened the cancellation test by leaving the decoder blocked. It exposed
+  that merely checking after decode leaves Stop stuck running. Preparation now
+  monitors cancellation/ownership, renews its lease, aborts its local wait and
+  settles cancellation without needing that lookup to return. Decoders receive
+  an optional second { signal } argument to clean up host input reads. Timers are
+  cleared on every preparation exit. Old one-argument callbacks remain compatible.
+- Four new cases cover blocked cancellation/abort signal, lease takeover, renewal
+  during a pending lookup and renewal after a slow lookup. Existing active-provider
+  cancellation now waits explicitly for the provider to start, avoiding an admission
+  race in that older test. All 23 SDK TS tests passed: durable 13, canonical guard 5,
+  and high-level assistant 5. SDK typecheck and scoped lint passed.
+- Rebuilt/repacked SDK 0.2.6 and installed the same immutable candidate in both web
+  hosts. Artifact: handrail-ai-assistant-0.2.6-parity.a26eb1ef6f48.tgz; SHA-256 a26eb1ef6f48c21497144719aa5d95f10a2fbfad2e19c5b4197bed740529925f.
+  Source-tree SHA-256 3252ed13ce266cea682efe9cb1f2fcf759417e2f141f4d960470d4d72875d270.
+  Both installed packages were byte-compared to the archive; dependency and peer
+  contracts remain unchanged. No persisted-record schema change; coordinated
+  worker replacement remains necessary for behavioral guarantees.
+- Preliminary next audit: SDK src/providers/openai-transcription.ts and
+  openai-realtime.ts have no usage/receipt hooks. Mills routes.ts already wraps
+  transcription in app usage admission/settlement and its provider accepts
+  recordUsage, so inspect actual reported units and persistence before replacing
+  that host path. Do not infer billing parity from the existing adapter APIs.
+  Shared high-level Stop before any durable turn row also needs direct HTTP
+  qualification; prior orphan-stop evidence was the Mills standalone transport.
+  Recovery after provider dispatch/lease loss, voice/STT billing, required approval
+  continuation and migration/live-host qualification remain open goal work.
+
+Final checks for the preparation continuation: both host scoped TypeScript
+projects pass against a26eb1ef6f48. Mills stopped-before-start/second-worker cancel
+cases pass (2); Spartan cancelled-before-start/cancel-and-resume cases pass (2).
+All seven Dart actual-HTTP-gateway tests pass against the rebuilt SDK. Combined
+with the 23 SDK TS tests, this turn passed 34 distinct targeted tests. SDK package
+typecheck/build and scoped lint passed; both host archive/lock integrity hashes
+and the current SDK source-tree hash were verified. The persisted schema and
+legacy/SDK selectors are unchanged. No commit, push, PR, publication or deployment
+was performed by this turn. Full goal completion remains unproven; next priority
+is authoritative supported voice/transcription usage capture and host adoption,
+with high-level pre-durable cancellation and post-dispatch recovery still listed
+for qualification rather than silently treated as proven.
+
+
+## Transcription response compatibility and voice billing audit
+
+The OpenAI adapter previously requested `verbose_json` for every model and
+required `language` plus `duration` even for JSON-only transcription models.
+It now requests `json`, accepts text-only responses, projects one detected
+language when present, and leaves multilingual/undetected language null. BCP 47
+hints use a two-letter primary subtag when available. Missing provider duration
+uses the trusted resolver's validated media duration for display only, never as
+reported billing usage. Explicit malformed metadata still fails safely.
+
+Provider contract was checked against the official [transcription reference](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create)
+and [audio usage schema](https://developers.openai.com/api/reference/resources/audio).
+The reference confirms `gpt-transcribe` is a supported model, so Mills' default
+was retained. This is a response-contract fix, not live provider qualification.
+
+Remaining concrete voice findings:
+
+- SDK transcription and realtime adapters currently have no usage capture hook.
+  Realtime `response.done` processing strips usage from the normalized event.
+- The normalized receipt contract currently represents token totals/cache/
+  reasoning plus provider cost; it has no duration or audio/text modality units.
+  Confirm the Handrail ingestion/pricing contract before adding unsupported
+  wire fields or claiming duration/audio pricing correctness.
+- Mills `/transcriptions` delegates its existing provider and calls
+  `beginMillsAIRuntimeUsage`. That helper buffers receipts in memory; its client
+  retries HTTP three times, and route settlement logs exhausted delivery errors.
+  It does not use the SDK's persistent outbox. Connect auxiliary operations
+  (including transcription/title generation) to durable delivery and qualify
+  restart/retry identity. The SDK chat path already uses the persistent outbox.
+- Mills `responseUsage` reads token totals but drops transcription duration and
+  modality detail. Full voice billing remains unfinished.
+- SDK `json` changes alone do not replace Mills' existing transcription provider
+  or add a voice feature to Spartan. Both existing and SDK app modes remain.
+
+Next work remains durable auxiliary/voice capture, provider usage units and
+Handrail compatibility, followed by the earlier approval, recovery and protected
+runtime qualifications. No publish, deployment, commit, push or PR occurred.
+
+Validation for the JSON compatibility patch: 42 provider adapter tests, 16 shared
+transcription contract tests and 12 React transcription tests passed (70 total).
+SDK package typecheck, scoped source/test lint and pack-time compile passed.
+Both host archives/locks and every installed SDK file were verified against
+`handrail-ai-assistant-0.2.6-parity.1bd8a9d200a3.tgz` (SHA-256
+`1bd8a9d200a38c57b35873087795850ec7c7cae981b1287f97d6e6c056bb978c`).
+No live provider calls were made.
+
+Both web host scoped TypeScript qualifications passed against this candidate.
+
+
+## Mills auxiliary durable delivery
+
+Closed the HTTP-only auxiliary delivery gap identified above. Mills server
+composition now supplies the existing SDK Postgres outbox and receipt sink for
+transcription, title generation and legacy chat in both UI modes when telemetry
+is configured. It recovers pending SQL receipts on startup and every 30 seconds,
+and stops/flushes before database shutdown. Migration 0096 already provides the
+required documents table; no new schema was added or deployed.
+
+Six host client tests and one actual PGlite SQL test passed, including offline
+retention, fresh-client recovery, lost acknowledgement, stable billing identity,
+retained delivered receipt replay, immutable contents and environment isolation.
+The receiver deduplication was simulated, not a live Handrail charge proof.
+Host scoped typecheck and lint passed. SDK archive unchanged: this host change
+uses the already-pinned SDK outbox APIs.
+
+Still unfinished: audio-duration/modality receipt contract and pricing support,
+SDK voice capture hooks, live Handrail delivery, and the earlier approval,
+recovery and protected-runtime qualifications. Auxiliary receipt collection
+before settlement still needs crash/reconciliation coverage. Do not interpret
+successful delivery of existing token/unavailable receipts as full voice billing.
+
+
+## Atomic cancellation before durable start
+
+The high-level assistant now verifies canonical admission when Stop finds no
+worker row, then reserves a terminal cancellation through the same atomic durable
+store `create` used by turn start. If cancellation wins, a delayed start replays
+cancelled without decoding or calling the provider. If start wins, ordinary
+cancellation records the request and the existing worker owns settlement. Unknown
+turns still return not_found and cannot reserve cancellations. Canonical terminal
+projection and activity use the existing reconciliation path.
+
+The generic durable transport exposes trusted `cancelTurnBeforeStart`; callers
+must authorize and verify canonical admission before using it. Cancel reservations
+retain `cancelledBeforeStart: true`, `request: null`, terminal cancelled status,
+and cancellation identity in the existing V1 JSON document. No SQL schema changes
+are needed. Normal codecs can still store null themselves. Older workers skip
+these terminal rows, but an old start client can receive a conflict instead of
+cancelled replay: use the same qualified SDK candidate on all workers for the
+polished response. Do not remove cancellation records while starts can be retried.
+
+SDK qualification: 26 tests passed across durable/canonical-start/high-level
+assistant suites. The new HTTP test proves Stop without a worker row settles
+canonical state, delayed start has provider calls=0, unknown turns remain unknown,
+and repeated Stop does not append another terminal event. A competing normal start
+uses ordinary cancellation while its decoder is pending. Package typecheck and
+scoped lint passed. Test-only observation consumers were corrected to drain their
+event streams before awaiting terminal results after initial timeout failures.
+
+The older standalone Mills gateway still has a host-owned orphan-cancellation
+fallback. Its creation race needs the same atomic reservation contract; current
+production SDK composition uses the high-level assistant fixed above. Do not
+claim every independently constructed legacy gateway is qualified by these tests.
+
+Additional cancellation validation: the mounted Spartan HTTP test now sends Stop
+instead of manually writing a cancelled canonical event, and passed against SQL
+with zero provider/tools/telemetry calls. Reconciliation now preserves the durable
+user cancellation reason when the browser never wrote its request event; the
+HTTP test asserts both requested and final reason are user. All 14 reconciliation
+tests plus the eight canonical-start tests passed; the unique SDK total for this
+change is 40 tests.
+
+Final cancellation candidate is `handrail-ai-assistant-0.2.6-parity.9dc64dd6b84d.tgz`
+(SHA-256 `9dc64dd6b84d63df6e895def7580cb0f0b4049578190a37f05f43995b47f3a92`).
+Both web hosts pin it with matching archive integrity and installed bytes.
+Both host scoped compilations passed after the API change; final reason-preserving
+reconciliation has identical public declarations and passed SDK compile/lint.
+The shared Dart client passed all seven actual SDK HTTP gateway tests against
+the rebuilt JS. Unique qualification total: 40 SDK TS tests, seven shared Dart
+HTTP tests, and one mounted Spartan SQL/HTTP test (48). No live provider or
+production execution was performed.
+
+
+## Mills standalone cancellation gap closed
+
+The previously noted standalone Mills orphan fallback now uses the shared SDK
+atomic cancellation reservation. It only writes canonical cancelled after
+confirming the durable outcome is cancelled; a competing live start receives
+ordinary cancellation_requested and remains running until settlement. Repeating
+Stop also repairs the transcript after cancellation was saved but canonical CAS
+retries were exhausted.
+
+Five targeted host gateway cases passed, including both creation orders and a
+start between durable reservation and canonical publication. The live-provider
+race waits for the abort signal, then proves the transcript remains nonterminal
+until the provider settles. Three simulated transcript conflicts followed by
+retry repair canonical state without provider execution. Host scoped compilation
+and lint passed; no SDK artifact changes or deployments were needed.
+
+Remaining goal priorities are still voice usage/Handrail pricing and live delivery,
+required approval continuation, recovery after dispatched side effects, protected
+host/device qualification, and final migration/clean-install readiness evidence.
+
+
+## Shared approval UI navigation and polling
+
+The default SDK approval panel now unmounts its conversation-specific state when
+the selected conversation changes. A delayed read or confirmation from the old
+conversation cannot replace the current conversation's cards or error state.
+Changing the resource client also clears the old boundary's approval state.
+Within one mounted boundary, reads are serialized and a queued refresh runs once
+the outstanding read settles. Confirm/reject decisions invalidate older reads,
+so an old pending snapshot cannot restore a successfully decided card.
+
+Six new React tests cover late read success/failure, late decision success/failure,
+serialized slow polling and duplicate clicks, stale pending snapshots after
+confirmation, resource replacement, and cleanup. The existing standard
+confirmation test also passes. This change affects the shared default web UI;
+custom/native host approval presentation is unchanged.
+
+Required human approval continuation remains a material open item. Inspection
+confirmed that both mounted custom-provider integrations currently return a
+pending proposal to the model immediately. Spartan publishes its approval shadow
+after the provider returns, and its 90-second provider deadline currently includes
+tool execution. Mills saves proposal rows during completeMessage. Correct waiting
+therefore requires publishing proposals before waiting, observing the existing
+domain executor's retained result without executing it twice, explicit bounded
+waiting/cancellation, and accounting for human wait time in provider deadlines.
+Do not claim the UI correction implements that server continuation.
+
+Both web hosts now pin `handrail-ai-assistant-0.2.6-parity.06b3d70fb37a.tgz` (SHA-256
+`06b3d70fb37a081fc6ef01d06800cdfc07e52362aa8ab2e5295f81d73cbc7268`), with matching lock integrity and installed files. SDK package
+typecheck, scoped lint, and build passed. All public declarations are byte-identical
+to the preceding candidate; no host TypeScript source changed in this patch.
+Fresh clean-install and live browser evidence remain pending.
+
+
+## Required approval continuation: shared waiting and Spartan adoption
+
+The SDK exports waitForApplicationApproval and toolActivity.waitForApproval for
+host-owned proposals. They observe authoritative pending/settled state, serialize
+reads, bound the observation to the persisted expiry (and at most fifteen minutes),
+and abort slow reads/activity writes on cancellation or expiry. They never create,
+approve, execute, or retry a domain mutation. The observer publishes one waiting
+summary and one settlement summary; the enclosing tool remains active until its
+result is recorded. No schema migration is required for this added API.
+
+Spartan SDK required mode publishes saved approval rows while the provider is still
+active, observes the existing confirmation endpoint's saved result, and returns
+applied=true/succeeded before allowing dependent tools. Rejection, failure, Stop,
+or expiry interrupts the sequence. On interrupted observation, only an unclaimed
+pending proposal is cancelled; an executing action retains its own settlement.
+The wait uses the persisted proposal creation time plus fifteen minutes. Spartan's
+provider deadline excludes this separately bounded human wait and resumes its
+remaining active-time budget afterward. Automatic SDK mode and legacy immediate
+proposal behavior are preserved. Native Spartan now enables action decisions
+during SDK runs while retaining disabled composition and one decision at a time.
+
+Qualification: eight new SDK wait cases plus three retained observer cases; two
+provider deadline cases; mounted SQL/HTTP confirmation, rejection, Stop, three
+automatic/cancellation cases, and a legacy proposal case (seven host cases); five
+native SDK screen/controller cases and eight existing legacy controller cases.
+No live provider or protected browser/device was used. Shared wait tests prove
+expiry; host expiry/restart/crash recovery still needs direct qualification.
+Mills required continuation still needs proposal staging before completeMessage.
+The custom web hosts' approval hooks still duplicate polling state and need the
+shared navigation/decision protections used by the default SDK panel.
+
+Final approval-wait candidate: `handrail-ai-assistant-0.2.6-parity.514dcfe1e4ab.tgz`
+(SHA-256 `514dcfe1e4ab91126bab56b3c6d996b36a927719a51ce71806400269b0d49518`). Both web manifests, lockfiles, provenance and installed
+bytes match; final public declarations match the Spartan-compiled candidate.
+SDK package typecheck, lint and build passed. The final observer also bounds
+activity persistence inside the approval deadline, covered by a hung-write test.
+
+Final qualification for this continuation: 47 unique tests passed (11 SDK wait/
+observer, all 16 Spartan provider continuation cases, seven mounted/legacy host
+cases, and 13 native SDK/legacy controller cases). SDK and both web host scoped
+compilation, touched-source lint, and native scoped analysis passed. Host deadline
+changes were checked against the full scoped provider continuation file because
+that deadline also governs provider retries and ordinary continuations.
+
+
+## Mills early proposal persistence
+
+The PostgreSQL assistant store now implements stageToolProposal. It validates a
+domain proposal, verifies the conversation owner, and saves an explicit immutable
+proposal ID while the assistant message remains pending. Exact retries return the
+same proposal, including its retained decision. Reusing the ID for another message
+or arguments fails; new proposals cannot be staged after message completion.
+
+completeMessage accepts ordered stagedProposalIds. It locks the same message used
+by staging, verifies the complete identity/argument set, and preserves the saved
+proposal rows rather than creating pending duplicates. Confirmed/rejected status
+and expiry remain intact, and completion audit metadata reflects saved decisions.
+Callers that do not pass stagedProposalIds retain the existing completion behavior.
+This uses existing tables and does not require a schema migration.
+
+Five new SQL cases cover early visibility, confirmed/rejected decisions, retries,
+identity conflicts, owner isolation and mismatched final output. The four existing
+SQL gateway cases also pass (nine unique tests). Scoped compilation and lint pass;
+the qualification tsconfig now includes the edited SQL test file. The test fixture
+uses the actual valid portal.unit.status field; its earlier abbreviated status
+field was rejected by domain validation.
+
+This is the persistence prerequisite for required approval continuation. The
+Mills gateway does not yet call stageToolProposal or wait on confirmation. Both
+confirmation routes currently execute using a caller idempotency key before
+marking the proposal confirmed, and discard can race that execution. Next work
+must coordinate one authoritative execution per proposal across the SDK and legacy
+endpoints, persist/replay its outcome, handle rejection/cancellation races, then
+wire staged IDs and the shared SDK wait into the provider loop. Browser/native
+approval controls and result status must follow that shared execution contract.
+
+
+## Mills proposal execution claims and compatibility
+
+Migration 0098_assistant-proposal-execution expands the domain proposal constraint
+to include executing and failed. The store now has claimToolProposalExecution and
+settleToolProposalExecution. Claim locks the authorized owner's proposal, checks
+role/reviewed version/expiry, and atomically changes proposed to executing.
+Concurrent claims return one winner. Discard cannot change an executing proposal;
+a discarded proposal cannot be claimed. Failed and confirmed outcomes are retained
+and cannot be claimed for another execution. Settlement checks the executing
+version and writes domain audit evidence.
+
+These methods coordinate domain confirmation/discard; the existing SDK durable
+tool ledger will own dispatch deduplication and retained results when the endpoints
+are wired. SDK's full approval-execution coordinator requires canonical proposal/
+confirmation events, which legacy Mills proposals do not currently carry. Avoid
+fabricating that history to make legacy proposals pass its exact-audit checks.
+
+Web and mobile contracts accept the new states and show Executing approved change
+or Execution needs review instead of Expired. Mobile does not offer confirmation
+for either state. The legacy/SDK UI selector is preserved. Migration must precede
+activation of these claims, and all serving builds must understand the new status
+values. The down migration refuses to drop support while executing/failed records
+exist; review/reconciliation is required before downgrading the database contract.
+No deployed database or project configuration was changed.
+
+Evidence: three SQL cases cover competing claims, discard/claim ordering, terminal
+failures, ownership, role, reviewed version and expiry. One additional SQL case
+proves rollback is blocked without erasing the existing execution state. Two
+mobile decoder cases accept executing/failed without enabling another decision.
+Mills scoped compilation (now including AssistantPage) and touched-source lint
+passed. Claims are not called by the confirmation endpoints yet, so this is still
+a prerequisite rather than completed Mills approval continuation. Next: a shared
+Mills server coordinator for both legacy and SDK confirm/discard endpoints, using
+these claims plus the SDK tool ledger and a stable proposal-derived execution key;
+then saved-result observation and staged-ID completion in the SDK provider path.
+
+Final scoped Flutter analysis of the changed models, repository, screen and test passed with no issues.

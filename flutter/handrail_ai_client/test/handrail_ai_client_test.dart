@@ -5,6 +5,24 @@ import 'package:http/testing.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test('attachment file parts preserve the declared supported media type', () async {
+    final client = HandrailAiClient(
+      baseUri: Uri.parse('https://app.example/api/ai'),
+      httpClient: MockClient((request) async {
+        expect(request.url.path, '/api/ai/attachments');
+        expect(request.headers['content-type'], startsWith('multipart/form-data'));
+        expect(request.body, contains('content-type: application/pdf'));
+        expect(request.body, contains('name="file"; filename="invoice.pdf"'));
+        expect(request.body, contains('%PDF-test'));
+        return http.Response(jsonEncode({'ok': true, 'value': {}}), 200);
+      }),
+    );
+    await client.uploadAttachment(bytes: utf8.encode('%PDF-test'),
+        filename: 'invoice.pdf', mediaType: 'application/pdf',
+        kind: 'document', idempotencyKey: 'upload-1');
+    client.close();
+  });
+
   test(
     'reduces typed cross-platform turn state and calls thread resources',
     () async {

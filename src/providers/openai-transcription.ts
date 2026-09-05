@@ -54,7 +54,7 @@ export interface OpenAITranscriptionFile {
 export interface OpenAITranscriptionRequest {
   readonly model: string;
   readonly file: OpenAITranscriptionFile;
-  readonly response_format: "verbose_json";
+  readonly response_format: "json";
   readonly language?: string;
 }
 
@@ -284,17 +284,31 @@ async function providerIdempotencyIdentity(
 function normalizeResponse(
   value: unknown,
   request: TranscriptionRequest,
+  resolved: OpenAITranscriptionResolvedAudio,
 ): TranscriptionResult {
   const source = safeRecord(value);
   if (
     source === null ||
-    !Object.hasOwn(source, "text") ||
-    !Object.hasOwn(source, "language") ||
-    !Object.hasOwn(source, "duration")
+    !Object.hasOwn(source, "text")
   ) {
     throw new TranscriptionOperationError("internal_failure");
   }
   try {
+    let language = Object.hasOwn(source, "language") ? source.language : null;
+    if (!Object.hasOwn(source, "language") && Object.hasOwn(source, "languages")) {
+      // gpt-transcribe can report multiple detected languages. The shared
+      // contract has one language slot; do not label multilingual audio as one.
+      if (!Array.isArray(source.languages)) {
+        throw new TranscriptionOperationError("internal_failure");
+      }
+      if (source.languages.length === 1) {
+        const detected = safeRecord(source.languages[0]);
+        if (detected === null || !Object.hasOwn(detected, "code")) {
+          throw new TranscriptionOperationError("internal_failure");
+        }
+        language = detected.code;
+      }
+    }
     return parseTranscriptionResult({
       status: "completed",
       request_id: request.request_id,
@@ -302,8 +316,11 @@ function normalizeResponse(
         audio_id: request.inputs[0]!.audio_id,
         text: source.text,
         metadata: {
-          language: source.language,
-          duration_seconds: source.duration,
+          language,
+          // JSON transcription need not report duration. This is validated
+          // host-owned media metadata, never provider-reported billable usage.
+          duration_seconds: Object.hasOwn(source, "duration")
+            ? source.duration : resolved.duration_seconds,
         },
       }],
     }, request);
@@ -375,6 +392,9 @@ class OpenAITranscriptionCapability implements SupportedTranscriptionCapability 
       request.idempotency_key,
     );
     rejectIfAborted(request.signal);
+    // The public contract accepts BCP 47; OpenAI expects an ISO-639-1 hint.
+    // Unsupported primary subtags are left to provider language detection.
+    const primaryLanguage = request.language?.split("-")[0];
     const providerRequest = Object.freeze({
       model: this.model,
       file: Object.freeze({
@@ -382,8 +402,9 @@ class OpenAITranscriptionCapability implements SupportedTranscriptionCapability 
         media_type: resolved.media_type,
         filename: `audio.${audio.format.container}`,
       }),
-      response_format: "verbose_json" as const,
-      ...(request.language === undefined ? {} : { language: request.language }),
+      response_format: "json" as const,
+      ...(primaryLanguage !== undefined && /^[a-z]{2}$/u.test(primaryLanguage)
+        ? { language: primaryLanguage } : {}),
     });
 
     let response: unknown;
@@ -398,7 +419,7 @@ class OpenAITranscriptionCapability implements SupportedTranscriptionCapability 
     } catch (error) {
       throw normalizeProviderFailure(error, request.signal);
     }
-    return normalizeResponse(response, request);
+    return normalizeResponse(response, request, resolved);
   }
 }
 

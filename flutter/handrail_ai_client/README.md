@@ -24,8 +24,9 @@ A stale same-version unread response cannot undo that acknowledgement.
 This package is still headless. Applications must connect protected HTTP and presentation.
 `HandrailConversationSession` supplies canonical loading, synchronization, and
 observation recovery for an existing conversation. Mills and Spartan mobile now vendor the 0.1.1 source candidate and provide
-protected client factories. Their existing screens still use the legacy mode;
-SDK repositories, composer storage and mode selection remain integration work.
+protected client factories. Mills now composes SDK sessions and pending storage behind an accessible
+legacy/SDK selector. Spartan still needs its SDK repository/screen composition;
+full native host/provider qualification remains open in both projects.
 
 
 `HandrailConversationSession.initialize()` negotiates capabilities, loads a
@@ -64,8 +65,9 @@ recovery uses the server-owned turn without a pending start request. Preserve it
 after a lost response. On `admission_conflict`, show the refreshed conversation
 for review before preparing another submission.
 
-The native host authentication adapters, persistent pending-send storage adapters,
-and composer/mode wiring remain integration work. Gateway qualification uses an
+Native host authentication adapters are integrated in both mobile projects.
+Mills now wires pending storage and the mode/composer path; Spartan still needs
+that composition. Full native host qualification remains open. Gateway qualification uses an
 actual Node HTTP server running the TypeScript SDK with in-memory persistence and
 a deterministic provider, not a live mobile application or billable provider.
 From the SDK root run `npm run build`, then from this directory run

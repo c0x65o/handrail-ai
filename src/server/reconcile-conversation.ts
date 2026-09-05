@@ -98,6 +98,10 @@ export async function reconcileDurableConversationTurn(input: {
       if (page.hasMore && previous === page.nextCursor) throw new TypeError("Reconciliation history did not advance");
     }
     const bindings: { id: string; payload: ConversationEventPayload }[] = [];
+    if (record.status === "cancelled" && record.cancellation && turn.cancellation_requested_reason === null) {
+      bindings.push({ id: `${bindingId}:cancellation`, payload: { type: "turn.cancellation_requested",
+        turn_id: input.turnId as never, reason: record.cancellation.reason } });
+    }
     if (!bound) bindings.push({ id: bindingId, payload: { type: "turn.status_changed", turn_id: input.turnId as never, status: turn.status } });
     if (record.cancellation && turn.cancellation_requested_reason === null) bindings.push({ id: `${bindingId}-cancel`,
       payload: { type: "turn.cancellation_requested", turn_id: input.turnId as never, reason: record.cancellation.reason } });

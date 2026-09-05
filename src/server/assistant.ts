@@ -38,6 +38,8 @@ import { createInMemoryLivePresenceDelivery, createLivePresenceHttpHandler } fro
 import type { LivePresenceDelivery, LivePresencePubSub } from "../presence/live-delivery.js";
 import { createAssistantActivityTransport } from "../presence/assistant-activity.js";
 
+export { waitForApplicationApproval, ApplicationApprovalWaitExpiredError,
+  type ApplicationApprovalWaitOptions, type ApplicationApprovalObservation } from "./application-approval-wait.js";
 export type { HandrailAssistantToolObserver } from "./tool-observer.js";
 export { openaiResponses, type HandrailOpenAIResponsesOptions } from "./openai-responses.js";
 export { createProviderToolLoopTransport, type ProviderToolLoopTransportOptions } from "./provider-tool-loop.js";
@@ -511,7 +513,35 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
               phase: "failed", code: "recovery_scan_failed", retryable: true, cause });
           }
         }
-        return createAssistantActivityTransport({ delegate: durable, delivery: presenceDelivery,
+        const cancellationAware: ConversationTransport<StreamEvent, ChatRequest> = {
+          ...durable,
+          capabilities: { ...durable.capabilities, authoritativeCancellation: { supported: true, capability: {
+            async cancelTurn(input) {
+              const cancellation = durable.capabilities.authoritativeCancellation;
+              if (!cancellation.supported) throw new TypeError("Durable cancellation must be supported");
+              const result = await cancellation.capability.cancelTurn(input);
+              if (result.ok || result.error.code !== "not_found") return result;
+              try {
+                const replay = await replayConversation({ conversationId: input.conversationId as never,
+                  eventStore: bundleFor(context).events, checkpointPolicy: false });
+                try {
+                  if (replay.state.replay_error !== null) throw new TypeError("Canonical history is invalid");
+                  const turn = replay.state.turns.find((candidate) => candidate.turn_id === input.turnId);
+                  if (!turn) return result;
+                  if (!turn.remote_may_still_be_running) {
+                    return { ok: true as const, value: { status: "already_terminal" as const } };
+                  }
+                  if (replay.state.active_turn_id !== input.turnId) return result;
+                  return await durable.cancelTurnBeforeStart(input);
+                } finally { replay.store.destroy(); }
+              } catch {
+                return { ok: false as const, error: { code: "unavailable" as const,
+                  message: "The admitted turn could not be cancelled.", retryable: true } };
+              }
+            },
+          } } },
+        };
+        return createAssistantActivityTransport({ delegate: cancellationAware, delivery: presenceDelivery,
           participantId: assistantId, sessionId: (_conversationId, turnId) => `${assistantId}:${turnId}`,
           activityForEvent: (event) => event.type === "response.tool_call" ? "using_tool"
             : event.type === "response.text.delta" ? "responding" : null,

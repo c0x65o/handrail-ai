@@ -161,8 +161,8 @@ describe("OpenAI trusted-server transcription capability", () => {
           media_type: format.media_type,
           filename: `audio.${format.container}`,
         },
-        response_format: "verbose_json",
-        language: "en-US",
+        response_format: "json",
+        language: "en",
       });
       expect(Object.keys(projected ?? {})).toEqual([
         "model",
@@ -176,6 +176,50 @@ describe("OpenAI trusted-server transcription capability", () => {
       );
     },
   );
+
+  it.each(["gpt-4o-mini-transcribe", "gpt-4o-transcribe", "gpt-transcribe", "whisper-1"])(
+    "accepts the text-only JSON response contract for %s", async (model) => {
+      const adapter = createOpenAITranscriptionCapability({
+        model,
+        resolve_audio: async () => resolvedAudio(),
+        request: async (request) => {
+          expect(request.response_format).toBe("json");
+          return { text: "A valid transcript." };
+        },
+      });
+      const result = await adapter.transcribe(transcriptionRequest());
+      expect(result.outputs[0]).toEqual({
+        audio_id: "audio-1",
+        text: "A valid transcript.",
+        metadata: { language: null, duration_seconds: 2.5 },
+      });
+    },
+  );
+
+  it("does not substitute usage duration or requested language for media metadata", async () => {
+    const result = await capability({ request: async () => ({
+      text: "Transcript with billing metadata.",
+      usage: { type: "duration", seconds: 3 },
+    }) }).transcribe(transcriptionRequest());
+    expect(result.outputs[0]?.metadata).toEqual({ language: null, duration_seconds: 2.5 });
+    expect(JSON.stringify(result)).not.toContain("usage");
+  });
+
+  it.each([
+    [[{ code: "es" }], "es"],
+    [[{ code: "es" }, { code: "en" }], null],
+    [[], null],
+  ])("projects single detected languages without inventing a multilingual label", async (languages, language) => {
+    const result = await capability({ request: async () => ({ text: "Transcript", languages }) })
+      .transcribe(transcriptionRequest());
+    expect(result.outputs[0]?.metadata.language).toBe(language);
+  });
+
+  it("leaves language detection to the provider when the hint has no two-letter primary subtag", async () => {
+    const requestProvider = vi.fn<OpenAITranscriptionRequestFunction>(async () => ({ text: "Transcript" }));
+    await capability({ request: requestProvider }).transcribe(transcriptionRequest({ language: "fil" }));
+    expect(requestProvider.mock.calls[0]?.[0]).not.toHaveProperty("language");
+  });
 
   it("normalizes only bounded transcript text, language, and duration", async () => {
     const result = await capability({
@@ -243,6 +287,9 @@ describe("OpenAI trusted-server transcription capability", () => {
     {},
     { text: "ok", language: "not a language", duration: 2.5 },
     { text: "ok", language: "en", duration: Number.NaN },
+    { text: "ok", languages: "en" },
+    { text: "ok", languages: [{}] },
+    { text: "ok", languages: [{ code: "not a language" }] },
     { text: "x".repeat(1_000_001), language: "en", duration: 2.5 },
   ])("maps malformed provider output to a fixed internal failure", async (response) => {
     const adapter = capability({ request: async () => response });
