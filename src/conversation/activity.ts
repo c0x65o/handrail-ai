@@ -16,6 +16,10 @@ export interface ConversationActivityProgress {
 
 export interface ConversationActivityRecord {
   readonly conversationId: ConversationId | string;
+  /** Canonical conversation turn represented by this activity record. */
+  readonly turnId?: string;
+  /** Canonical revision of this turn's admission, for ordering different turns. */
+  readonly turnRevision?: number;
   readonly turnStatus: ConversationActivityTurnStatus;
   readonly unread: boolean;
   readonly updatedAt?: string;
@@ -74,6 +78,8 @@ export interface LiveConversationActivityPubSub {
 
 export interface ConversationActivityReportInput {
   readonly conversationId: ConversationId | string;
+  readonly turnId?: string;
+  readonly turnRevision?: number;
   readonly summary: string;
   readonly progress?: ConversationActivityProgress;
 }
@@ -97,6 +103,8 @@ export function createConversationActivityReporter(
     async report(input: ConversationActivityReportInput) {
       const record = parseConversationActivityRecord({
         conversationId: input.conversationId,
+        ...(input.turnId === undefined ? {} : { turnId: input.turnId }),
+        ...(input.turnRevision === undefined ? {} : { turnRevision: input.turnRevision }),
         turnStatus: "running",
         unread: false,
         updatedAt: now().toISOString(),
@@ -244,15 +252,43 @@ export function parseConversationActivityRecord(input: ConversationActivityRecor
   if (input.updatedAt !== undefined && (!Number.isFinite(Date.parse(input.updatedAt)) || input.updatedAt.length > 64)) {
     throw new TypeError("Conversation activity timestamp is invalid");
   }
+  if (input.turnId !== undefined && (typeof input.turnId !== "string" || !input.turnId.trim() || input.turnId.length > 256)) {
+    throw new TypeError("Conversation activity turn identity is invalid");
+  }
+  if (input.turnRevision !== undefined && (input.turnId === undefined ||
+      !Number.isSafeInteger(input.turnRevision) || input.turnRevision < 1)) {
+    throw new TypeError("Conversation activity turn revision is invalid");
+  }
   const summary = parseActivitySummary(input.summary);
   const progress = parseActivityProgress(input.progress);
   if (progress !== undefined && summary === undefined) {
     throw new TypeError("Conversation activity progress requires a summary");
   }
   return Object.freeze({ conversationId, turnStatus: input.turnStatus, unread: input.unread,
+    ...(input.turnId === undefined ? {} : { turnId: input.turnId }),
+    ...(input.turnRevision === undefined ? {} : { turnRevision: input.turnRevision }),
     ...(input.updatedAt === undefined ? {} : { updatedAt: new Date(input.updatedAt).toISOString() }),
     ...(summary === undefined ? {} : { summary }),
     ...(progress === undefined ? {} : { progress }) });
+}
+
+/** Prevent delayed writers from reviving finished work or replacing a newer turn. */
+export function retainConversationActivity(
+  current: ConversationActivityRecord | undefined,
+  incoming: ConversationActivityRecord,
+): ConversationActivityRecord {
+  if (!current) return incoming;
+  if (current.turnRevision !== undefined && incoming.turnRevision !== undefined &&
+      current.turnRevision > incoming.turnRevision) return current;
+  if (current.turnId !== undefined && current.turnId === incoming.turnId) {
+    // Completion is immutable for a turn, including its subsequently cleared read marker.
+    if (current.turnStatus === "completed" || current.turnStatus === "error") {
+      return incoming.turnStatus === current.turnStatus && current.unread && !incoming.unread
+        ? Object.freeze({ ...current, unread: false }) : current;
+    }
+    if (current.updatedAt && incoming.updatedAt && current.updatedAt > incoming.updatedAt) return current;
+  }
+  return incoming;
 }
 
 function activitySnapshot(records: Iterable<ConversationActivityRecord>): readonly ConversationActivityRecord[] {
@@ -276,7 +312,7 @@ export class InMemoryConversationActivityStore implements ConversationActivitySt
     for (const input of records) {
       const record = parseConversationActivityRecord(input);
       if (next.has(String(record.conversationId))) throw new TypeError("Conversation activity record is duplicated");
-      next.set(String(record.conversationId), record);
+      next.set(String(record.conversationId), retainConversationActivity(this.#records.get(String(record.conversationId)), record));
     }
     this.#records.clear();
     for (const [key, value] of next) this.#records.set(key, value);
@@ -284,7 +320,8 @@ export class InMemoryConversationActivityStore implements ConversationActivitySt
   }
   upsert(input: ConversationActivityRecord): void {
     const record = parseConversationActivityRecord(input);
-    this.#records.set(String(record.conversationId), record); this.#publish();
+    const key = String(record.conversationId);
+    this.#records.set(key, retainConversationActivity(this.#records.get(key), record)); this.#publish();
   }
   remove(conversationId: ConversationId | string): void {
     if (this.#records.delete(String(conversationId))) this.#publish();
@@ -324,6 +361,7 @@ export class PollingConversationActivity implements ConversationActivityReadable
   #timer: ReturnType<typeof setTimeout> | null = null;
   #controller: AbortController | null = null;
   #liveController: AbortController | null = null;
+  #pollLiveUpdates: Set<string> | null = null;
 
   constructor(options: PollingConversationActivityOptions) {
     const interval = options.intervalMilliseconds ?? 5_000;
@@ -347,6 +385,7 @@ export class PollingConversationActivity implements ConversationActivityReadable
         try {
           for await (const record of this.#subscribe!(controller.signal)) {
             if (controller.signal.aborted) break;
+            this.#pollLiveUpdates?.add(String(record.conversationId));
             this.#store.upsert(record);
           }
         } catch (cause) {
@@ -363,9 +402,19 @@ export class PollingConversationActivity implements ConversationActivityReadable
   }
   async refresh(): Promise<void> {
     if (this.#controller) return;
+    if (this.#timer !== null) clearTimeout(this.#timer);
+    this.#timer = null;
     const controller = new AbortController(); this.#controller = controller;
+    const liveUpdates = new Set<string>();
+    this.#pollLiveUpdates = liveUpdates;
     try {
-      this.#store.replace(await this.#load(controller.signal));
+      const records = await this.#load(controller.signal);
+      if (controller.signal.aborted) return;
+      // Events received while this request was pending are newer than its snapshot.
+      this.#store.replace([
+        ...records.filter((record) => !liveUpdates.has(String(record.conversationId))),
+        ...this.#store.getSnapshot().filter((record) => liveUpdates.has(String(record.conversationId))),
+      ]);
     } catch (cause) {
       if (!controller.signal.aborted) emitAiDiagnostic(this.#diagnostics, {
         domain: "activity", operation: "poll", phase: "failed",
@@ -374,6 +423,7 @@ export class PollingConversationActivity implements ConversationActivityReadable
     }
     finally {
       if (this.#controller === controller) this.#controller = null;
+      if (this.#pollLiveUpdates === liveUpdates) this.#pollLiveUpdates = null;
       if (!controller.signal.aborted) this.#timer = setTimeout(() => {
         this.#timer = null; void this.refresh();
       }, this.#intervalMilliseconds);

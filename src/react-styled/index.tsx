@@ -13,12 +13,13 @@ import type { MessageAttachmentRenderer, MessageContentRenderer, ToolResultRende
 import { ConversationProvider } from "../react/context.js";
 import { useConversationComposer, type ConversationComposerResult, type UseConversationComposerOptions } from "../react/use-conversation-composer.js";
 import { useSmartTranscriptFollow } from "../react/transcript-follow.js";
+import { resolveConversationActivity } from "../conversation/activity-projection.js";
 import { useResolvedState } from "../react/primitive-context.js";
 import type { ConversationRuntime } from "../runtime.js";
 import type { ConversationId } from "../conversation/events.js";
 import type { ConversationCatalog, ConversationCatalogDescriptor } from "../conversation/catalog.js";
 import type { ConversationWorkspaceOpenInput } from "../conversation/workspace.js";
-import { useConversationLauncherBinding, useConversationWorkspaceSnapshot,
+import { useConversationLauncherBinding, useConversationWorkspaceSnapshot, useConversationActivitySnapshot,
   type ConversationActivityReadable, type ConversationWorkspaceReadable } from "../react/workspace.js";
 import type { ChatLauncherConnectionStatus, ChatLauncherState } from "../react/launcher.js";
 import {
@@ -26,6 +27,8 @@ import {
   AssistantActivityIndicator, Message, Retry, Stop, StreamStatus, Submit, Textarea, Transcript, TypingIndicator,
 } from "../react/primitives.js";
 import { CopyMessageButton } from "../react/message-actions.js";
+import { ToolActivity } from "../react/tool-activity.js";
+import type { ToolActivitySnapshot } from "../conversation/tool-activity.js";
 import { CitationList } from "../react/citations.js";
 import { ChatLauncherBadge, ChatLauncherPanel, ChatLauncherPortal, ChatLauncherRoot,
   ChatLauncherStatus, ChatLauncherTitle, ChatLauncherTrigger } from "../react/launcher.js";
@@ -126,6 +129,9 @@ export interface StyledChatPresetProps {
   readonly presence?: PresenceController;
   /** Shared server activity; the status line shows only this conversation's current work. */
   readonly activity?: ConversationActivityReadable;
+  /** Default collapsed. Hiding technical activity does not disable execution or telemetry. */
+  readonly toolActivity?: "collapsed" | "expanded" | "hidden";
+  readonly renderToolActivity?: (activity: ToolActivitySnapshot) => ReactNode;
   readonly conversationPicker?: ReactNode;
   readonly approvals?: ReactNode;
   readonly citations?: ReactNode;
@@ -173,7 +179,7 @@ export const handrailChatPresetCss = `
 .hr-chat[data-theme=dark]{--hr-accent:#9f9aff;--hr-bg:#171927;--hr-panel:#242735;--hr-text:#f4f5fa;--hr-muted:#aeb5c4;--hr-border:#3b4051;--hr-danger:#ff8c8c;--hr-activity:#c7b8ff}@media(prefers-color-scheme:dark){.hr-chat[data-theme=system]{--hr-accent:#9f9aff;--hr-bg:#171927;--hr-panel:#242735;--hr-text:#f4f5fa;--hr-muted:#aeb5c4;--hr-border:#3b4051;--hr-danger:#ff8c8c;--hr-activity:#c7b8ff}}
 .hr-chat[data-layout=page]{inline-size:100%;block-size:100%;min-block-size:30rem}.hr-chat[data-layout=drawer]{border-radius:var(--hr-radius-panel) 0 0 var(--hr-radius-panel);max-inline-size:30rem}.hr-chat[data-layout=launcher]{inline-size:min(48rem,calc(100vw - 2rem));block-size:min(46rem,calc(100dvh - 6rem))}.hr-chat__sr{block-size:1px;clip:rect(0 0 0 0);clip-path:inset(50%);inline-size:1px;overflow:hidden;position:absolute;white-space:nowrap}.hr-chat__header{align-items:center;background:var(--hr-bg);border-block-end:1px solid var(--hr-border);display:flex;gap:.75rem;padding:.9rem 1rem}.hr-chat__header h2{font-size:1rem;font-weight:700;margin:0}.hr-chat__picker{margin-inline-start:auto}.hr-chat__body{background:color-mix(in srgb,var(--hr-panel),var(--hr-bg) 52%);display:grid;grid-template-columns:minmax(0,1fr);min-block-size:0}.hr-chat__transcript{overflow:auto;padding:1rem;scrollbar-gutter:stable}.hr-chat [role=listitem]{background:var(--hr-bg);border:1px solid color-mix(in srgb,var(--hr-border),transparent 25%);border-radius:var(--hr-radius-message);box-shadow:0 1px 2px #1719270d;margin:.65rem 0;max-inline-size:88%;padding:.75rem .9rem;white-space:pre-wrap}.hr-chat [aria-label='user message']{background:var(--hr-accent);border-color:var(--hr-accent);color:white;margin-inline-start:auto}.hr-chat__message-row{display:grid}.hr-chat__message-actions{display:flex;justify-content:flex-end;margin-block-start:.15rem}.hr-message-action-status:not(:empty){margin-inline-start:.4rem}.hr-chat__status{align-items:center;background:var(--hr-bg);color:var(--hr-muted);display:flex;gap:.75rem;min-block-size:2rem;padding-inline:1rem}.hr-chat__composer{background:var(--hr-bg);border-block-start:1px solid var(--hr-border);padding:.75rem}.hr-chat__attachments{display:flex;gap:.5rem;list-style:none;margin:0 0 .5rem;padding:0}.hr-chat__form{align-items:end;display:grid;gap:.5rem;grid-template-columns:auto minmax(0,1fr) auto auto}.hr-chat textarea{background:var(--bg,var(--hr-bg));border:1px solid var(--hr-border);border-radius:var(--hr-radius-control);color:inherit;font:inherit;min-block-size:2.75rem;padding:.65rem .75rem;resize:none}.hr-chat button,.hr-chat__file{align-items:center;background:var(--hr-panel);border:1px solid var(--hr-border);border-radius:var(--hr-radius-control);color:inherit;cursor:pointer;display:inline-flex;font:inherit;justify-content:center;padding:.6rem .75rem}.hr-chat button:hover:not(:disabled),.hr-chat__file:hover{border-color:color-mix(in srgb,var(--hr-accent),var(--hr-border) 45%)}.hr-chat button[type=submit]{background:var(--hr-accent);border-color:var(--hr-accent);color:#fff;font-weight:650}.hr-chat .hr-chat__copy{background:transparent;border-color:transparent;color:var(--hr-muted);font-size:.75rem;line-height:1;padding:.25rem .35rem}.hr-chat button:focus-visible,.hr-chat textarea:focus-visible,.hr-chat input:focus-visible,.hr-chat summary:focus-visible{outline:3px solid color-mix(in srgb,var(--hr-accent),transparent 55%);outline-offset:2px}.hr-chat button:disabled{cursor:not-allowed;opacity:.5}.hr-chat__errors{color:var(--hr-danger);grid-column:1/-1;margin:.25rem 0 0;padding-inline-start:1.25rem}.hr-chat__aux{background:var(--hr-bg);border-block-start:1px solid var(--hr-border);padding:.75rem 1rem}@media(max-width:520px){.hr-chat,.hr-chat[data-layout=launcher]{block-size:100dvh;border:0;border-radius:0;inline-size:100vw}.hr-chat__form{grid-template-columns:auto minmax(0,1fr) auto}.hr-chat__header{padding-inline:.75rem}.hr-chat__transcript{padding:.75rem}}@media(prefers-reduced-motion:reduce){.hr-chat *{scroll-behavior:auto!important;transition:none!important}}
 .hr-chat__markdown{overflow-wrap:anywhere;white-space:normal}.hr-chat__markdown>:first-child{margin-block-start:0}.hr-chat__markdown>:last-child{margin-block-end:0}.hr-chat__markdown pre{max-inline-size:100%;overflow:auto;white-space:pre}.hr-chat__markdown code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.hr-chat__markdown a{color:inherit;text-decoration:underline}.hr-chat__message-citations{font-size:.78rem;margin:.5rem 0 0;padding-inline-start:1.25rem}.hr-chat__message-citations li{background:transparent;margin:.15rem 0;max-inline-size:none;padding:0}.hr-chat__message-citations li>span:last-child{color:var(--hr-muted);margin-inline-start:.35rem}.hr-chat__attachment-card{align-items:center;border:1px solid var(--hr-border);border-radius:10px;color:inherit;display:flex;gap:.65rem;min-inline-size:11rem;overflow:hidden;padding:.5rem;text-decoration:none}.hr-chat__attachment-card img{block-size:5rem;inline-size:7rem;object-fit:cover}.hr-chat__attachment-copy{display:flex;min-inline-size:0;flex-direction:column}.hr-chat__attachment-copy strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.hr-chat__attachment-copy small{color:var(--hr-muted)}.hr-chat__voice{align-items:center;display:flex}
-.hr-chat__transcript-wrap{display:grid;min-block-size:0;position:relative}.hr-chat__transcript-wrap>.hr-chat__transcript{min-block-size:0}.hr-chat__jump{inset-block-end:.75rem;inset-inline-end:.75rem;position:absolute;z-index:1}.hr-chat__assistant-activity:not(:empty){font-weight:600}
+.hr-chat__transcript-wrap{display:grid;min-block-size:0;position:relative}.hr-chat__transcript-wrap>.hr-chat__transcript{min-block-size:0}.hr-chat__jump{inset-block-end:.75rem;inset-inline-end:.75rem;position:absolute;z-index:1}.hr-chat__assistant-activity:not(:empty){font-weight:600}.hr-chat__body{grid-template-rows:minmax(0,1fr) auto auto}.hr-chat__tool-activity{background:var(--hr-bg);border-block-start:1px solid var(--hr-border);max-block-size:12rem;overflow:auto;padding:.5rem 1rem}.hr-chat__tool-activity summary{cursor:pointer;color:var(--hr-muted)}.hr-chat__tool-activity ol{margin:.5rem 0;padding-inline-start:1.5rem}.hr-chat__tool-activity li{padding:.2rem 0}
 .hr-chat__launcher-trigger{align-items:center;display:inline-flex;gap:.45rem}.hr-chat__launcher-status{font-size:.75rem;font-weight:600}.hr-chat__launcher-trigger[data-busy=true] .hr-chat__launcher-status{color:var(--hr-activity)}.hr-chat__launcher-trigger[data-error=true] .hr-chat__launcher-status{color:var(--hr-danger)}.hr-chat__launcher-badge:empty{display:none}.hr-chat__launcher-badge{align-items:center;background:var(--hr-danger);border-radius:999px;color:#fff;display:inline-flex;font-size:.7rem;justify-content:center;min-block-size:1.2rem;min-inline-size:1.2rem;padding-inline:.25rem}
 .hr-chat__workspace-picker{align-items:flex-start;display:flex;gap:.4rem;position:relative}.hr-chat__workspace-picker summary{background:var(--hr-panel,#f6f7fb);border:1px solid var(--hr-border,#dfe3eb);border-radius:9px;cursor:pointer;list-style:none;padding:.55rem .7rem}.hr-chat__workspace-picker summary::-webkit-details-marker{display:none}.hr-chat__workspace-picker ul{background:var(--hr-bg,#fff);border:1px solid var(--hr-border,#dfe3eb);border-radius:10px;box-shadow:0 12px 35px #17192724;display:grid;gap:.2rem;inset-block-start:calc(100% + .35rem);inset-inline-end:0;list-style:none;margin:0;max-block-size:20rem;min-inline-size:18rem;overflow:auto;padding:.4rem;position:absolute;z-index:10}.hr-chat__workspace-picker li{align-items:center;display:flex;margin:0;padding:0}.hr-chat__workspace-picker li button:first-child{align-items:center;display:flex;flex:1;inline-size:100%;justify-content:space-between;max-inline-size:none;text-align:start}.hr-chat__workspace-picker small{color:var(--hr-muted,#687083);margin-inline-start:.5rem}.hr-chat__workspace-picker [data-turn-status=running] small{color:var(--hr-activity)}.hr-chat__empty{display:grid;min-block-size:12rem;place-items:center;padding:1rem}
 .hr-chat__approvals{display:grid;gap:.5rem}.hr-chat__approval{background:var(--hr-panel);border:1px solid var(--hr-border);border-radius:var(--hr-radius-control);display:grid;gap:.4rem;padding:.65rem}.hr-chat__approval-actions{display:flex;gap:.5rem}.hr-chat__approval-error{color:var(--hr-danger)}
@@ -212,9 +218,16 @@ export function StyledChatPreset(props: StyledChatPresetProps): ReactNode {
   const subscribeActivity = useCallback((notify: () => void) =>
     activity?.subscribe(notify) ?? (() => undefined), [activity]);
   const getActivity = useCallback(() => activity?.getSnapshot().find((record) =>
-    record.conversationId === resolvedState?.conversation_id && record.turnStatus === "running"),
+    record.conversationId === resolvedState?.conversation_id),
   [activity, resolvedState?.conversation_id]);
-  const currentActivity = useSyncExternalStore(subscribeActivity, getActivity, getActivity);
+  const remoteActivity = useSyncExternalStore(subscribeActivity, getActivity, getActivity);
+  const latestTurn = resolvedState?.turns.at(-1);
+  const currentActivity = resolvedState?.conversation_id ? resolveConversationActivity(resolvedState, {
+    conversationId: resolvedState.conversation_id,
+    turnStatus: resolvedState.active_turn_id ? "running" : latestTurn?.status === "failed" ? "error"
+      : latestTurn?.status === "completed" || latestTurn?.status === "cancelled" ? "completed"
+        : latestTurn ? "running" : "idle", unread: false,
+  }, remoteActivity) : remoteActivity;
   const activityProgress = currentActivity?.progress;
   const retryableTurn = [...(resolvedState?.turns ?? [])].reverse().find((turn) =>
     (turn.status === "failed" && turn.error?.retryable === true) || turn.status === "cancelled");
@@ -241,10 +254,12 @@ export function StyledChatPreset(props: StyledChatPresetProps): ReactNode {
   >
     <header className="hr-chat__header"><h2>{props.title ?? "Assistant"}</h2>{props.conversationPicker && <div className="hr-chat__picker">{props.conversationPicker}</div>}</header>
     <main className="hr-chat__body">
-      <FollowedTranscript className="hr-chat__transcript" {...(renderToolResult ? { renderToolResult } : {})}
+      <FollowedTranscript className="hr-chat__transcript" {...(renderToolResult ? { renderToolResult } : { toolCalls: [] })}
+        renderToolCall={(call, message, renderResult) => call.result && renderResult ? renderResult(call.result, call, message) : null}
         {...(renderAttachment ? { renderAttachment } : {})}
         {...(props.messageActions === false ? {} : { renderMessage: (message, _index, context) => <div className="hr-chat__message-row">
-          <Message message={message} error={context.error} toolCalls={context.toolCalls}
+          <Message message={message} error={context.error} toolCalls={renderToolResult ? context.toolCalls : []}
+            renderToolCall={(call, message, renderResult) => call.result && renderResult ? renderResult(call.result, call, message) : null}
             {...(renderContent ? { renderContent } : {})}
             {...(renderAttachment ? { renderAttachment } : {})}
             {...(renderToolResult ? { renderToolResult } : {})}/>
@@ -252,11 +267,15 @@ export function StyledChatPreset(props: StyledChatPresetProps): ReactNode {
             className="hr-chat__message-citations" messageId={message.message_id}/>}
           <div className="hr-chat__message-actions"><CopyMessageButton className="hr-chat__copy" message={message}/></div>
         </div> })}>{props.emptyState}</FollowedTranscript>
-      <div className="hr-chat__status">{currentActivity?.summary
+      <div className="hr-chat__status">{currentActivity?.turnStatus === "running" && currentActivity.summary
         ? <span role="status" className="hr-chat__assistant-activity">{currentActivity.summary}{activityProgress
           ? ` (${activityProgress.completed}/${activityProgress.total}${activityProgress.unit ? ` ${activityProgress.unit}` : ""})`
           : ""}</span>
-        : <><StreamStatus/><AssistantActivityIndicator className="hr-chat__assistant-activity"/></>}<TypingIndicator/></div>
+        : currentActivity?.turnStatus === "completed" || currentActivity?.turnStatus === "error"
+          ? <span role="status">{currentActivity.turnStatus === "completed" ? "Done" : "Failed"}</span>
+          : <><StreamStatus/><AssistantActivityIndicator className="hr-chat__assistant-activity"/></>}<TypingIndicator/></div>
+      <ToolActivity className="hr-chat__tool-activity" {...(props.toolActivity ? { display: props.toolActivity } : {})}
+        {...(props.renderToolActivity ? { children: props.renderToolActivity } : {})}/>
       <LiveRegion/>
     </main>
     {(props.approvals || props.citations) && <aside className="hr-chat__aux">{props.approvals}{props.citations}</aside>}
@@ -490,6 +509,7 @@ export interface ConversationCatalogWorkspaceOptions<TAuthorizationContext> {
 }
 
 export interface WorkspaceThreadPickerProps<TRequest, TAuthorizationContext> {
+  readonly activity?: ConversationActivityReadable;
   readonly workspace: ConversationWorkspaceController<TRequest, TAuthorizationContext>;
   readonly createConversation?: () => Promise<ConversationWorkspaceOpenInput<TAuthorizationContext>>;
   readonly getThreadLabel?: (conversationId: ConversationId) => ReactNode;
@@ -501,6 +521,8 @@ export function WorkspaceThreadPicker<TRequest, TAuthorizationContext>(
   props: WorkspaceThreadPickerProps<TRequest, TAuthorizationContext>,
 ): ReactNode {
   const snapshot = useConversationWorkspaceSnapshot(props.workspace);
+  const activity = useConversationActivitySnapshot(props.workspace, props.activity);
+  const runningCount = activity.filter((record) => record.turnStatus === "running").length;
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
   const create = async () => {
@@ -513,16 +535,18 @@ export function WorkspaceThreadPicker<TRequest, TAuthorizationContext>(
   return <div className="hr-chat__workspace-picker">
     {props.createConversation && <button type="button" disabled={creating} aria-busy={creating}
       onClick={() => void create()}>{creating ? "Creating…" : "New"}</button>}
-    <details><summary>Threads{snapshot.runningCount > 0 ? ` (${snapshot.runningCount} running)` : ""}</summary>
-    <ul aria-label="Open conversations">{snapshot.threads.map((thread) =>
-      <li key={thread.conversationId}><button type="button"
+    <details><summary>Threads{runningCount > 0 ? ` (${runningCount} running)` : ""}</summary>
+    <ul aria-label="Open conversations">{snapshot.threads.map((localThread) => {
+      const thread = { ...localThread, ...activity.find((record) => record.conversationId === localThread.conversationId),
+        conversationId: localThread.conversationId };
+      return <li key={thread.conversationId}><button type="button"
         aria-current={snapshot.selectedConversationId === thread.conversationId ? "true" : undefined}
         data-turn-status={thread.turnStatus}
         onClick={() => { props.workspace.select(thread.conversationId); props.workspace.markRead?.(thread.conversationId);
           void props.onConversationRead?.(thread.conversationId); }}>
         <span>{props.getThreadLabel?.(thread.conversationId) ?? thread.conversationId}</span>
         <small>{thread.turnStatus === "running" ? "Running" : thread.unread ? "Done" : thread.turnStatus}</small>
-      </button></li>)}</ul></details>
+      </button></li>; })}</ul></details>
     {error && <span role="alert">{error}</span>}
   </div>;
 }
@@ -537,6 +561,8 @@ export function CatalogWorkspaceThreadPicker<TRequest, TAuthorizationContext>(
   props: CatalogWorkspaceThreadPickerProps<TRequest, TAuthorizationContext>,
 ): ReactNode {
   const snapshot = useConversationWorkspaceSnapshot(props.workspace);
+  const activity = useConversationActivitySnapshot(props.workspace, props.activity);
+  const runningCount = activity.filter((record) => record.turnStatus === "running").length;
   const [descriptors, setDescriptors] = useState<readonly ConversationCatalogDescriptor[]>([]);
   const [refreshRevision, setRefreshRevision] = useState(0);
   const [busyId, setBusyId] = useState<ConversationId | "create" | null>(null);
@@ -598,13 +624,14 @@ export function CatalogWorkspaceThreadPicker<TRequest, TAuthorizationContext>(
   return <div className="hr-chat__workspace-picker">
     {props.createConversation && <button type="button" disabled={busyId !== null} aria-busy={busyId === "create"}
       onClick={() => void create()}>{busyId === "create" ? "Creating…" : "New"}</button>}
-    <details><summary>Threads{snapshot.runningCount > 0 ? ` (${snapshot.runningCount} running)` : ""}</summary>
+    <details><summary>Threads{runningCount > 0 ? ` (${runningCount} running)` : ""}</summary>
       <ul aria-label="Conversations">{active.map((descriptor) => {
-        const thread = snapshot.threads.find((item) => item.conversationId === descriptor.conversationId);
+        const thread = activity.find((item) => item.conversationId === descriptor.conversationId);
+        const opened = snapshot.threads.some((item) => item.conversationId === descriptor.conversationId);
         return <li key={descriptor.conversationId} data-turn-status={thread?.turnStatus ?? "idle"}>
           <button type="button" aria-current={snapshot.selectedConversationId === descriptor.conversationId ? "true" : undefined}
             onClick={() => void (async () => {
-              if (thread) props.workspace.select(descriptor.conversationId);
+              if (opened) props.workspace.select(descriptor.conversationId);
               else await props.workspace.open({ authorizationContext, conversationId: descriptor.conversationId });
               props.workspace.markRead?.(descriptor.conversationId);
               await props.onConversationRead?.(descriptor.conversationId);
@@ -655,10 +682,12 @@ export function HandrailChatWorkspace<TRequest, TAuthorizationContext>(
     thread.conversationId === snapshot.selectedConversationId);
   const picker = props.conversationPicker ?? (props.catalogOptions
     ? <CatalogWorkspaceThreadPicker workspace={props.workspace} catalogOptions={props.catalogOptions}
+      {...(props.activity ? { activity: props.activity } : {})}
       {...(props.createConversation ? { createConversation: props.createConversation } : {})}
       {...(props.getThreadLabel ? { getThreadLabel: props.getThreadLabel } : {})}
       {...(props.onConversationRead ? { onConversationRead: props.onConversationRead } : {})}/>
     : <WorkspaceThreadPicker workspace={props.workspace}
+    {...(props.activity ? { activity: props.activity } : {})}
     {...(props.createConversation ? { createConversation: props.createConversation } : {})}
     {...(props.getThreadLabel ? { getThreadLabel: props.getThreadLabel } : {})}
     {...(props.onConversationRead ? { onConversationRead: props.onConversationRead } : {})}/>);

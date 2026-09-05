@@ -74,7 +74,7 @@ describe("createHandrailAssistant", () => {
     expect(scopes).toEqual(["tenant-a/alice", "tenant-a/bob"]);
   });
 
-  it("owns approval creation and audit, trusts authenticated decisions, and executes exactly once", async () => {
+  it.each(["confirmed", "rejected"] as const)("owns approval creation and audit for %s decisions", async (status) => {
     type Context = HandrailAssistantAuthorizationContext;
     const context = (request: Request): Context => ({ principalId: request.headers.get("x-user") ?? "alice",
       tenantId: "tenant", scopeId: "alice", attribution: {
@@ -161,18 +161,30 @@ describe("createHandrailAssistant", () => {
     expect(executions).toBe(0);
     const decision = await assistant.handle(new Request("https://example.test/approvals/transition", {
       method: "POST", headers: { "x-user": "alice", "content-type": "application/json" }, body: JSON.stringify({
-        conversationId: "conversation-approved", proposalId, expectedVersion: 1, status: "confirmed",
+        conversationId: "conversation-approved", proposalId, expectedVersion: 1, status,
         idempotencyKey: "confirm-approved", idempotencyFingerprint: "confirm-approved",
         attribution: { actor: { type: "system" }, source: { type: "import" } },
       }),
     }));
     expect(decision.status).toBe(200);
+    if (status === "rejected") {
+      expect(await pending).toMatchObject({ status: "completed", result: { is_error: true } });
+      expect(executions).toBe(0);
+      const audit = await events.read({ conversationId: "conversation-approved" as never });
+      expect(audit.entries.some(({ event }) => event.payload.type === "tool_call.started")).toBe(false);
+      expect(audit.entries.filter(({ event }) => event.payload.type === "tool_call.result_recorded")
+        .map(({ event }) => event.payload)).toMatchObject([{ is_error: true }]);
+      return;
+    }
     expect(await pending).toMatchObject({ status: "completed", result: { is_error: false } });
     expect(executions).toBe(1);
     expect(activityRecords.some((record) => record.summary === "Running approved work")).toBe(true);
     expect(activityRecords.at(-1)).toMatchObject({ summary: "Applying reviewed updates",
       progress: { completed: 43, total: 43, unit: "products" } });
     const audit = await events.read({ conversationId: "conversation-approved" as never });
+    expect(audit.entries.filter(({ event }) => event.payload.type === "tool_call.started")).toHaveLength(1);
+    expect(audit.entries.filter(({ event }) => event.payload.type === "tool_call.result_recorded")
+      .map(({ event }) => event.payload)).toMatchObject([{ is_error: false }]);
     expect(audit.entries.some(({ event }) => event.payload.type === "approval.proposal_status_changed" &&
       event.payload.status === "confirmed" && event.actor.type === "user" && event.actor.id === "alice" &&
       event.source.type === "runtime")).toBe(true);

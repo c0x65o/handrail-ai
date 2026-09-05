@@ -83,13 +83,6 @@ export class ConversationWorkspace<TRequest, TAuthorizationContext = unknown> {
     let entry = this.#entries.get(input.conversationId);
     if (entry === undefined) {
       const runtime = await this.#registry.open(input);
-      if (this.#options.restoreActiveTurns === true) {
-        try {
-          await runtime.restoreActiveTurn();
-        } catch (error) {
-          this.#options.onRecoveryError?.(input.conversationId, error);
-        }
-      }
       entry = {
         runtime, unsubscribe: () => undefined, turnStatus: statusOf(runtime), unread: false,
         revision: runtime.store.getSnapshot().revision,
@@ -97,6 +90,12 @@ export class ConversationWorkspace<TRequest, TAuthorizationContext = unknown> {
       const captured = entry;
       captured.unsubscribe = runtime.store.subscribe(() => this.#update(input.conversationId, captured));
       this.#entries.set(input.conversationId, captured);
+      if (this.#options.restoreActiveTurns === true) {
+        // Recovery observes the whole run; never hold opening the UI until it finishes.
+        void Promise.resolve().then(() => runtime.restoreActiveTurn()).catch((error: unknown) => {
+          try { this.#options.onRecoveryError?.(input.conversationId, error); } catch { /* Diagnostics must not reject recovery. */ }
+        });
+      }
     }
     if (input.select !== false) this.select(input.conversationId);
     else this.#publish();

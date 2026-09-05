@@ -562,6 +562,64 @@ describe("BoundedToolExecutor", () => {
     assertProtocolResult(firstOutput, tool);
   });
 
+  it("rejects changed arguments during execution and after result reuse across executor instances", async () => {
+    const completion = deferred<string>();
+    const applicationExecutor = vi.fn<ApplicationToolExecutor<TestContext>>(async () => completion.promise);
+    const ledger = new InMemoryToolExecutionLedger();
+    const first = setup(applicationExecutor, { ledger });
+    const pending = first.execute("bound", { query: "original" });
+    await vi.waitFor(() => expect(applicationExecutor).toHaveBeenCalledOnce());
+    expect((await first.execute("bound", { query: "changed" })).is_error).toBe(true);
+    completion.resolve("original result");
+    const result = await pending;
+    const second = setup(applicationExecutor, { ledger });
+    expect(await second.execute("bound", { query: "original" })).toBe(result);
+    expect((await second.execute("bound", { query: "changed" })).is_error).toBe(true);
+    const renamed = setup(applicationExecutor, { ledger, name: "different_tool" });
+    expect((await renamed.execute("bound", { query: "original" })).is_error).toBe(true);
+    expect(applicationExecutor).toHaveBeenCalledOnce();
+  });
+
+  it("does not alias an oversized call ID to a previously completed prefix", async () => {
+    const applicationExecutor = vi.fn<ApplicationToolExecutor<TestContext>>(async () => "result");
+    const { execute } = setup(applicationExecutor);
+    const prefix = "c".repeat(256);
+    expect((await execute(prefix)).is_error).toBe(false);
+    expect((await execute(`${prefix}different`)).is_error).toBe(true);
+    expect(applicationExecutor).toHaveBeenCalledOnce();
+  });
+
+  it("snapshots the request before asynchronous authorization", async () => {
+    const allow = deferred<void>();
+    const applicationExecutor = vi.fn<ApplicationToolExecutor<TestContext>>(async (arguments_) => arguments_.query as string);
+    const { execute } = setup(applicationExecutor, { policy: async () => { await allow.promise; return { outcome: "allow" }; } });
+    const arguments_ = { query: "original" };
+    const pending = execute("snapshot", arguments_);
+    arguments_.query = "changed while authorizing";
+    allow.resolve();
+    const result = await pending;
+    expect(result.is_error).toBe(false);
+    expect(applicationExecutor.mock.calls[0]?.[0]).toEqual({ query: "original" });
+    expect((await execute("snapshot", arguments_)).is_error).toBe(true);
+  });
+
+  it("treats JSON property ordering as the same request but preserves array ordering", async () => {
+    const registry = new ToolRegistry<ApplicationToolExecutor<TestContext>, undefined>();
+    const execute = vi.fn<ApplicationToolExecutor<TestContext>>(async () => "result");
+    const tool: ToolDefinition = { name: "structured", description: "structured input",
+      input_schema: { type: "object", additionalProperties: true } };
+    registry.register({ definition: tool, executor: execute });
+    const bounded = new BoundedToolExecutor({ registry, policy: () => ({ outcome: "allow" }) });
+    const call = (arguments_: unknown) => bounded.execute({
+      call: { tool_call_id: "structured", name: tool.name, arguments: arguments_ },
+      discoveredTools: registry.discover({ context: undefined }), applicationContext: context,
+    });
+    const result = await call({ rows: [1, 2], nested: { a: 1, b: 2 } });
+    expect(await call({ nested: { b: 2, a: 1 }, rows: [1, 2] })).toBe(result);
+    expect((await call({ rows: [2, 1], nested: { a: 1, b: 2 } })).is_error).toBe(true);
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
   it("exports the public executor, policy, ledger, call, and limit contracts", () => {
     expectTypeOf<BoundedToolExecutor<TestContext>>().toBeObject();
     expectTypeOf<InMemoryToolExecutionLedger>().toMatchTypeOf<{

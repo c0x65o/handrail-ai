@@ -547,6 +547,62 @@ function externalEvent(
 }
 
 describe("createConversationRuntime", () => {
+  it("polls external tool activity without provider frames, retries failures, and stops on destroy", async () => {
+    vi.useFakeTimers();
+    const eventStore = new InMemoryConversationEventStore();
+    const read = vi.spyOn(eventStore, "read");
+    const onSynchronizationError = vi.fn();
+    const transport = new FakeTransport();
+    const runtime = await createConversationRuntime({ conversationId, clientId, transport, eventStore,
+      synchronizationIntervalMilliseconds: 100, onSynchronizationError });
+    try {
+      await eventStore.append({ conversationId, expectedRevision: null, events: [
+        externalEvent(1, { type: "turn.started", turn_id: "remote", input_message_ids: ["input"] }),
+        externalEvent(2, { type: "tool_call.requested", turn_id: "remote", tool_call_id: "bulk", name: "update_products", arguments: {} }),
+        externalEvent(3, { type: "tool_call.started", turn_id: "remote", tool_call_id: "bulk" }),
+      ] });
+      read.mockRejectedValueOnce(new Error("temporarily offline"));
+      await vi.advanceTimersByTimeAsync(100);
+      expect(onSynchronizationError).toHaveBeenCalledOnce();
+      expect(runtime.getSnapshot().revision).toBeNull();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(runtime.getSnapshot().revision).toBe(3);
+      expect(runtime.getSnapshot().tool_calls[0]).toMatchObject({ tool_call_id: "bulk", started_at: "2026-08-27T13:00:03.000Z" });
+      expect(transport.starts).toHaveLength(0);
+      expect(transport.resumes).toHaveLength(0);
+      await runtime.synchronize!();
+      expect(runtime.getSnapshot().tool_calls).toHaveLength(1);
+      runtime.destroy();
+      const readsAtDestroy = read.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(read).toHaveBeenCalledTimes(readsAtDestroy);
+    } finally { runtime.destroy(); vi.useRealTimers(); }
+  });
+
+  it.each(["completed", "cancelled", "failed"] as const)(
+    "settles a hanging local send when synchronization receives canonical %s", async (status) => {
+      const eventStore = new InMemoryConversationEventStore();
+      const transport = new FakeTransport();
+      const disconnected = vi.fn();
+      transport.startObservations.push(pendingObservation(disconnected));
+      const runtime = await createConversationRuntime({ conversationId, clientId, transport, eventStore });
+      const sending = runtime.sendMessage({ content: "Work", request: { prompt: "Work" } });
+      try {
+        await vi.waitFor(() => expect(runtime.getSnapshot().turns.at(-1)?.status).toBe("running"));
+        const turnId = runtime.getSnapshot().active_turn_id!;
+        const revision = (await eventStore.getLatestRevision(conversationId))!;
+        const payload = status === "completed" ? { type: "turn.completed", turn_id: turnId, outcome: "stop", output_message_ids: [] }
+          : status === "cancelled" ? { type: "turn.cancelled", turn_id: turnId, reason: "user" }
+            : { type: "turn.failed", turn_id: turnId, error: { code: "worker_failed", message: "Worker failed", retryable: false } };
+        await eventStore.append({ conversationId, expectedRevision: revision, events: [externalEvent(revision + 1, payload)] });
+        await runtime.synchronize!();
+        await expect(sending).resolves.toMatchObject({ status });
+        expect(disconnected).toHaveBeenCalled();
+        expect(runtime.getSnapshot().active_turn_id).toBeNull();
+        expect(transport.starts).toHaveLength(1);
+      } finally { runtime.destroy(); await sending.catch(() => undefined); }
+    });
+
   it("catches up externally appended canonical events before the next send batch", async () => {
     const eventStore = new InMemoryConversationEventStore();
     const transport = new FakeTransport();
@@ -700,7 +756,7 @@ describe("createConversationRuntime", () => {
     });
 
     const history = await eventStore.read({ conversationId, limit: 100 });
-    expect(outcome.status).toBe("interrupted");
+    expect(outcome.status).toBe("cancelled");
     expect(eventStore.targetedAppendAttempts).toBe(1);
     expect(history.entries.filter(
       ({ event }) => event.payload.type === "message.text_appended",

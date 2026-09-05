@@ -39,6 +39,50 @@ const input = { conversationId: "conversation-1", conversationTurnId: "turn-1" a
 async function collect(events: AsyncIterable<Event>) { const output: Event[] = []; for await (const event of events) output.push(event); return output; }
 
 describe("createDurableApplicationTransport", () => {
+  it.each(["completed", "failed", "cancelled"] as const)("publishes %s without observers and does not republish on replay", async (status) => {
+    const store = new InMemoryDurableApplicationTurnStore<Request, Event>();
+    const terminal: TurnObservationResult = status === "failed"
+      ? { status, checkpoint: checkpoint("2"), error: { code: "unavailable", message: "Failed", retryable: true } }
+      : { status, checkpoint: checkpoint("2") };
+    const inner = delegate([{ id: "2", text: "result" }], terminal);
+    const onTurnStatusChanged = vi.fn();
+    const transport = createDurableApplicationTransport({ delegate: inner.transport, store, workerId: "writer",
+      pollMilliseconds: 25, onTurnStatusChanged,
+      requestCodec: { encode: (request: Request) => request, decode: (request) => request, fingerprint: (request) => request.ref },
+      checkpointForEvent: (event) => checkpoint(event.id) });
+    const started = await transport.startTurn(input);
+    if (!started.ok) throw new Error(started.error.message);
+    started.value.observation.disconnect();
+    // Never consume the original stream: completion must belong to the worker.
+    await vi.waitFor(() => expect(onTurnStatusChanged.mock.calls.map(([update]) => update.status))
+      .toEqual(["pending", "running", status]));
+    expect((await store.load(input.conversationId, input.conversationTurnId))?.record.status).toBe(status);
+    const replay = await transport.startTurn(input);
+    if (!replay.ok) throw new Error(replay.error.message);
+    await collect(replay.value.observation.events);
+    expect((await replay.value.observation.result).status).toBe(status);
+    const resumed = await transport.resumeTurn({ conversationId: input.conversationId,
+      turnId: input.conversationTurnId, resumeFrom: checkpoint(null) });
+    if (!resumed.ok) throw new Error(resumed.error.message);
+    await collect(resumed.value.events);
+    expect((await resumed.value.result).status).toBe(status);
+    expect(onTurnStatusChanged).toHaveBeenCalledTimes(3);
+    expect(inner.startTurn).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a durable success when status delivery fails", async () => {
+    const store = new InMemoryDurableApplicationTurnStore<Request, Event>();
+    const diagnostics = vi.fn();
+    const transport = createDurableApplicationTransport({ delegate: delegate([]).transport, store, workerId: "writer",
+      pollMilliseconds: 25, diagnostics, onTurnStatusChanged: () => { throw new Error("delivery unavailable"); },
+      requestCodec: { encode: (request: Request) => request, decode: (request) => request, fingerprint: (request) => request.ref },
+      checkpointForEvent: (event) => checkpoint(event.id) });
+    await transport.startTurn(input);
+    await vi.waitFor(async () => expect((await store.load(input.conversationId, input.conversationTurnId))?.record.status)
+      .toBe("completed"));
+    expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({
+      domain: "activity", operation: "durable_turn_status", code: "activity_update_failed" }));
+  });
   it("matches idempotent JSON identity after Postgres jsonb reorders keys", () => {
     const base = { schemaVersion: 1 as const, conversationId: "conversation-1", turnId: "turn-1",
       mutationId: "mutation-1", idempotencyKey: "start-1", requestFingerprint: "request-1",

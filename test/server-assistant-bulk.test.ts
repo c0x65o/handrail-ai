@@ -12,6 +12,7 @@ import type { PostgresAssistantPersistence, PostgresAssistantPersistenceBundle }
 import { AI_RUNTIME_PROTOCOL_VERSION, type ChatRequest, type StreamEvent } from "../src/protocol.js";
 import type { ProviderAdapter } from "../src/providers/index.js";
 import type { ConversationTransport } from "../src/transports/types.js";
+import { replayConversation } from "../src/conversation/replay.js";
 
 type Context = HandrailAssistantAuthorizationContext;
 const usage = { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, reasoning_tokens: 0,
@@ -112,6 +113,10 @@ describe("assistant bulk work", () => {
           new AbortController().signal, { conversationId: "bulk", turnId: "turn" }))
           .toMatchObject({ status: "external_approval_required" });
         expect(executed).toEqual([]);
+        const replay = await replayConversation({ conversationId: "bulk" as never, eventStore: events, checkpointPolicy: false });
+        expect(replay.state.tool_calls).toHaveLength(1);
+        expect(replay.state.tool_calls[0]).toMatchObject({ name: "step_0", started_at: null, result: null });
+        expect(replay.state.tool_calls[0]?.approval_required_at).not.toBeNull();
         return;
       }
       const request: ChatRequest = { protocol_version: AI_RUNTIME_PROTOCOL_VERSION, continuation_of: null,
@@ -128,6 +133,22 @@ describe("assistant bulk work", () => {
       expect(executed).toEqual(summaries);
       expect(reported).toEqual(summaries);
       expect(records.size).toBe(1);
+      const replay = await replayConversation({ conversationId: "bulk" as never, eventStore: events, checkpointPolicy: false });
+      expect(replay.state.tool_calls).toHaveLength(4);
+      expect(replay.state.tool_calls.every((call) => call.started_at !== null && call.result?.is_error === false)).toBe(true);
+      expect(replay.state.tool_calls.map((call) => call.name)).toEqual(["step_0", "step_1", "step_2", "step_3"]);
+      await tools.execute({ tool_call_id: "call-0", name: "step_0", arguments: {} }, new AbortController().signal,
+        { conversationId: "bulk", turnId: "turn" });
+      expect(executed).toEqual(summaries);
+      // Another conversation may receive the same provider-local call ID. It
+      // gets a separate execution, while retrying the original still reuses it.
+      const independent = tools.execute({ tool_call_id: "call-0", name: "step_0", arguments: {} }, new AbortController().signal,
+        { conversationId: "independent", turnId: "independent-turn" });
+      await vi.advanceTimersByTimeAsync(32_000);
+      expect(await independent).toMatchObject({ status: "completed", result: { tool_call_id: "call-0", is_error: false } });
+      expect(executed).toEqual([...summaries, summaries[0]]);
+      expect((await events.read({ conversationId: "bulk" as never })).entries
+        .filter(({ event }) => event.payload.type === "tool_call.result_recorded")).toHaveLength(4);
       expect(frames.filter((frame) => frame.type === "response.started")).toHaveLength(1);
       expect(frames.at(-1)).toMatchObject({ type: "response.completed", outcome: "stop" });
       expect((await events.read({ conversationId: "bulk" as never })).entries

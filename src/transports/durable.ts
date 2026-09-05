@@ -79,6 +79,15 @@ export interface DurableApplicationTransportOptions<TEvent, TRequest, TStoredReq
   readonly maximumCasAttempts?: number;
   readonly now?: () => number;
   readonly diagnostics?: AiDiagnosticSink;
+  /** Published by the durable writer, even when no browser is observing the turn. */
+  readonly onTurnStatusChanged?: (status: DurableApplicationTurnStatusUpdate) => void | Promise<void>;
+}
+export interface DurableApplicationTurnStatusUpdate {
+  readonly conversationId: string;
+  readonly turnId: string;
+  readonly status: DurableApplicationTurnStatus;
+  readonly updatedAt: string;
+  readonly version: number;
 }
 export interface DurableApplicationTransport<TEvent, TRequest> extends ConversationTransport<TEvent, TRequest> {
   recoverTurn(conversationId: string, turnId: string): Promise<TransportResult<{ readonly status: "started" | "already_running" | "terminal" }>>;
@@ -113,9 +122,14 @@ function normalizeCheckpoint(value: TurnResumePoint): TurnResumePoint {
 function observationStart<TStoredRequest, TEvent>(record: DurableApplicationTurnRecord<TStoredRequest, TEvent>,
   checkpoint: TurnResumePoint): number {
   if (checkpoint.lastAppliedEventId === null && checkpoint.lastAppliedCursor === null && checkpoint.lastAppliedRevision === null) return 0;
+  // The runtime stores the canonical conversation revision after applying each
+  // frame. That revision includes user/tool events and differs from the worker's
+  // frame sequence. Resolve a retained frame by its opaque identity/cursor; only
+  // revision-only transports use the revision to locate it.
+  const hasIdentity = checkpoint.lastAppliedEventId !== null || checkpoint.lastAppliedCursor !== null;
   const index = record.events.findIndex((entry) => entry.checkpoint.lastAppliedEventId === checkpoint.lastAppliedEventId &&
     entry.checkpoint.lastAppliedCursor === checkpoint.lastAppliedCursor &&
-    entry.checkpoint.lastAppliedRevision === checkpoint.lastAppliedRevision);
+    (hasIdentity || entry.checkpoint.lastAppliedRevision === checkpoint.lastAppliedRevision));
   if (index < 0) throw new TypeError("Turn resume checkpoint was not found");
   return index + 1;
 }
@@ -168,6 +182,16 @@ export function createDurableApplicationTransport<TEvent, TRequest, TStoredReque
     throw new TypeError("Durable application transport limits are invalid");
   }
   const running = new Map<string, Promise<void>>();
+  const publishStatus = async (document: DurableApplicationTurnDocument<TStoredRequest, TEvent>) => {
+    if (!options.onTurnStatusChanged) return;
+    const { conversationId, turnId, status, updatedAt } = document.record;
+    try {
+      await options.onTurnStatusChanged({ conversationId, turnId, status, updatedAt, version: document.version });
+    } catch (cause) {
+      emitAiDiagnostic(options.diagnostics, { domain: "activity", operation: "durable_turn_status",
+        phase: "failed", conversationId, turnId, code: "activity_update_failed", retryable: true, cause });
+    }
+  };
   const key = (conversationId: string, turnId: string) => `${conversationId.length}:${conversationId}${turnId}`;
   const update = async (conversationId: string, turnId: string,
     mutate: (record: DurableApplicationTurnRecord<TStoredRequest, TEvent>) => DurableApplicationTurnRecord<TStoredRequest, TEvent> | null) => {
@@ -175,7 +199,10 @@ export function createDurableApplicationTransport<TEvent, TRequest, TStoredReque
       const current = await options.store.load(conversationId, turnId); if (!current) return null;
       const next = mutate(current.record); if (next === null) return current;
       const result = await options.store.compareAndSet({ conversationId, turnId, expectedVersion: current.version, record: next });
-      if (result.status === "updated") return result.document;
+      if (result.status === "updated") {
+        if (current.record.status !== result.document.record.status) await publishStatus(result.document);
+        return result.document;
+      }
     }
     throw new Error("Durable turn state conflicted repeatedly");
   };
@@ -346,6 +373,7 @@ export function createDurableApplicationTransport<TEvent, TRequest, TStoredReque
           request: clone(storedRequest), delegateTurnId: null, status: "pending", attempt: 0, events: [], terminal: null,
           cancellation: null, lease: null, createdAt: timestamp(currentTime), updatedAt: timestamp(currentTime) });
         if (created.status === "conflict") return safeFailure("conflict", "The turn start conflicts with retained identity.", false);
+        if (created.status === "created") await publishStatus(created.document);
         kick(conversationId, turnId);
         return { ok: true, value: { conversationId, turnId, mutationId: input.mutationId,
           observation: await observe(created.document, EMPTY_CHECKPOINT) } };

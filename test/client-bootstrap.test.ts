@@ -6,7 +6,7 @@ import {
   InMemoryConversationEventStore,
   type ApplicationGatewayCapabilities,
 } from "../src/client/index.js";
-import type { AttachmentUploadAdapter, ConversationCatalog } from "../src/index.js";
+import { parseConversationEvent, type AttachmentUploadAdapter, type ConversationCatalog } from "../src/index.js";
 
 const capabilities: ApplicationGatewayCapabilities = Object.freeze({
   protocolVersion: APPLICATION_GATEWAY_PROTOCOL_VERSION,
@@ -23,6 +23,34 @@ const capabilities: ApplicationGatewayCapabilities = Object.freeze({
 });
 
 describe("createHandrailAiClient", () => {
+  it("returns a saved single conversation while its real gateway resume is pending", async () => {
+    const eventStore = new InMemoryConversationEventStore();
+    const conversationId = "saved-single" as never;
+    await eventStore.append({ conversationId, expectedRevision: null, events: [parseConversationEvent({
+      version: 1, event_id: "saved-start", conversation_id: conversationId, revision: 1,
+      occurred_at: "2026-09-04T00:00:00.000Z", actor: { type: "assistant" }, source: { type: "runtime" },
+      metadata: { handrail_runtime: { transport_turn_id: "remote-saved" } },
+      payload: { type: "turn.started", turn_id: "saved-turn", input_message_ids: ["saved-input"] },
+    })] });
+    let finishFetch!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => { finishFetch = resolve; });
+    const fetcher = vi.fn<typeof fetch>(() => pending);
+    const client = await createHandrailAiClient({ baseUrl: "https://app.test/ai", capabilities,
+      fetch: fetcher,
+      conversations: { mode: "single", conversationId, clientId: "client" as never, eventStore },
+    });
+    try {
+      expect(client.conversation?.getSnapshot().active_turn_id).toBe("saved-turn");
+      await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
+      expect(String(fetcher.mock.calls[0]?.[0])).toContain("/turns/resume");
+    } finally {
+      finishFetch(new Response(JSON.stringify({ ok: false, error: {
+        code: "unavailable", message: "Test stopped", retryable: false,
+      } }), { status: 503, headers: { "content-type": "application/json" } }));
+      await client.dispose();
+    }
+  });
+
   it("creates a single conversation without assembling catalog runtime ownership", async () => {
     const eventStore = new InMemoryConversationEventStore();
     const client = await createHandrailAiClient({

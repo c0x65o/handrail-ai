@@ -32,7 +32,7 @@ export function createDurableApplicationConversationSync<TAuthorizationContext>(
     authorize: ({ conversationId }) => options.authorizeConversation(conversationId),
     allowRuntimeMutationProposals: true,
     canonicalizeMutation: ({ conversationId, proposedEvent }) => canonicalize(
-      proposedEvent, conversationId, options.principalId, options.turnStore,
+      proposedEvent, conversationId, options.principalId, options.turnStore, options.eventStore,
     ),
     validateCanonicalBatch: async ({ conversationId, events }) => {
       const replay = await replayConversation({ conversationId, eventStore: options.eventStore, checkpointPolicy: false });
@@ -90,6 +90,7 @@ async function canonicalize(
   conversationId: ConversationId,
   principalId: string,
   turnStore: DurableApplicationTurnStore<ChatRequest, StreamEvent>,
+  eventStore: ConversationEventStore,
 ): Promise<CanonicalConversationSyncMutation> {
   const payload = proposed.payload;
   if (payload.type === "message.created") {
@@ -119,12 +120,39 @@ async function canonicalize(
   if (!turnId || proposed.source.type !== "runtime" || proposed.actor.type !== "assistant") deny();
   const durable = await turnStore.load(conversationId, turnId);
   if (!durable) deny();
+  if (payload.type === "turn.status_changed" && metadata.checkpoint !== undefined && metadata.frame_type === undefined) {
+    const checkpoint = metadata.checkpoint;
+    if (!checkpoint || typeof checkpoint !== "object" || Array.isArray(checkpoint)) deny();
+    const point = checkpoint as Record<string, unknown>;
+    if (Object.keys(point).length !== 3 || typeof point.last_applied_event_id !== "string" ||
+      typeof point.last_applied_cursor !== "string" || !Number.isSafeInteger(point.last_applied_revision)) deny();
+    const retained = durable.record.events.find((entry) => entry.checkpoint.lastAppliedEventId === point.last_applied_event_id &&
+      entry.checkpoint.lastAppliedCursor === point.last_applied_cursor);
+    if (!retained) throw new TypeError("Checkpoint is not retained in durable output");
+    const replay = await replayConversation({ conversationId, eventStore, checkpointPolicy: false });
+    const state = replay.state;
+    replay.store.destroy();
+    const turn = state.turns.find((candidate) => candidate.turn_id === turnId);
+    if (turn?.status !== payload.status || Number(point.last_applied_revision) > (state.revision ?? 0)) throw new TypeError("Checkpoint status or revision is invalid");
+    let page = await eventStore.read({ conversationId, limit: 500 });
+    for (;;) {
+      if (page.entries.some(({ event }) => {
+        const evidence = runtimeMetadata(event);
+        return event.revision <= Number(point.last_applied_revision) && evidence.resume_safe === true &&
+          evidence.request_id === retained.event.request_id && evidence.sequence === retained.event.sequence;
+      })) return canonical(proposed, { type: "assistant" });
+      if (!page.hasMore || !page.nextCursor) throw new TypeError("Checkpoint has no canonical frame evidence");
+      const cursor = page.nextCursor;
+      page = await eventStore.read({ conversationId, after: { cursor }, limit: 500 });
+      if (page.hasMore && page.nextCursor === cursor) deny();
+    }
+  }
   if (payload.type === "turn.status_changed" && payload.status === "queued") {
     if (runtimeMetadata(proposed).transport_turn_id !== turnId) deny();
     return canonical(proposed, { type: "assistant" });
   }
   const frame = retainedFrame(proposed, durable.record.events.map((entry) => entry.event));
-  if (!frame || !payloadMatchesFrame(payload, frame)) deny();
+  if (!frame || !payloadMatchesFrame(payload, frame, turnId)) deny();
   return canonical(proposed, { type: "assistant" });
 }
 
@@ -142,17 +170,17 @@ function retainedFrame(proposed: ConversationSyncMutationEvent, events: readonly
     frame.type === metadata.frame_type ? frame : null;
 }
 
-function payloadMatchesFrame(payload: ConversationEventPayload, frame: StreamEvent): boolean {
+function payloadMatchesFrame(payload: ConversationEventPayload, frame: StreamEvent, turnId: string): boolean {
   switch (frame.type) {
-    case "response.started": return payload.type === "turn.status_changed" && payload.status === "running" && payload.turn_id === frame.request_id;
-    case "response.text.delta": return payload.type === "message.text_appended" && payload.turn_id === frame.request_id && payload.text === frame.delta;
-    case "response.tool_call": return payload.type === "tool_call.requested" && payload.turn_id === frame.request_id &&
+    case "response.started": return payload.type === "turn.status_changed" && payload.status === "running" && payload.turn_id === turnId;
+    case "response.text.delta": return payload.type === "message.text_appended" && payload.turn_id === turnId && payload.text === frame.delta;
+    case "response.tool_call": return payload.type === "tool_call.requested" && payload.turn_id === turnId &&
       payload.tool_call_id === frame.tool_call_id && payload.name === frame.name && json(payload.arguments) === json(frame.arguments);
     case "response.citation_batch": return payload.type === "citation.records_linked" && json(payload.sources) === json(frame.sources) &&
       json(payload.citations.map(withoutTarget)) === json(frame.citations.map(withoutTarget));
-    case "response.completed": return payload.type === "turn.completed" && payload.turn_id === frame.request_id && payload.outcome === frame.outcome;
-    case "response.cancelled": return payload.type === "turn.cancelled" && payload.turn_id === frame.request_id && payload.reason === cancellationReason(frame.reason);
-    case "response.error": return payload.type === "turn.failed" && payload.turn_id === frame.request_id &&
+    case "response.completed": return payload.type === "turn.completed" && payload.turn_id === turnId && payload.outcome === frame.outcome;
+    case "response.cancelled": return payload.type === "turn.cancelled" && payload.turn_id === turnId && payload.reason === cancellationReason(frame.reason);
+    case "response.error": return payload.type === "turn.failed" && payload.turn_id === turnId &&
       json(payload.error) === json({ code: frame.error.code, message: frame.error.message, retryable: frame.error.retryable });
     case "response.usage": return false;
   }
@@ -161,7 +189,7 @@ function payloadMatchesFrame(payload: ConversationEventPayload, frame: StreamEve
 function payloadTurnId(payload: ConversationEventPayload): string | null {
   return "turn_id" in payload && typeof payload.turn_id === "string" ? payload.turn_id : null;
 }
-function runtimeMetadata(event: ConversationSyncMutationEvent): Record<string, unknown> {
+function runtimeMetadata(event: Pick<ConversationEvent, "metadata">): Record<string, unknown> {
   const value = event.metadata?.handrail_runtime;
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }

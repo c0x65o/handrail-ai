@@ -152,6 +152,9 @@ export interface ConversationRuntimeOptions<TRequest> {
   /** RFC 3339 UTC string or Date. Defaults to the current wall-clock time. */
   readonly now?: () => string | Date;
   readonly replayBatchSize?: number;
+  /** Poll canonical events independently of provider frames. Omitted disables polling. */
+  readonly synchronizationIntervalMilliseconds?: number;
+  readonly onSynchronizationError?: (cause: unknown) => void;
   /** Bounded retry behavior. Defaults to createRetryPolicy(). */
   readonly retryPolicy?: RetryPolicy;
   /** Optional provider-context acceleration. Unsupported capabilities are a no-op. */
@@ -238,6 +241,8 @@ export interface ConversationRuntime<TRequest> {
   readonly store: ConversationStore;
   getSnapshot(): ConversationState;
   observe(observer: ConversationRuntimeObserver): () => void;
+  /** Pull canonical events through the same mutation boundary as stream writes. */
+  synchronize?(): Promise<void>;
   sendMessage(
     input: ConversationRuntimeSendMessageInput<TRequest>,
   ): Promise<ConversationRuntimeTurnResult>;
@@ -373,6 +378,12 @@ export async function createConversationRuntime<TRequest>(
   const now = options.now ?? (() => new Date());
   const retryPolicy = options.retryPolicy ?? createRetryPolicy();
   const catchUpBatchSize = options.replayBatchSize ?? 500;
+  const synchronizationInterval = options.synchronizationIntervalMilliseconds;
+  if (synchronizationInterval !== undefined &&
+      (!Number.isSafeInteger(synchronizationInterval) || synchronizationInterval < 100 || synchronizationInterval > 300_000)) {
+    throw new TypeError("synchronizationIntervalMilliseconds must be between 100 and 300000");
+  }
+  let synchronizationTimer: ReturnType<typeof setTimeout> | undefined;
   const protocolByTurn = new Map<string, TurnProtocolState>();
   const usageReceiptsByTurn = new Map<
     string,
@@ -629,6 +640,12 @@ export async function createConversationRuntime<TRequest>(
     }]);
   };
 
+  const canonicalTerminalResult = (turnId: ConversationTurnId): ConversationRuntimeTurnResult | null => {
+    const turn = store.getSnapshot().turns.find((candidate) => candidate.turn_id === turnId);
+    return turn && (turn.status === "completed" || turn.status === "cancelled" || turn.status === "failed")
+      ? result(turnId, turn.status, turn.error ?? undefined) : null;
+  };
+
   const observeTransport = async (
     turnId: ConversationTurnId,
     observation: TurnObservation<unknown>,
@@ -688,6 +705,8 @@ export async function createConversationRuntime<TRequest>(
           );
           if (drafts.length > 0) {
             await persistFrameDrafts(drafts);
+            // Another projector can win this frame's append with its own message ID.
+            frameState.assistantMessageId = streamedAssistantMessageId(store.getSnapshot(), turnId) ?? frameState.assistantMessageId;
             if (drafts.some((draft) => runtimeMetadata(draft.metadata)?.resumeSafe)) {
               protocol.safeSequence = frame.sequence;
             }
@@ -707,6 +726,8 @@ export async function createConversationRuntime<TRequest>(
       if (transportResult !== null) {
         await captureUsageReceipt(turnId, transportResult);
       }
+      const alreadyTerminal = canonicalTerminalResult(turnId);
+      if (alreadyTerminal) return alreadyTerminal;
 
       if (
         frameState.failure === null &&
@@ -797,11 +818,13 @@ export async function createConversationRuntime<TRequest>(
       const terminalResult = transportResult;
       let validationFailure: unknown = null;
       await persistGenerated((durableRevision) => {
+        if (canonicalTerminalResult(turnId)) return [];
+        frameState.assistantMessageId = streamedAssistantMessageId(store.getSnapshot(), turnId) ?? frameState.assistantMessageId;
         const terminalDrafts = draftsForTerminal(
           frameState,
           terminal,
           runtimeSource(),
-          requestedCancellationReasons.get(turnId),
+          requestedCancellationReasons.get(turnId) ?? store.getSnapshot().turns.find((turn) => turn.turn_id === turnId)?.cancellation_requested_reason ?? undefined,
         );
         const postPersistenceRevision = (
           (durableRevision ?? 0) + terminalDrafts.length
@@ -822,7 +845,7 @@ export async function createConversationRuntime<TRequest>(
               frameState,
               terminal,
               runtimeSource(),
-              requestedCancellationReasons.get(turnId),
+              requestedCancellationReasons.get(turnId) ?? store.getSnapshot().turns.find((turn) => turn.turn_id === turnId)?.cancellation_requested_reason ?? undefined,
               checkpoint,
             )
           : terminalDrafts;
@@ -831,6 +854,8 @@ export async function createConversationRuntime<TRequest>(
         return result(turnId, "interrupted", runtimeFailure(validationFailure));
       }
       protocol.safeSequence = frameState.terminal.sequence;
+      const finalized = canonicalTerminalResult(turnId);
+      if (finalized) return finalized;
       switch (frameState.terminal.type) {
         case "response.completed":
           return result(turnId, "completed");
@@ -1259,7 +1284,7 @@ export async function createConversationRuntime<TRequest>(
       }
 
       protocol.transportTurnId = started.value.turnId;
-      await persist([{
+      await persistGenerated(() => canonicalTerminalResult(turnId) ? [] : [{
         actor: { type: "assistant" },
         source: runtimeSource(),
         metadata: metadataFor({ transportTurnId: started.value.turnId }),
@@ -1523,9 +1548,38 @@ export async function createConversationRuntime<TRequest>(
     return store.subscribe(() => observer(store.getSnapshot()));
   };
 
+  const synchronize = async (): Promise<void> => {
+    await persistGenerated(() => [], () => catchUpRuntimeStore(
+      options.conversationId, options.eventStore, store, protocolByTurn,
+      durableFrameKeys, durableFrameFingerprints, catchUpBatchSize,
+    ));
+    // A lost stream completion must not keep sendMessage (and the composer)
+    // pending after canonical synchronization proves the turn has finished.
+    // This detaches observation only; the durable outcome remains authoritative.
+    const state = store.getSnapshot();
+    for (const [turnId, observation] of activeObservations) {
+      const turn = state.turns.find((candidate) => candidate.turn_id === turnId);
+      if (turn && isTerminalTurnStatus(turn.status)) observation.disconnect();
+    }
+  };
+
+  const scheduleSynchronization = (): void => {
+    if (destroyed || synchronizationInterval === undefined) return;
+    synchronizationTimer = setTimeout(() => {
+      void synchronize().catch((cause: unknown) => {
+        if (!destroyed) {
+          try { options.onSynchronizationError?.(cause); } catch { /* Diagnostics cannot stop polling. */ }
+        }
+      }).finally(scheduleSynchronization);
+    }, synchronizationInterval);
+    synchronizationTimer.unref?.();
+  };
+  scheduleSynchronization();
+
   const destroy = (): void => {
     if (destroyed) return;
     destroyed = true;
+    clearTimeout(synchronizationTimer);
     for (const controller of retryControllers.values()) {
       controller.abort(new ConversationRuntimeDestroyedError());
     }
@@ -1543,6 +1597,7 @@ export async function createConversationRuntime<TRequest>(
     store,
     getSnapshot: () => store.getSnapshot(),
     observe,
+    synchronize,
     sendMessage,
     continueTurn,
     recordToolLoopEvents,

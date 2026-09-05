@@ -1,6 +1,6 @@
 {
   "name": "@handrail/ai-assistant",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Provider-neutral TypeScript primitives and runtime tooling for building AI applications with Handrail.",
   "license": "UNLICENSED",
   "type": "module",
@@ -166,11 +166,12 @@
     "provenance": true
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.4",
     "@eslint/js": "10.0.1",
+    "@testing-library/react": "16.3.0",
     "@types/node": "22.17.2",
     "@types/react": "19.1.9",
     "@types/react-dom": "19.1.7",
-    "@testing-library/react": "16.3.0",
     "eslint": "10.9.1",
     "fake-indexeddb": "6.2.5",
     "jsdom": "26.1.0",

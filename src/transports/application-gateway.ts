@@ -805,10 +805,11 @@ async function readGatewayStream<TEvent>(
   let resolveResult!: (result: TurnObservationResult) => void;
   const result = new Promise<TurnObservationResult>((resolve) => { resolveResult = resolve; });
   let checkpoint = EMPTY_CHECKPOINT;
+  const streamController = new AbortController();
   const events = (async function* () {
     let terminal = false;
     try {
-      for await (const frame of parseServerSentEvents(response.body!)) {
+      for await (const frame of parseServerSentEvents(response.body!, { signal: streamController.signal })) {
         if (!frame.data) continue;
         const message = JSON.parse(frame.data) as GatewayStreamMessage<unknown>;
         if (message.type === "started") started(message);
@@ -819,6 +820,7 @@ async function readGatewayStream<TEvent>(
     } catch { resolveResult({ status: "disconnected", checkpoint }); }
   })();
   return { events, result, disconnect() {
+    streamController.abort();
     disconnectRequest();
     resolveResult({ status: "disconnected", checkpoint });
   } };

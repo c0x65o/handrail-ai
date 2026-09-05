@@ -52,6 +52,19 @@ function adapter(store: InMemoryConversationEventStore, userId: string, clientId
 }
 
 describe("event-store conversation synchronization adapter", () => {
+  it("returns a newer canonical revision before validating an obsolete batch", async () => {
+    const store = new InMemoryConversationEventStore();
+    const first = adapter(store, "user", "first");
+    await first.sync.appendMutations({ conversationId, expectedRevision: null, mutations: [proposal("first", 1)] });
+    const validateCanonicalBatch = vi.fn(() => { throw new TypeError("Obsolete revisions cannot be replayed"); });
+    const stale = createEventStoreConversationSyncAdapter({ authorizationContext: {}, eventStore: store, authorize: () => true,
+      canonicalizeMutation: ({ proposedEvent }) => ({ actor: { type: "user" }, source: proposedEvent.source, payload: proposedEvent.payload }),
+      createEventId: () => "stale-event" as never, validateCanonicalBatch });
+    await expect(stale.appendMutations({ conversationId, expectedRevision: null, mutations: [proposal("stale", 1)] }))
+      .resolves.toMatchObject({ status: "conflict", actualRevision: 1 });
+    expect(validateCanonicalBatch).not.toHaveBeenCalled();
+  });
+
   it("converges two devices on server-authored events and acknowledges lost-response retries exactly once", async () => {
     const store = new InMemoryConversationEventStore();
     const first = adapter(store, "user-1", "client-1");

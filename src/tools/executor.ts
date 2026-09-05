@@ -33,6 +33,8 @@ export interface ApplicationToolExecutorContext<TContext = unknown> {
   readonly definition: ToolDefinition;
   readonly signal: AbortSignal;
   readonly toolCallId: string;
+  /** Stable, host-scoped idempotency identity; falls back to toolCallId for legacy callers. */
+  readonly executionKey?: string;
   /** Publishes bounded, user-visible progress for the current long-running tool. */
   readonly reportActivity?: ApplicationToolActivityReporter;
 }
@@ -87,32 +89,58 @@ export type ApplicationToolPolicy<TContext = unknown> = (
 
 export interface ToolExecutionLedger {
   /** Optional fast path used to avoid repeating validation/policy for completed calls. */
-  get?(toolCallId: string): Promise<ApplicationToolResult> | undefined;
-  /** Implementations must atomically retain and return the first promise for a call id. */
+  get?(toolCallId: string, requestFingerprint?: string): Promise<ApplicationToolResult> | undefined;
+  /** Atomically retain the first promise and immutable request fingerprint for a call ID.
+   * Custom ledgers must reject reuse with a different or missing fingerprint.
+   * Fingerprints supplied by the executor can contain private argument data;
+   * persistent implementations should store a cryptographic digest, not log them.
+   */
   getOrCreate(
     toolCallId: string,
     execute: () => Promise<ApplicationToolResult>,
+    requestFingerprint?: string,
   ): Promise<ApplicationToolResult>;
 }
 
-export class InMemoryToolExecutionLedger implements ToolExecutionLedger {
-  readonly #entries = new Map<string, Promise<ApplicationToolResult>>();
+export class ToolExecutionIdentityConflictError extends Error {
+  readonly code = "tool_execution_identity_conflict" as const;
+  constructor() {
+    super("Tool call identity conflicts with its original request.");
+    this.name = "ToolExecutionIdentityConflictError";
+  }
+}
 
-  get(toolCallId: string): Promise<ApplicationToolResult> | undefined {
-    return this.#entries.get(toolCallId);
+export class InMemoryToolExecutionLedger implements ToolExecutionLedger {
+  readonly #entries = new Map<string, { fingerprint: string | undefined; result: Promise<ApplicationToolResult> }>();
+
+  get(toolCallId: string, requestFingerprint?: string): Promise<ApplicationToolResult> | undefined {
+    const entry = this.#entries.get(toolCallId);
+    if (entry && entry.fingerprint !== requestFingerprint) return Promise.reject(new ToolExecutionIdentityConflictError());
+    return entry?.result;
   }
 
   getOrCreate(
     toolCallId: string,
     execute: () => Promise<ApplicationToolResult>,
+    requestFingerprint?: string,
   ): Promise<ApplicationToolResult> {
-    const existing = this.#entries.get(toolCallId);
+    const existing = this.get(toolCallId, requestFingerprint);
     if (existing !== undefined) return existing;
-
     const pending = Promise.resolve().then(execute);
-    this.#entries.set(toolCallId, pending);
+    this.#entries.set(toolCallId, { fingerprint: requestFingerprint, result: pending });
     return pending;
   }
+}
+
+function canonicalToolJson(value: JsonValue): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalToolJson).join(",")}]`;
+  return `{${Object.keys(value).sort().map((key) =>
+    `${JSON.stringify(key)}:${canonicalToolJson(value[key]!)}`).join(",")}}`;
+}
+
+function toolRequestFingerprint(toolCallId: string, name: string, arguments_: JsonObject): string {
+  return canonicalToolJson({ toolCallId, name, arguments: arguments_ });
 }
 
 export interface BoundedToolExecutorLimits {
@@ -137,6 +165,8 @@ export interface BoundedToolExecutionRequest<
   TApprovalPermissionContext = unknown,
 > {
   readonly call: ApplicationToolCall;
+  /** Stable ledger identity for this intent, independent of provider-local call IDs. */
+  readonly executionKey?: string;
   /** Must be the current array returned by ToolRegistry.discover(). */
   readonly discoveredTools: readonly ToolDefinition[];
   readonly applicationContext: TContext;
@@ -642,7 +672,7 @@ export class BoundedToolExecutor<
   readonly #limits: Readonly<BoundedToolExecutorLimits>;
   readonly #limiter: ConcurrencyLimiter;
   readonly #diagnostics: AiDiagnosticSink | undefined;
-  readonly #operations = new Map<string, Promise<BoundedToolExecutionOutcome>>();
+  readonly #operations = new Map<string, { fingerprint: string; operation: Promise<BoundedToolExecutionOutcome> }>();
 
   constructor(
     options: BoundedToolExecutorOptions<
@@ -692,21 +722,42 @@ export class BoundedToolExecutor<
   ): Promise<BoundedToolExecutionOutcome> {
     const toolCallId = safeIdentifier(request.call.tool_call_id, "unknown_tool_call");
     const name = safeIdentifier(request.call.name, "unknown_tool");
-    const completed = request.approval === undefined
-      ? this.#ledger.get?.(toolCallId)
-      : undefined;
-    if (completed !== undefined) {
-      return Object.freeze({ status: "completed", result: await completed });
+    const executionKey = request.executionKey ?? toolCallId;
+    if (toolCallId !== request.call.tool_call_id || name !== request.call.name ||
+      executionKey !== safeIdentifier(executionKey, "invalid_execution_key")) {
+      return { status: "completed", result: errorResult(toolCallId, name, "Tool call identifiers are invalid.") };
     }
-    const existing = request.approval === undefined
-      ? this.#operations.get(toolCallId)
-      : undefined;
-    if (existing !== undefined) return existing;
+    let arguments_: JsonObject;
+    try { arguments_ = cloneArguments(request.call.arguments); }
+    catch {
+      emitAiDiagnostic(this.#diagnostics, { domain: "validation", operation: "pre_execution", phase: "failed",
+        toolName: name, toolCallId, code: "invalid_arguments", retryable: false });
+      return { status: "completed", result: errorResult(toolCallId, name, "Tool arguments did not match the declared schema.") };
+    }
+    const fingerprint = toolRequestFingerprint(toolCallId, name, arguments_);
+    // Snapshot arguments before any asynchronous boundary so the caller cannot
+    // change the dispatched request after its retry identity has been checked.
+    request = { ...request, call: { ...request.call, arguments: arguments_ } };
+    try {
+      const completed = request.approval === undefined
+        ? this.#ledger.get?.(executionKey, fingerprint) : undefined;
+      if (completed !== undefined) return Object.freeze({ status: "completed", result: await completed });
+      const existing = request.approval === undefined ? this.#operations.get(executionKey) : undefined;
+      if (existing !== undefined) {
+        if (existing.fingerprint !== fingerprint) throw new ToolExecutionIdentityConflictError();
+        return existing.operation;
+      }
+    } catch (cause) {
+      if (!(cause instanceof ToolExecutionIdentityConflictError)) throw cause;
+      emitAiDiagnostic(this.#diagnostics, { domain: "tool", operation: "pre_execution", phase: "failed",
+        toolName: name, toolCallId, code: cause.code, retryable: false });
+      return Object.freeze({ status: "completed", result: errorResult(toolCallId, name, cause.message) });
+    }
     const operation = this.#executeDetailedOnce(request, toolCallId, name);
     if (request.approval !== undefined) return operation;
-    this.#operations.set(toolCallId, operation);
+    this.#operations.set(executionKey, { fingerprint, operation });
     void operation.finally(() => {
-      if (this.#operations.get(toolCallId) === operation) this.#operations.delete(toolCallId);
+      if (this.#operations.get(executionKey)?.operation === operation) this.#operations.delete(executionKey);
     }).catch(() => undefined);
     return operation;
   }
@@ -794,7 +845,7 @@ export class BoundedToolExecutor<
           return Object.freeze({ status: "external_approval_required", toolCallId, name });
         }
         if (claim.outcome === "reuse") {
-          const retained = this.#ledger.get?.(toolCallId);
+          const retained = this.#ledger.get?.(request.executionKey ?? toolCallId, toolRequestFingerprint(toolCallId, name, arguments_));
           if (retained !== undefined) {
             return Object.freeze({
               status: "completed",
@@ -853,6 +904,8 @@ export class BoundedToolExecutor<
       let message = "Tool execution could not be recorded.";
       if (controller.signal.aborted) {
         message = timedOut ? "Tool execution timed out." : "Tool execution was cancelled.";
+      } else if (error instanceof ToolExecutionIdentityConflictError) {
+        message = error.message;
       } else if (phase === "arguments") {
         message = "Tool arguments did not match the declared schema.";
       } else if (error instanceof InvalidPolicyDecision) {
@@ -888,7 +941,7 @@ export class BoundedToolExecutor<
     approvalClaim?: ClaimedApprovalExecution,
   ): Promise<ApplicationToolResult> {
     return raceWithSignal(
-      this.#ledger.getOrCreate(toolCallId, async () => {
+      this.#ledger.getOrCreate(request.executionKey ?? toolCallId, async () => {
         const diagnosticStartedAt = Date.now();
         let executionResult: ApplicationToolResult;
         let failureReason: ApprovalExecutionFailureReason | undefined;
@@ -906,6 +959,7 @@ export class BoundedToolExecutor<
               definition: registration.definition,
               signal,
               toolCallId,
+              executionKey: request.executionKey ?? toolCallId,
               ...(request.reportActivity === undefined
                 ? {}
                 : { reportActivity: async (update: ApplicationToolActivityUpdate) => {
@@ -982,7 +1036,7 @@ export class BoundedToolExecutor<
           }
         }
         return executionResult;
-      }),
+      }, toolRequestFingerprint(toolCallId, name, arguments_)),
       signal,
     );
   }

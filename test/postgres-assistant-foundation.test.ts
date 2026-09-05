@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   PostgresAIRuntimeUsageOutbox,
   PostgresAIRuntimeUsageAdmissionStore,
   PostgresAiPersistence,
+  PostgresConversationActivityStore,
   PostgresPersistenceConflictError,
   createPostgresSqlClientFromPool,
   postgres,
@@ -11,7 +12,7 @@ import {
   type PostgresPoolLike,
   type PostgresVersionedDocument,
 } from "../src/postgres/index.js";
-import type { AIRuntimeUsageOutboxEntry } from "../src/server/usage-control.js";
+import { createAIRuntimeUsageClient, createAIRuntimeUsageReceiptSink, type AIRuntimeUsageOutboxEntry } from "../src/server/usage-control.js";
 import { parseNormalizedUsageReceipt } from "../src/usage.js";
 
 function receipt(id: string, logicalRequestId = "logical-1") {
@@ -112,6 +113,24 @@ function entry(id: string, enqueuedAt: string, logicalRequestId?: string): AIRun
 }
 
 describe("Postgres assistant persistence foundation", () => {
+  it("retains newer turns and read completion against delayed activity writers", async () => {
+    const documents = new MemoryDocuments();
+    const first = new PostgresConversationActivityStore(documents.persistence, "tenant", "user");
+    const second = new PostgresConversationActivityStore(documents.persistence, "tenant", "user");
+    const turn = { conversationId: "conversation", turnId: "first", turnRevision: 2 };
+    await first.upsert({ ...turn, turnStatus: "running", unread: false });
+    await second.upsert({ ...turn, turnStatus: "completed", unread: true });
+    await first.markRead("conversation");
+    await Promise.all([
+      first.upsert({ ...turn, turnStatus: "running", unread: false, summary: "Late progress" }),
+      second.upsert({ ...turn, turnStatus: "completed", unread: true }),
+    ]);
+    expect(await first.list()).toEqual([expect.objectContaining({ turnStatus: "completed", unread: false })]);
+    await second.upsert({ ...turn, turnId: "second", turnRevision: 20, turnStatus: "running", unread: false });
+    await first.upsert({ ...turn, turnStatus: "completed", unread: true });
+    expect(await first.list()).toEqual([expect.objectContaining({ turnId: "second", turnStatus: "running", unread: false })]);
+  });
+
   it("retains usage admission decisions with durable idempotency", async () => {
     let providerCalls = 0;
     let retained: unknown;
@@ -204,6 +223,52 @@ describe("Postgres assistant persistence foundation", () => {
       .toEqual(["receipt-later"]);
     await outbox.acknowledge("receipt-later");
     expect(await outbox.pending(10)).toEqual([]);
+  });
+
+  it("retains delivered identities across replay and ignores late delivery failures", async () => {
+    const documents = new MemoryDocuments();
+    const outbox = new PostgresAIRuntimeUsageOutbox(documents.persistence, "tenant-1", "assistant-aegis");
+    const receipt = entry("receipt-delivered", "2026-09-02T01:00:00.000Z");
+    await outbox.enqueue(receipt);
+    await outbox.acknowledge("receipt-delivered");
+    const restarted = new PostgresAIRuntimeUsageOutbox(documents.persistence, "tenant-1", "assistant-aegis");
+    await restarted.enqueue(receipt);
+    await restarted.failed("receipt-delivered", { code: "late-network-error", retryable: true });
+    await restarted.acknowledge("receipt-delivered");
+    expect(await restarted.pending(10)).toEqual([]);
+    await expect(restarted.enqueue(entry("receipt-delivered", receipt.enqueuedAt, "different-request")))
+      .rejects.toBeInstanceOf(PostgresPersistenceConflictError);
+  });
+
+  it("retries a lost telemetry acknowledgement with the same receipt and suppresses later replay", async () => {
+    const documents = new MemoryDocuments();
+    const outbox = new PostgresAIRuntimeUsageOutbox(documents.persistence, "tenant-1", "assistant-aegis");
+    const accepted = new Set<string>();
+    const payloads: unknown[] = [];
+    const fetcher = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      payloads.push(body);
+      const id = body.receipts[0].usage_receipt_id;
+      const duplicate = accepted.has(id);
+      accepted.add(id);
+      if (!duplicate) throw new Error("Acknowledgement lost after acceptance");
+      return new Response(JSON.stringify({ accepted_count: 0, duplicate_count: 1 }), { status: 202 });
+    });
+    const client = createAIRuntimeUsageClient({ apiUrl: "https://telemetry.test", token: "test-token",
+      serviceEnvId: "service-env-1", retryLimit: 0, fetch: fetcher });
+    const sink = createAIRuntimeUsageReceiptSink(client, outbox);
+    await sink.capture(receipt("receipt-network"));
+    await sink.flush();
+    expect((await outbox.pending(10))[0]?.attempts).toBe(1);
+    await sink.flush();
+    expect(await outbox.pending(10)).toEqual([]);
+    const restarted = createAIRuntimeUsageReceiptSink(client,
+      new PostgresAIRuntimeUsageOutbox(documents.persistence, "tenant-1", "assistant-aegis"));
+    await restarted.capture(receipt("receipt-network"));
+    await restarted.flush();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(payloads[0]).toEqual(payloads[1]);
+    expect(accepted.size).toBe(1);
   });
 
   it("rejects reuse of one receipt identity for different usage", async () => {

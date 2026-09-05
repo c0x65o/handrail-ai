@@ -15,3 +15,6 @@ export * from "./state.js";
 export * from "./state-validation.js";
 export * from "./store.js";
 export * from "./title-generation.js";
+export * from "./tool-activity.js";
+
+export * from "./activity-projection.js";

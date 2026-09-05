@@ -71,6 +71,8 @@ extends ApplicationGatewayTransportOptions<TEvent, TSynchronization> {
       };
   readonly buildRequest?: (input: { readonly content: string; readonly attachments: readonly unknown[] }) => TRequest;
   readonly activityPollingMilliseconds?: number;
+  /** Canonical event polling for built-in server-backed runtimes. Defaults 1000ms. */
+  readonly synchronizationPollingMilliseconds?: number;
   readonly startActivityPolling?: boolean;
   /** Resume durably recorded active turns whenever a conversation is first opened. Defaults true. */
   readonly restoreActiveTurns?: boolean;
@@ -151,6 +153,13 @@ export async function createHandrailAiClient<TEvent = unknown, TRequest = unknow
   const runtimeFactory = multiple ? (async (input: Parameters<ConversationRuntimeFactory<TRequest, TAuthorizationContext>>[0]) =>
     createConversationRuntime<TRequest>({ conversationId: input.conversationId, clientId: multiple.clientId,
       ...(multiple.deviceId === undefined ? {} : { deviceId: multiple.deviceId }), transport,
+      ...(multiple.eventStoreFor ? {} : {
+        synchronizationIntervalMilliseconds: options.synchronizationPollingMilliseconds ?? 1_000,
+        onSynchronizationError: (cause: unknown) => emitAiDiagnostic(options.diagnostics, {
+          domain: "persistence", operation: "conversation_synchronization", phase: "failed",
+          conversationId: input.conversationId, code: "synchronization_failed", retryable: true, cause,
+        }),
+      }),
       eventStore: multiple.eventStoreFor
         ? await multiple.eventStoreFor(input)
         : createSynchronizedConversationEventStore({ adapter: synchronization! }) })) : options.createRuntime;
@@ -180,15 +189,13 @@ export async function createHandrailAiClient<TEvent = unknown, TRequest = unknow
       : singleConfiguration.eventStore,
   });
   if (conversation !== null && options.restoreActiveTurns !== false) {
-    try {
-      await conversation.restoreActiveTurn();
-    } catch (cause) {
+    void Promise.resolve().then(() => conversation.restoreActiveTurn()).catch((cause: unknown) => {
       emitAiDiagnostic(options.diagnostics, {
         domain: "persistence", operation: "startup_recovery", phase: "failed",
         conversationId: singleConfiguration!.conversationId,
         code: "active_turn_recovery_failed", retryable: true, cause,
       });
-    }
+    });
   }
   const conversationMode = singleConfiguration !== null ? "single" : multiple ? "multiple" : "none";
   return Object.freeze({ conversationMode, conversation, capabilities, transport, resources, activity, catalog, registry, workspace,

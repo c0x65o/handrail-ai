@@ -24,6 +24,40 @@ function fakeRuntime(conversationId: string) {
 }
 
 describe("ConversationWorkspace", () => {
+  it("opens while recovery is pending and observes background completion", async () => {
+    const first = fakeRuntime("first");
+    first.update({ ...first.runtime.store.getSnapshot(), active_turn_id: "turn-1" as never,
+      turns: [{ turn_id: "turn-1", status: "running" } as never] });
+    let finish!: () => void;
+    const recovery = new Promise<null>((resolve) => { finish = () => resolve(null); });
+    const restore = vi.fn(() => recovery);
+    Object.assign(first.runtime, { restoreActiveTurn: restore });
+    const registry = { open: vi.fn(async () => first.runtime) } as unknown as ConversationRuntimeRegistry<unknown>;
+    const workspace = new ConversationWorkspace(registry, { restoreActiveTurns: true });
+    const opened = workspace.open({ authorizationContext: undefined, conversationId: "first" as ConversationId });
+    await expect(opened).resolves.toBe(first.runtime);
+    expect(restore).toHaveBeenCalledOnce();
+    expect(workspace.getSnapshot().runningCount).toBe(1);
+    workspace.select(null);
+    first.update({ ...first.runtime.store.getSnapshot(), active_turn_id: null,
+      turns: [{ turn_id: "turn-1", status: "completed" } as never] });
+    finish();
+    await recovery;
+    expect(workspace.getSnapshot()).toMatchObject({ runningCount: 0, unreadCount: 1 });
+  });
+
+  it("reports recovery rejection after opening", async () => {
+    const first = fakeRuntime("first");
+    const error = new Error("offline");
+    Object.assign(first.runtime, { restoreActiveTurn: vi.fn(async () => { throw error; }) });
+    const onRecoveryError = vi.fn();
+    const registry = { open: vi.fn(async () => first.runtime) } as unknown as ConversationRuntimeRegistry<unknown>;
+    const workspace = new ConversationWorkspace(registry, { restoreActiveTurns: true, onRecoveryError });
+    await workspace.open({ authorizationContext: undefined, conversationId: "first" as ConversationId });
+    await vi.waitFor(() => expect(onRecoveryError).toHaveBeenCalledWith("first", error));
+    expect(workspace.getSnapshot().selectedConversationId).toBe("first");
+  });
+
   it("retains concurrent runtimes and marks background terminal turns unread", async () => {
     const first = fakeRuntime("first");
     const second = fakeRuntime("second");

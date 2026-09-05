@@ -178,15 +178,22 @@ export class IncrementalSseParser {
 
 async function* readChunks(
   stream: ReadableStream<Uint8Array>,
+  signal?: AbortSignal,
 ): AsyncGenerator<Uint8Array, void, void> {
   const reader = stream.getReader();
+  const abort = () => { void reader.cancel(signal?.reason).catch(() => undefined); };
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) abort();
+  let finished = false;
   try {
     while (true) {
       const item = await reader.read();
-      if (item.done) return;
+      if (item.done) { finished = true; return; }
       yield item.value;
     }
   } finally {
+    signal?.removeEventListener("abort", abort);
+    if (!finished) await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
 }
@@ -194,11 +201,11 @@ async function* readChunks(
 /** Parse an SSE byte source without assuming network chunk boundaries. */
 export async function* parseServerSentEvents(
   source: ReadableStream<Uint8Array> | AsyncIterable<Uint8Array>,
-  options: IncrementalSseParserOptions = {},
+  options: IncrementalSseParserOptions & { readonly signal?: AbortSignal } = {},
 ): AsyncGenerator<ServerSentEventFrame, void, void> {
   const parser = new IncrementalSseParser(options);
   const chunks =
-    "getReader" in source ? readChunks(source) : (source as AsyncIterable<Uint8Array>);
+    "getReader" in source ? readChunks(source, options.signal) : (source as AsyncIterable<Uint8Array>);
   for await (const chunk of chunks) {
     for (const frame of parser.push(chunk)) yield frame;
   }

@@ -1,11 +1,14 @@
+import { createToolActivityObserver, type HandrailAssistantToolObserver } from "./tool-observer.js";
 import { createHash } from "node:crypto";
+import { recordToolLifecycle } from "./tool-lifecycle.js";
+import { reconcileDurableConversationTurn } from "./reconcile-conversation.js";
+import { replayConversation } from "../conversation/replay.js";
 
 import { emitAiDiagnostic, type AiDiagnosticSink } from "../diagnostics.js";
 import type { ApplicationToolResult, AuthoritativeAttribution, ChatRequest, JsonObject, JsonValue, StreamEvent } from "../protocol.js";
 import type { ProviderAdapterMetadata } from "../providers/index.js";
 import type { ToolLoopLimits } from "../tools/loop.js";
-import type { ConversationTransport, ResumeTurnInput, StartTurnInput, TurnHandle, TurnObservation,
-  TurnResumePoint } from "../transports/types.js";
+import type { ConversationTransport, TurnResumePoint } from "../transports/types.js";
 import { createApplicationGateway, createConversationActivityHttpHandler,
   type ApplicationGateway, type ApplicationGatewayAction,
   type ApplicationGatewayAuthorizationContext } from "../transports/application-gateway.js";
@@ -13,7 +16,7 @@ import { createApplicationGatewayExpressMiddleware, type ExpressLikeNext,
   type ExpressLikeRequest, type ExpressLikeResponse } from "./application-gateway.js";
 import { createDurableApplicationTransport, type DurableApplicationTransport } from "../transports/durable.js";
 import type { ConversationCatalog } from "../conversation/catalog.js";
-import { createInMemoryLiveConversationActivityDelivery, type DurableConversationActivityStore,
+import { createInMemoryLiveConversationActivityDelivery,
   createConversationActivityReporter,
   type LiveConversationActivityDelivery, type LiveConversationActivityPubSub } from "../conversation/activity.js";
 import { ApprovalProposalStoreError, type ApprovalProposalStore } from "../conversation/approval-proposal-store.js";
@@ -35,6 +38,7 @@ import { createInMemoryLivePresenceDelivery, createLivePresenceHttpHandler } fro
 import type { LivePresenceDelivery, LivePresencePubSub } from "../presence/live-delivery.js";
 import { createAssistantActivityTransport } from "../presence/assistant-activity.js";
 
+export type { HandrailAssistantToolObserver } from "./tool-observer.js";
 export { openaiResponses, type HandrailOpenAIResponsesOptions } from "./openai-responses.js";
 export { createProviderToolLoopTransport, type ProviderToolLoopTransportOptions } from "./provider-tool-loop.js";
 
@@ -53,6 +57,7 @@ export interface HandrailAssistantProvider<TContext extends HandrailAssistantAut
     readonly context: TContext;
     readonly persistence: PostgresAssistantPersistenceBundle<TContext>;
     readonly instructions: readonly string[];
+    readonly toolActivity: HandrailAssistantToolObserver;
     readonly tools: {
       readonly definitions: readonly ToolDefinition[];
       execute(call: Pick<ResponseToolCallEvent, "tool_call_id" | "name" | "arguments">,
@@ -222,47 +227,6 @@ async function recordProposalCreated(
   throw new ApprovalProposalStoreError("unavailable", "create");
 }
 
-function withDurableActivity<TEvent, TRequest>(
-  delegate: ConversationTransport<TEvent, TRequest>, store: DurableConversationActivityStore,
-  delivery: LiveConversationActivityDelivery, diagnostics?: AiDiagnosticSink,
-): ConversationTransport<TEvent, TRequest> {
-  const update = async (conversationId: string, turnStatus: "running" | "completed" | "error", unread: boolean) => {
-    try {
-      const record = await store.upsert({ conversationId, turnStatus, unread, updatedAt: new Date().toISOString() });
-      await delivery.publish(record);
-    } catch (cause) {
-      emitAiDiagnostic(diagnostics, { domain: "activity", operation: "turn_lifecycle", phase: "failed",
-        conversationId, code: "activity_update_failed", retryable: true, cause });
-    }
-  };
-  const wrap = (handle: TurnHandle<TEvent>): TurnHandle<TEvent> => {
-    const observation: TurnObservation<TEvent> = handle.observation;
-    return { ...handle, observation: { ...observation, result: observation.result.then(async (result) => {
-      if (result.status !== "disconnected") await update(handle.conversationId,
-        result.status === "failed" ? "error" : "completed", true);
-      return result;
-    }) } };
-  };
-  return Object.freeze({ capabilities: delegate.capabilities,
-    async startTurn(input: StartTurnInput<TRequest>) {
-      const result = await delegate.startTurn(input);
-      if (!result.ok) return result;
-      await update(input.conversationId, "running", false);
-      return { ok: true as const, value: wrap(result.value) };
-    },
-    async resumeTurn(input: ResumeTurnInput) {
-      const result = await delegate.resumeTurn(input);
-      if (!result.ok) return result;
-      const observation = result.value;
-      return { ok: true as const, value: { ...observation, result: observation.result.then(async (terminal) => {
-        if (terminal.status !== "disconnected") await update(input.conversationId,
-          terminal.status === "failed" ? "error" : "completed", true);
-        return terminal;
-      }) } };
-    },
-  });
-}
-
 /**
  * Assemble the authenticated HTTP surface and all durable ownership once.
  * Tenant and scope selection happen only after authorize() returns.
@@ -351,6 +315,51 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
     }
     return application;
   };
+  const activityIdentityFor = async (context: TContext, conversationId: string, turnId: string) => {
+    const events = bundleFor(context).events;
+    let after: Parameters<typeof events.read>[0]["after"];
+    for (;;) {
+      const page = await events.read({ conversationId: conversationId as never, limit: 500,
+        ...(after === undefined ? {} : { after }) });
+      const admitted = page.entries.find(({ event }) => event.payload.type === "turn.started" && event.payload.turn_id === turnId);
+      if (admitted) return { turnId, turnRevision: Number(admitted.event.revision) };
+      if (!page.hasMore) return { turnId };
+      if (page.nextCursor === null || after && "cursor" in after && page.nextCursor === after.cursor) {
+        throw new TypeError("Activity admission history did not advance");
+      }
+      after = { cursor: page.nextCursor };
+    }
+  };
+  const reconcileFor = async (context: TContext, conversationId: string, knownTurnId?: string): Promise<void> => {
+    const bundle = bundleFor(context);
+    let turnId = knownTurnId;
+    if (turnId === undefined) {
+      const replay = await replayConversation({ conversationId: conversationId as never, eventStore: bundle.events, checkpointPolicy: false });
+      turnId = replay.state.turns.at(-1)?.turn_id;
+      replay.store.destroy();
+    }
+    if (turnId === undefined) return;
+    const document = await bundle.durableTurns.load(conversationId, turnId);
+    if (!document) return;
+    const { status, updatedAt } = document.record;
+    const running = status === "pending" || status === "running";
+    if (!running) {
+      await reconcileDurableConversationTurn({ conversationId, turnId, events: bundle.events,
+        turns: bundle.durableTurns as never, attribution: context.attribution,
+        ...(bundle.usageReceiptSink ? { usageReceiptSink: bundle.usageReceiptSink } : {}) });
+    }
+    const turnStatus = running ? "running" : status === "failed" ? "error" : "completed";
+    const retained = (await bundle.activity.list()).find((record) => record.conversationId === conversationId);
+    if (retained?.turnId === turnId && retained.turnStatus === turnStatus) return;
+    const record = await bundle.activity.upsert({ conversationId, ...await activityIdentityFor(context, conversationId, turnId),
+      turnStatus, unread: !running, updatedAt });
+    await activityDeliveryFor(context).publish(record);
+  };
+  const reconcileSafely = async (context: TContext, conversationId: string, turnId?: string) => {
+    try { await reconcileFor(context, conversationId, turnId); }
+    catch (cause) { emitAiDiagnostic(options.diagnostics, { domain: "persistence", operation: "conversation_reconciliation",
+      phase: "failed", conversationId, ...(turnId ? { turnId } : {}), code: "reconciliation_failed", retryable: true, cause }); }
+  };
   const transportFor = (context: TContext) => {
     const key = executionKeyFor(context);
     let transport = transports.get(key);
@@ -364,18 +373,58 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
         });
         const reportActivity = async (
           conversationId: string,
+          turnId: string,
           update: ApplicationToolActivityUpdate,
         ): Promise<void> => {
           try {
-            await activityReporter.report({ conversationId, summary: update.summary,
+            await activityReporter.report({ conversationId, ...await activityIdentityFor(context, conversationId, turnId), summary: update.summary,
               ...(update.progress === undefined ? {} : { progress: update.progress }) });
           } catch (cause) {
             emitAiDiagnostic(options.diagnostics, { domain: "activity", operation: "tool_progress",
               phase: "failed", conversationId, code: "activity_update_failed", retryable: true, cause });
           }
         };
+        const recordOutcome = async (
+          location: { readonly conversationId: string; readonly turnId: string },
+          call: Pick<ResponseToolCallEvent, "tool_call_id" | "name" | "arguments">,
+          outcome: BoundedToolExecutionOutcome,
+        ): Promise<BoundedToolExecutionOutcome> => {
+          const identity = { turn_id: location.turnId as never, tool_call_id: call.tool_call_id as never };
+          await recordToolLifecycle(bundle.events, location.conversationId,
+            outcome.status === "external_approval_required"
+              ? { ...identity, type: "tool_call.approval_required" }
+              : { ...identity, type: "tool_call.result_recorded", content: outcome.result.content,
+                  is_error: outcome.result.is_error,
+                  ...(outcome.result.citation_records === undefined ? {} : { citation_records: outcome.result.citation_records }) });
+          return outcome;
+        };
+        const executeTool = async (
+          call: Pick<ResponseToolCallEvent, "tool_call_id" | "name" | "arguments">,
+          signal: AbortSignal,
+          location?: { readonly conversationId: string; readonly turnId: string },
+          approval?: Parameters<typeof application.executeTool>[0]["approval"],
+        ): Promise<BoundedToolExecutionOutcome> => {
+          if (location) {
+            const identity = { turn_id: location.turnId as never, tool_call_id: call.tool_call_id as never };
+            await recordToolLifecycle(bundle.events, location.conversationId,
+              { ...identity, type: "tool_call.requested", name: call.name, arguments: call.arguments });
+            await recordToolLifecycle(bundle.events, location.conversationId,
+              { ...identity, type: "tool_call.discovered" });
+          }
+          const outcome = await application.executeTool({ discovery: { context }, applicationContext: context, call, signal,
+            executionKey: `tool-${digest(JSON.stringify([context.scopeId,
+              location?.conversationId ?? null, location?.turnId ?? null, call.tool_call_id]))}`,
+            ...(approval === undefined ? {} : { approval }),
+            ...(location === undefined ? {} : {
+              onExecutionStarted: () => recordToolLifecycle(bundle.events, location.conversationId,
+                { type: "tool_call.started", turn_id: location.turnId as never, tool_call_id: call.tool_call_id as never }),
+              reportActivity: (update: ApplicationToolActivityUpdate) => reportActivity(location.conversationId, location.turnId, update),
+            }) });
+          return location ? recordOutcome(location, call, outcome) : outcome;
+        };
         return options.provider.createTransport({
           context, persistence: bundle, limits, instructions,
+          toolActivity: createToolActivityObserver({ events: bundle.events, report: reportActivity }),
           tools: Object.freeze({
             definitions,
             async execute(call, signal, location) {
@@ -384,7 +433,7 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
                   const initial = await options.activityForToolCall({ context,
                     conversationId: location.conversationId, turnId: location.turnId,
                     toolCallId: call.tool_call_id, toolName: call.name, arguments: call.arguments });
-                  if (initial) await reportActivity(location.conversationId, initial);
+                  if (initial) await reportActivity(location.conversationId, location.turnId, initial);
                 } catch (cause) {
                   emitAiDiagnostic(options.diagnostics, { domain: "activity", operation: "tool_summary",
                     phase: "failed", conversationId: location.conversationId, turnId: location.turnId,
@@ -392,14 +441,11 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
                     code: "activity_summary_failed", retryable: false, cause });
                 }
               }
-              return application.executeTool({ discovery: { context }, applicationContext: context, call, signal,
-                ...(location === undefined ? {} : {
-                  reportActivity: (update: ApplicationToolActivityUpdate) =>
-                    reportActivity(location.conversationId, update),
-                }) });
+              return executeTool(call, signal, location);
             },
             async awaitApproval({ conversationId, turnId, call, signal }) {
-              await reportActivity(conversationId, { summary: "Waiting for approval to continue" });
+              const finishError = (message: string) => recordOutcome({ conversationId, turnId }, call, approvalError(call, message));
+              await reportActivity(conversationId, turnId, { summary: "Waiting for approval to continue" });
               const rawArguments = call.arguments as JsonObject;
               const reference = argumentReference(rawArguments);
               const identity = digest(`${conversationId}\u001f${turnId}\u001f${call.tool_call_id}\u001f${call.name}\u001f${reference}`);
@@ -416,31 +462,28 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
               await recordProposalCreated(bundle.events, conversationId, proposal);
               while (!signal.aborted && Date.now() - createdAt < approvalTimeoutMilliseconds) {
                 const retained = await proposalStore.get({ permissionContext: context, proposalId });
-                if (retained === null) return approvalError(call, "Tool approval is unavailable.");
+                if (retained === null) return finishError("Tool approval is unavailable.");
                 if (retained.status === "confirmed") {
-                  await reportActivity(conversationId, { summary: "Running approved work" });
+                  await reportActivity(conversationId, turnId, { summary: "Running approved work" });
                   const approval: ApprovalExecutionResume<TContext> = { permissionContext: context, proposalId,
                     expectedProposalVersion: retained.proposal_version, executionId: `execute-${identity.slice(0, 48)}`,
                     argumentBinding: { type: "opaque_reference", argumentReference: reference as never },
                     attribution: SYSTEM_ATTRIBUTION };
-                  return application.executeTool({ discovery: { context }, applicationContext: context, call, signal,
-                    reportActivity: (update: ApplicationToolActivityUpdate) => reportActivity(conversationId, update),
-                    approval: { ...approval, conversationId: conversationId as never, turnId: turnId as never } });
+                  return executeTool(call, signal, { conversationId, turnId },
+                    { ...approval, conversationId: conversationId as never, turnId: turnId as never });
                 }
-                if (retained.status === "rejected") return approvalError(call, "Tool execution was rejected.");
-                if (retained.status === "expired") return approvalError(call, "Tool approval expired.");
+                if (retained.status === "rejected") return finishError("Tool execution was rejected.");
+                if (retained.status === "expired") return finishError("Tool approval expired.");
                 if (retained.status === "executed" || retained.status === "executing") {
-                  return application.executeTool({ discovery: { context }, applicationContext: context, call, signal,
-                    reportActivity: (update: ApplicationToolActivityUpdate) => reportActivity(conversationId, update),
-                    approval: { permissionContext: context, proposalId,
-                      expectedProposalVersion: 2, executionId: `execute-${identity.slice(0, 48)}`,
-                      argumentBinding: { type: "opaque_reference", argumentReference: reference as never },
-                      attribution: SYSTEM_ATTRIBUTION, conversationId: conversationId as never, turnId: turnId as never } });
+                  return executeTool(call, signal, { conversationId, turnId }, { permissionContext: context, proposalId,
+                    expectedProposalVersion: 2, executionId: `execute-${identity.slice(0, 48)}`,
+                    argumentBinding: { type: "opaque_reference", argumentReference: reference as never },
+                    attribution: SYSTEM_ATTRIBUTION, conversationId: conversationId as never, turnId: turnId as never });
                 }
-                if (retained.status === "failed") return approvalError(call, "Approved tool execution failed.");
+                if (retained.status === "failed") return finishError("Approved tool execution failed.");
                 if (!await wait(250, signal)) break;
               }
-              return approvalError(call, signal.aborted ? "Tool execution was cancelled." : "Tool approval expired.");
+              return finishError(signal.aborted ? "Tool execution was cancelled." : "Tool approval expired.");
             },
           }),
           ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
@@ -456,6 +499,7 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
           },
           checkpointForEvent,
           workerId,
+          onTurnStatusChanged: ({ conversationId, turnId }) => reconcileSafely(context, conversationId, turnId),
           ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
         });
         durableTransports.set(key, durable);
@@ -467,9 +511,7 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
               phase: "failed", code: "recovery_scan_failed", retryable: true, cause });
           }
         }
-        const activity = withDurableActivity(durable, bundleFor(context).activity, activityDeliveryFor(context),
-          options.diagnostics);
-        return createAssistantActivityTransport({ delegate: activity, delivery: presenceDelivery,
+        return createAssistantActivityTransport({ delegate: durable, delivery: presenceDelivery,
           participantId: assistantId, sessionId: (_conversationId, turnId) => `${assistantId}:${turnId}`,
           activityForEvent: (event) => event.type === "response.tool_call" ? "using_tool"
             : event.type === "response.text.delta" ? "responding" : null,
@@ -485,7 +527,11 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
       archive: { supported: true as const }, restore: { supported: true as const },
       permanentDelete: { supported: true as const },
     }),
-    list: (input: Parameters<ConversationCatalog<TContext>["list"]>[0]) => catalogFor(input.authorizationContext).list(input),
+    list: async (input: Parameters<ConversationCatalog<TContext>["list"]>[0]) => {
+      const page = await catalogFor(input.authorizationContext).list(input);
+      for (const descriptor of page.items) await reconcileSafely(input.authorizationContext, descriptor.conversationId);
+      return page;
+    },
     create: (input: Parameters<ConversationCatalog<TContext>["create"]>[0]) => catalogFor(input.authorizationContext).create(input),
     get: (input: Parameters<ConversationCatalog<TContext>["get"]>[0]) => catalogFor(input.authorizationContext).get(input),
     rename: (input: Parameters<ConversationCatalog<TContext>["rename"]>[0]) => catalogFor(input.authorizationContext).rename(input),
@@ -579,7 +625,11 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
       principalId: context.principalId,
       eventStore: bundleFor(context).events,
       turnStore: bundleFor(context).durableTurns as never,
-      authorizeConversation: (conversationId) => ownsConversation(context, conversationId),
+      authorizeConversation: async (conversationId) => {
+        await ownsConversation(context, conversationId);
+        await reconcileFor(context, conversationId);
+        return true;
+      },
       ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
     }),
     ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),

@@ -521,7 +521,10 @@ applies schema validation, application policy, time/concurrency/result limits,
 and a `ToolExecutionLedger`. Production ledgers must make a repeated tool-call
 ID return the first execution promise/result. `runToolLoop` adds bounded
 continuations and records public lifecycle evidence, but the application still
-owns tool side effects and approval policy.
+owns tool side effects and approval policy. The Postgres ledger commits a claim
+before dispatch and reuses completed results. A claim without a result stops
+retries until the host can reconcile the domain outcome; see the
+[crash-recovery and upgrade contract](docs/integration-migration.md#tool-execution-admission-and-crash-recovery).
 
 ### Durable human approval
 
@@ -567,7 +570,7 @@ const assistant = await createHandrailAssistant({
 ```
 
 Allowing execution without a confirmation pause does not bypass schema
-validation, authorization, bounded execution, the exactly-once tool ledger, or
+validation, authorization, bounded execution, the durable tool execution ledger, or
 durable tool lifecycle evidence. For a bulk mutation, prefer one domain-level
 tool whose transaction and audit semantics cover the reviewed batch instead of
 creating one approval proposal per row.
@@ -601,6 +604,49 @@ launcher presentations. Custom `StyledChatPreset` and `HandrailChatWorkspace`
 hosts pass the client's `activity` store. Progress delivery failures are
 diagnosed without failing a mutation, and reports made after tool completion,
 cancellation, or timeout are ignored.
+
+The high-level assistant publishes running and terminal activity from durable
+server status changes, independently of browser stream consumption. Reloading
+or replaying a finished turn does not publish another completion or reset its
+read marker. Custom durable transports can observe the same lifecycle through
+`onTurnStatusChanged`; callback failures emit diagnostics without changing the
+persisted execution outcome.
+
+The default styled chat groups persisted tool calls into one collapsed activity
+panel with counts and statuses. Set `toolActivity` to `"expanded"` or `"hidden"`,
+or supply `renderToolActivity` for custom presentation. The headless
+`ToolActivity` component and `projectToolActivity` selector expose the same
+counts without exposing tool arguments or results. Application result renderers
+remain separate from activity details.
+
+Built-in multiple-conversation clients using negotiated server synchronization
+poll canonical events every second, including while tools run without provider
+frames. `synchronizationPollingMilliseconds` controls this interval. Custom
+runtimes and event stores retain their own synchronization policy; the runtime
+also exposes `synchronize()` and an optional
+`synchronizationIntervalMilliseconds`. Poll failures are diagnosed and retried;
+destroying the runtime stops polling. Recovery of saved active turns runs in
+the background so opening the chat does not wait for execution to finish.
+
+Server activity includes the canonical `turnId` and, when admission history is
+available, `turnRevision`. The Postgres activity store uses these fields to
+reject delayed updates from older turns and to retain terminal/read state.
+`projectConversationActivity` and React `useConversationActivitySnapshot` merge
+server activity with open runtimes. The default launcher and thread pickers use
+this shared rule: same-turn server completion replaces stale local running
+state, while an older turn cannot hide a newer locally admitted request.
+Custom thread lists should use the same projection. Older activity records
+remain readable; the added fields use the existing JSON document schema.
+
+The high-level server reconciles finished durable turns into canonical transcripts
+when the writer finishes and when authorized conversation/synchronization reads
+recover missed work. It reuses stored output and the shared runtime projector;
+it does not start provider or domain-tool execution. Concurrent browser/server
+projection deduplicates frames and retains the winning message identity. Worker
+failure and cancellation can settle without a provider terminal frame; successful
+completion still requires stored completion evidence. Read-time reconciliation
+also retries activity writes that failed after execution finished, preserving
+already-cleared read markers.
 
 `toolExecutorLimits` sets each tool's timeout (30 seconds by default);
 `toolLoopLimits` sets the overall continuation budget (two minutes by default).
@@ -765,3 +811,32 @@ npm run pack:dry-run
 ## License
 
 Copyright (c) Handrail. All rights reserved. See [LICENSE](./LICENSE).
+
+### Observing a retained application tool loop
+
+A migrating provider can use `createTransport({ toolActivity, ... })` to connect
+its existing domain executor to the shared activity UI:
+
+```ts
+const value = await toolActivity.observe({
+  conversationId, turnId, signal,
+  call: { tool_call_id: providerCallId, name: toolName, arguments: args },
+  activity: { summary: "Looking up previous invoice accounts" },
+}, async (report) => {
+  const value = await authorizedDomainExecutor();
+  await report({ summary: "Checking the lookup result" });
+  return { value, isError: false };
+});
+```
+
+This records requested/started/completed or failed tool calls in the canonical
+conversation log, publishes a current summary, and returns the original value.
+The shared details component only exposes names, counts and statuses. The
+observer stores a generic outcome instead of copying domain result data.
+Cancellation is shown from the authoritative turn outcome.
+
+The observer is a migration seam, not an execution ledger or approval decision.
+The supplied executor must retain its existing authorization, validation,
+approval and idempotency rules. Pass the stable provider tool-call identity
+through to that executor. New applications should use SDK tool plugins and the
+bounded SDK tool executor directly.

@@ -298,6 +298,8 @@ export function createEventStoreConversationSyncAdapter<TAuthorizationContext>(
         if (observedRevision !== input.expectedRevision) {
           const duplicate = await duplicateResult(input, proposals, observedRevision);
           if (duplicate !== null) return duplicate;
+          if ((observedRevision ?? 0) > (input.expectedRevision ?? 0)) return Object.freeze({ status: "conflict" as const,
+            expectedRevision: input.expectedRevision, actualRevision: observedRevision });
         }
         const occurredAt = (options.now ?? (() => new Date().toISOString() as ConversationTimestamp))();
         const events = proposals.map(({ mutation, canonical }, index) => parseConversationEvent({

@@ -28,7 +28,7 @@ import {
   type SaveConversationSyncStateInput,
 } from "../sync/persistence.js";
 import type { ApplicationToolResult } from "../protocol.js";
-import type { ToolExecutionLedger } from "../tools/executor.js";
+import { ToolExecutionIdentityConflictError, type ToolExecutionLedger } from "../tools/executor.js";
 import {
   ConversationCatalogError, createConversationCatalogCursor,
   parseArchiveConversationInput, parseClearConversationInput, parseCreateConversationInput,
@@ -61,6 +61,7 @@ import {
   parseConversationActivityRecord,
   type ConversationActivityRecord,
   type DurableConversationActivityStore,
+  retainConversationActivity,
 } from "../conversation/activity.js";
 import { createAttachmentStagingService, type AttachmentBlobStore, type AttachmentStagingMetadataStore,
   type AttachmentStagingLimits, type StagedAttachmentRecord } from "../attachments/staging.js";
@@ -202,7 +203,7 @@ export const handrailPostgresSchemaV1 = Object.freeze([
   `CREATE INDEX IF NOT EXISTS handrail_ai_attachment_blobs_expiry ON handrail_ai_attachment_blobs (tenant_id, expires_at)`,
 ] as const);
 
-export type PostgresDocumentKind = "checkpoint" | "catalog" | "approval" | "turn_state" | "durable_turn" | "activity" | "sync_state" | "openai_continuation" | "attachment" | "usage_outbox";
+export type PostgresDocumentKind = "checkpoint" | "catalog" | "approval" | "turn_state" | "durable_turn" | "activity" | "sync_state" | "openai_continuation" | "attachment" | "usage_outbox" | "tool_execution";
 
 export interface PostgresVersionedDocument<T = unknown> {
   readonly tenantId: string;
@@ -216,6 +217,15 @@ export interface PostgresVersionedDocument<T = unknown> {
 export class PostgresPersistenceConflictError extends Error {
   readonly code = "version_conflict" as const;
   constructor() { super("The durable record version conflicts with current state."); this.name = "PostgresPersistenceConflictError"; }
+}
+
+/** A dispatch was admitted but its outcome is not durably known. Never retry its side effect automatically. */
+export class PostgresToolExecutionUncertainError extends Error {
+  readonly code = "tool_execution_uncertain" as const;
+  constructor() {
+    super("Tool execution is in progress or its outcome requires reconciliation before retrying.");
+    this.name = "PostgresToolExecutionUncertainError";
+  }
 }
 
 export interface AppendPostgresEventsInput<TEvent extends { readonly event_id: string; readonly revision: number }> {
@@ -341,16 +351,43 @@ export class PostgresAiPersistence {
     return Object.freeze(result.rows.map((row) => Object.freeze({ tenantId: tenant, kind, scopeId: scope, recordId: row.record_id, version: Number(row.version), value: jsonClone(row.payload) })));
   }
 
-  async getOrExecuteTool<T>(tenantId: string, toolCallId: string, execute: () => Promise<T>): Promise<T> {
+  /**
+   * Commits admission before dispatch. A lost process/connection leaves the claim
+   * intact, so an uncertain external side effect cannot be dispatched twice.
+   * Completed V1 results remain readable. All workers must honor these claims.
+   */
+  async getOrExecuteTool<T>(tenantId: string, toolCallId: string, execute: () => Promise<T>, requestFingerprint?: string): Promise<T> {
     const tenant = id(tenantId, "tenantId"), call = id(toolCallId, "toolCallId");
-    return this.client.transaction(async (tx) => {
+    const fingerprint = requestFingerprint === undefined ? null : createHash("sha256").update(requestFingerprint).digest("hex");
+    const admission = await this.client.transaction(async (tx) => {
       await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [advisoryLockKey(tenant, "tool", call)]);
       const existing = await tx.query<{ result: T }>("SELECT result FROM handrail_ai_tool_ledger WHERE tenant_id=$1 AND tool_call_id=$2", [tenant, call]);
-      if (existing.rows[0]) return jsonClone(existing.rows[0].result);
-      const result = await execute();
-      await tx.query("INSERT INTO handrail_ai_tool_ledger (tenant_id,tool_call_id,status,result) VALUES ($1,$2,'completed',$3::jsonb)", [tenant, call, JSON.stringify(result)]);
-      return jsonClone(result);
+      const claim = await tx.query<{ version: string; payload: { fingerprint?: string | null } }>(
+        "SELECT version::text AS version,payload FROM handrail_ai_documents WHERE tenant_id=$1 AND kind='tool_execution' AND scope_id='tool' AND record_id=$2",
+        [tenant, call],
+      );
+      // Missing bindings on old completed records are not proof that a new
+      // bound request matches. Return legacy results only to unbound callers.
+      if ((existing.rows[0] || claim.rows[0]) && (claim.rows[0]?.payload.fingerprint ?? null) !== fingerprint) {
+        throw new ToolExecutionIdentityConflictError();
+      }
+      if (existing.rows[0]) return { completed: true as const, result: jsonClone(existing.rows[0].result) };
+      if (claim.rows.length > 0) throw new PostgresToolExecutionUncertainError();
+      await tx.query(
+        "INSERT INTO handrail_ai_documents (tenant_id,kind,scope_id,record_id,version,payload) VALUES ($1,'tool_execution','tool',$2,1,$3::jsonb)",
+        [tenant, call, JSON.stringify({ version: 1, status: "admitted", fingerprint })],
+      );
+      return { completed: false as const };
     });
+    if (admission.completed) return admission.result;
+    // Deliberately outside the admission transaction. A rollback after an external
+    // side effect must never erase the only durable evidence that it was started.
+    const result = await execute();
+    await this.client.transaction(async (tx) => {
+      await tx.query("INSERT INTO handrail_ai_tool_ledger (tenant_id,tool_call_id,status,result) VALUES ($1,$2,'completed',$3::jsonb)",
+        [tenant, call, JSON.stringify(result)]);
+    });
+    return jsonClone(result);
   }
 
   async getToolResult<T>(tenantId: string, toolCallId: string): Promise<T | null> {
@@ -547,6 +584,10 @@ export class PostgresConversationActivityStore implements DurableConversationAct
     for (let attempt = 0; attempt < 12; attempt += 1) {
       const current = await this.persistence.getDocument<ConversationActivityRecord>(this.tenantId, "activity", this.scopeId,
         String(record.conversationId));
+      if (current) {
+        const retained = parseConversationActivityRecord(current.value);
+        if (retainConversationActivity(retained, record) === retained) return retained;
+      }
       try {
         const saved = await this.persistence.compareAndSetDocument({ tenantId: this.tenantId, kind: "activity",
           scopeId: this.scopeId, recordId: String(record.conversationId), expectedVersion: current?.version ?? null, value: record });
@@ -576,7 +617,7 @@ const POSTGRES_USAGE_OUTBOX_SCHEMA_VERSION = 1 as const;
 
 interface PostgresUsageOutboxRecord {
   readonly schemaVersion: typeof POSTGRES_USAGE_OUTBOX_SCHEMA_VERSION;
-  readonly status: "pending" | "failed";
+  readonly status: "pending" | "failed" | "delivered";
   readonly entry: AIRuntimeUsageOutboxEntry;
   readonly lastError?: { readonly code: string; readonly retryable: boolean };
 }
@@ -595,7 +636,7 @@ function usageOutboxEntry(value: AIRuntimeUsageOutboxEntry): AIRuntimeUsageOutbo
 
 function usageOutboxRecord(value: PostgresUsageOutboxRecord): PostgresUsageOutboxRecord {
   if (value?.schemaVersion !== POSTGRES_USAGE_OUTBOX_SCHEMA_VERSION ||
-    (value.status !== "pending" && value.status !== "failed")) {
+    (value.status !== "pending" && value.status !== "failed" && value.status !== "delivered")) {
     throw new TypeError("Postgres usage outbox record is invalid");
   }
   const entry = usageOutboxEntry(value.entry);
@@ -675,17 +716,27 @@ export class PostgresAIRuntimeUsageOutbox implements AIRuntimeUsageOutbox {
 
   async acknowledge(usageReceiptId: string): Promise<void> {
     const recordId = id(usageReceiptId, "usageReceiptId");
-    const current = await this.persistence.getDocument<PostgresUsageOutboxRecord>(
-      this.tenantId, "usage_outbox", this.scopeId, recordId,
-    );
-    if (!current) return;
-    await this.persistence.deleteDocument({
-      tenantId: this.tenantId,
-      kind: "usage_outbox",
-      scopeId: this.scopeId,
-      recordId,
-      expectedVersion: current.version,
-    });
+    // Keep the receipt identity after delivery: terminal-turn reconciliation may
+    // capture it again long after its original settlement was acknowledged.
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const current = await this.persistence.getDocument<PostgresUsageOutboxRecord>(
+        this.tenantId, "usage_outbox", this.scopeId, recordId,
+      );
+      if (!current) return;
+      const retained = usageOutboxRecord(current.value);
+      if (retained.status === "delivered") return;
+      try {
+        await this.persistence.compareAndSetDocument({
+          tenantId: this.tenantId, kind: "usage_outbox", scopeId: this.scopeId,
+          recordId, expectedVersion: current.version,
+          value: usageOutboxRecord({ schemaVersion: POSTGRES_USAGE_OUTBOX_SCHEMA_VERSION,
+            status: "delivered", entry: retained.entry }),
+        });
+        return;
+      } catch (cause) {
+        if (!(cause instanceof PostgresPersistenceConflictError) || attempt === 3) throw cause;
+      }
+    }
   }
 
   async failed(
@@ -703,6 +754,7 @@ export class PostgresAIRuntimeUsageOutbox implements AIRuntimeUsageOutbox {
       );
       if (!current) return;
       const retained = usageOutboxRecord(current.value);
+      if (retained.status === "delivered") return;
       const next = usageOutboxRecord({
         schemaVersion: POSTGRES_USAGE_OUTBOX_SCHEMA_VERSION,
         status: error.retryable ? "pending" : "failed",
@@ -865,14 +917,17 @@ export class PostgresConversationSyncStateStore implements ConversationSyncState
   }
 }
 
-/** Postgres-backed exactly-once result ledger for bounded tool execution. */
+/** Durable dispatch claims and reusable completed results. Uncertain outcomes require host reconciliation. */
 export class PostgresToolExecutionLedger implements ToolExecutionLedger {
-  constructor(readonly persistence: PostgresAiPersistence, readonly tenantId: string) {
+  constructor(readonly persistence: PostgresAiPersistence, readonly tenantId: string, readonly scopeId?: string) {
     id(tenantId, "tenantId");
+    if (scopeId !== undefined) id(scopeId, "scopeId");
   }
 
-  getOrCreate(toolCallId: string, execute: () => Promise<ApplicationToolResult>): Promise<ApplicationToolResult> {
-    return this.persistence.getOrExecuteTool(this.tenantId, toolCallId, execute);
+  getOrCreate(toolCallId: string, execute: () => Promise<ApplicationToolResult>, requestFingerprint?: string): Promise<ApplicationToolResult> {
+    const key = this.scopeId === undefined ? toolCallId
+      : `tool-scope-${createHash("sha256").update(JSON.stringify([this.scopeId, toolCallId])).digest("hex")}`;
+    return this.persistence.getOrExecuteTool(this.tenantId, key, execute, requestFingerprint);
   }
 }
 
@@ -1494,7 +1549,7 @@ export function postgresFromClient(
         }),
         synchronization: new PostgresConversationSyncStateStore(persistence, tenantId),
         events: new PostgresConversationEventStore(persistence, tenantId),
-        toolLedger: new PostgresToolExecutionLedger(persistence, tenantId),
+        toolLedger: new PostgresToolExecutionLedger(persistence, tenantId, scopeId),
         catalog: new PostgresConversationCatalog({
           persistence,
           tenantId,

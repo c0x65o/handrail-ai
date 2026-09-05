@@ -3,6 +3,12 @@ library handrail_ai_client;
 import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import 'src/platform_http_client.dart' as platform_http;
+
+part 'src/session.dart';
+part 'src/submission.dart';
+part 'src/protected_http.dart';
+part 'src/pending_turn_store.dart';
 
 const applicationGatewayProtocolVersion = 'handrail.application-gateway.v1';
 
@@ -57,6 +63,14 @@ class HandrailConversationState {
   final String conversationId;
   final String text;
   final HandrailTurnStatus status;
+
+  /// Observation connectivity is independent of the server-owned run status.
+  final bool observationConnected;
+  final String? turnId;
+  final int? turnRevision;
+  final int? lastSequence;
+  final Set<String> appliedFrameIds;
+  final Set<String> supersededTurnIds;
   final List<Map<String, Object?>> toolCalls;
   final List<Map<String, Object?>> approvals;
   final List<Map<String, Object?>> citations;
@@ -65,6 +79,12 @@ class HandrailConversationState {
     required this.conversationId,
     this.text = '',
     this.status = HandrailTurnStatus.idle,
+    this.observationConnected = false,
+    this.turnId,
+    this.turnRevision,
+    this.lastSequence,
+    this.appliedFrameIds = const {},
+    this.supersededTurnIds = const {},
     this.toolCalls = const [],
     this.approvals = const [],
     this.citations = const [],
@@ -76,12 +96,43 @@ class HandrailConversationState {
         ? Map<String, Object?>.from(frame.data['event'] as Map)
         : frame.data;
     final type = payload['type'];
-    var nextStatus = status, nextText = text;
-    final nextTools = [...toolCalls],
-        nextApprovals = [...approvals],
-        nextCitations = [...citations],
-        nextAttachments = [...attachments];
-    if (type == 'response.started') nextStatus = HandrailTurnStatus.running;
+    final incomingTurn =
+        frame.data['turnId'] as String? ?? payload['request_id'] as String?;
+    if (incomingTurn != null && supersededTurnIds.contains(incomingTurn))
+      return this;
+    final differentTurn =
+        incomingTurn != null && turnId != null && incomingTurn != turnId;
+    if (differentTurn && type != 'response.started' && frame.type != 'started')
+      return this;
+    final sequence = payload['sequence'] as int?;
+    if (!differentTurn &&
+        (frame.id != null && appliedFrameIds.contains(frame.id) ||
+            sequence != null &&
+                lastSequence != null &&
+                sequence <= lastSequence!)) return this;
+    if (!differentTurn &&
+        turnId != null &&
+        _terminalStatus(status) &&
+        (frame.type == 'started' ||
+            type == 'response.started' ||
+            type == 'response.text.delta' ||
+            type == 'response.tool_call')) return this;
+    var nextStatus = differentTurn ? HandrailTurnStatus.idle : status;
+    var nextText = differentTurn ? '' : text;
+    var connected = frame.type == 'event' || frame.type == 'started'
+        ? true
+        : observationConnected;
+    final nextTools = differentTurn ? <Map<String, Object?>>[] : [...toolCalls],
+        nextApprovals =
+            differentTurn ? <Map<String, Object?>>[] : [...approvals],
+        nextCitations =
+            differentTurn ? <Map<String, Object?>>[] : [...citations],
+        nextAttachments =
+            differentTurn ? <Map<String, Object?>>[] : [...attachments];
+    if (frame.type == 'started' || type == 'response.started') {
+      nextStatus = HandrailTurnStatus.running;
+      connected = true;
+    }
     if (type == 'response.text.delta')
       nextText += payload['delta'] as String? ?? '';
     if (type == 'response.tool_call') {
@@ -107,13 +158,23 @@ class HandrailConversationState {
         nextStatus = HandrailTurnStatus.completed;
       if (terminalStatus == 'cancelled')
         nextStatus = HandrailTurnStatus.cancelled;
-      if (terminalStatus == 'failed' || terminalStatus == 'disconnected')
-        nextStatus = HandrailTurnStatus.failed;
+      if (terminalStatus == 'failed') nextStatus = HandrailTurnStatus.failed;
+      connected = false;
     }
     return HandrailConversationState(
       conversationId: conversationId,
       text: nextText,
       status: nextStatus,
+      observationConnected: _terminalStatus(nextStatus) ? false : connected,
+      turnId: incomingTurn ?? turnId,
+      turnRevision: differentTurn ? null : turnRevision,
+      lastSequence: sequence ?? (differentTurn ? null : lastSequence),
+      appliedFrameIds: Set.unmodifiable({
+        if (!differentTurn) ...appliedFrameIds,
+        if (frame.id != null && sequence == null) frame.id!
+      }),
+      supersededTurnIds:
+          Set.unmodifiable({...supersededTurnIds, if (differentTurn) turnId!}),
       toolCalls: List.unmodifiable(nextTools),
       approvals: List.unmodifiable(nextApprovals),
       citations: List.unmodifiable(nextCitations),
@@ -122,10 +183,18 @@ class HandrailConversationState {
   }
 }
 
+bool _terminalStatus(HandrailTurnStatus status) =>
+    status == HandrailTurnStatus.completed ||
+    status == HandrailTurnStatus.cancelled ||
+    status == HandrailTurnStatus.failed;
+
 class HandrailConversationWorkspaceEntry {
   final HandrailConversationState state;
   final bool unread;
-  const HandrailConversationWorkspaceEntry(this.state, {this.unread = false});
+  final String? summary;
+  final HandrailConversationActivityProgress? progress;
+  const HandrailConversationWorkspaceEntry(this.state,
+      {this.unread = false, this.summary, this.progress});
 }
 
 class HandrailConversationActivityProgress {
@@ -149,6 +218,8 @@ class HandrailConversationActivityProgress {
 
 class HandrailConversationActivityRecord {
   final String conversationId;
+  final String? turnId;
+  final int? turnRevision;
   final HandrailTurnStatus status;
   final bool unread;
   final DateTime? updatedAt;
@@ -156,6 +227,8 @@ class HandrailConversationActivityRecord {
   final HandrailConversationActivityProgress? progress;
   const HandrailConversationActivityRecord({
     required this.conversationId,
+    this.turnId,
+    this.turnRevision,
     required this.status,
     required this.unread,
     this.updatedAt,
@@ -173,6 +246,8 @@ class HandrailConversationActivityRecord {
     };
     return HandrailConversationActivityRecord(
       conversationId: json['conversationId'] as String,
+      turnId: json['turnId'] as String?,
+      turnRevision: json['turnRevision'] as int?,
       status: status,
       unread: json['unread'] == true,
       updatedAt: json['updatedAt'] is String
@@ -271,14 +346,38 @@ class HandrailConversationWorkspace {
   void replaceRemoteActivity(
     Iterable<HandrailConversationActivityRecord> records,
   ) {
-    _remoteActivity.clear();
+    final next = <String, HandrailConversationActivityRecord>{};
     for (final record in records) {
       if (record.conversationId.isEmpty || record.conversationId.length > 256)
         throw ArgumentError.value(record.conversationId, 'conversationId');
-      if (_remoteActivity.containsKey(record.conversationId))
+      if (next.containsKey(record.conversationId))
         throw ArgumentError('Duplicate remote conversation activity');
-      _remoteActivity[record.conversationId] = record;
+      final previous = _remoteActivity[record.conversationId];
+      final olderRevision = previous?.turnRevision != null &&
+          record.turnRevision != null &&
+          record.turnRevision! < previous!.turnRevision!;
+      final olderTime = previous?.updatedAt != null &&
+          record.updatedAt != null &&
+          record.updatedAt!.isBefore(previous!.updatedAt!);
+      final staleUnread = previous != null &&
+          !previous.unread &&
+          record.unread &&
+          previous.turnId == record.turnId &&
+          previous.turnRevision == record.turnRevision &&
+          previous.updatedAt != null &&
+          previous.updatedAt == record.updatedAt &&
+          previous.status == record.status &&
+          _terminalStatus(record.status);
+      next[record.conversationId] = staleUnread ||
+              olderRevision ||
+              (!((record.turnRevision ?? 0) > (previous?.turnRevision ?? 0)) &&
+                  olderTime)
+          ? previous
+          : record;
     }
+    _remoteActivity
+      ..clear()
+      ..addAll(next);
     _publish();
   }
 
@@ -287,6 +386,8 @@ class HandrailConversationWorkspace {
     if (current == null || !current.unread) return;
     _remoteActivity[conversationId] = HandrailConversationActivityRecord(
       conversationId: current.conversationId,
+      turnId: current.turnId,
+      turnRevision: current.turnRevision,
       status: current.status,
       unread: false,
       updatedAt: current.updatedAt,
@@ -296,9 +397,56 @@ class HandrailConversationWorkspace {
     _publish();
   }
 
+  HandrailConversationWorkspaceEntry _projectEntry(
+      HandrailConversationWorkspaceEntry entry) {
+    final state = entry.state;
+    final remote = _remoteActivity[state.conversationId];
+    if (remote == null) return entry;
+    final olderTurn = remote.turnId != null &&
+        state.supersededTurnIds.contains(remote.turnId);
+    final olderRevision = remote.turnRevision != null &&
+        state.turnRevision != null &&
+        remote.turnRevision! < state.turnRevision!;
+    final terminalAlreadyKnown = remote.turnId != null &&
+        remote.turnId == state.turnId &&
+        _terminalStatus(state.status) &&
+        (remote.status == HandrailTurnStatus.running ||
+            remote.status == HandrailTurnStatus.waitingForTool);
+    final unversionedWhileConnected = remote.turnId == null &&
+        state.observationConnected &&
+        (state.status == HandrailTurnStatus.running ||
+            state.status == HandrailTurnStatus.waitingForTool);
+    final localWins = olderTurn ||
+        olderRevision ||
+        terminalAlreadyKnown ||
+        unversionedWhileConnected;
+    return HandrailConversationWorkspaceEntry(
+      HandrailConversationState(
+        conversationId: state.conversationId,
+        text: state.text,
+        status: localWins ? state.status : remote.status,
+        observationConnected: state.observationConnected,
+        turnId: localWins ? state.turnId : remote.turnId ?? state.turnId,
+        turnRevision: localWins
+            ? state.turnRevision
+            : remote.turnRevision ?? state.turnRevision,
+        lastSequence: state.lastSequence,
+        appliedFrameIds: state.appliedFrameIds,
+        supersededTurnIds: state.supersededTurnIds,
+        toolCalls: state.toolCalls,
+        approvals: state.approvals,
+        citations: state.citations,
+        attachments: state.attachments,
+      ),
+      unread: olderTurn || olderRevision ? entry.unread : remote.unread,
+      summary: localWins ? entry.summary : remote.summary,
+      progress: localWins ? entry.progress : remote.progress,
+    );
+  }
+
   HandrailConversationWorkspaceSnapshot _snapshot() {
     final values = List<HandrailConversationWorkspaceEntry>.unmodifiable(
-      _entries.values,
+      _entries.values.map(_projectEntry),
     );
     final unopened = _remoteActivity.values.where(
       (record) => !_entries.containsKey(record.conversationId),
@@ -593,13 +741,50 @@ class HandrailAiClient {
         http.Request('POST', _uri(path))..body = jsonEncode(payload),
       );
 
-  Stream<HandrailStreamFrame> _streamRequest(http.Request request) async* {
+  Stream<HandrailStreamFrame> _streamRequest(http.Request source) {
+    final abort = Completer<void>();
+    StreamSubscription<HandrailStreamFrame>? subscription;
+    late StreamController<HandrailStreamFrame> controller;
+    var cancelled = false;
+    controller = StreamController<HandrailStreamFrame>(
+      onListen: () {
+        final request = http.AbortableRequest(source.method, source.url,
+            abortTrigger: abort.future)
+          ..headers.addAll(source.headers)
+          ..bodyBytes = source.bodyBytes
+          ..followRedirects = false;
+        subscription =
+            _readStreamRequest(request, abort.future).listen((frame) {
+          if (!cancelled) controller.add(frame);
+        }, onError: (Object error, StackTrace stack) {
+          if (!cancelled) controller.addError(error, stack);
+        }, onDone: () {
+          if (!cancelled) controller.close();
+        });
+      },
+      onPause: () => subscription?.pause(),
+      onResume: () => subscription?.resume(),
+      onCancel: () async {
+        cancelled = true;
+        if (!abort.isCompleted) abort.complete();
+        await subscription?.cancel();
+      },
+    );
+    return controller.stream;
+  }
+
+  Stream<HandrailStreamFrame> _readStreamRequest(
+      http.Request request, Future<void> aborted) async* {
     final operation = request.url.path;
     final started = DateTime.now();
     _diagnose(operation, 'started');
     try {
-      request.headers.addAll(await _headers());
-      final response = await _http.send(request);
+      Future<T> cancellable<T>(Future<T> operation) => Future.any([
+            operation,
+            aborted.then<T>((_) => throw http.RequestAbortedException()),
+          ]);
+      request.headers.addAll(await cancellable(_headers()));
+      final response = await cancellable(_http.send(request));
       if (response.statusCode < 200 || response.statusCode >= 300)
         throw HandrailGatewayException(
           'stream_request_failed',
@@ -609,16 +794,25 @@ class HandrailAiClient {
         );
       String? eventType, eventId;
       final data = <String>[];
+      var sawTerminal = false;
+      Map<String, Object?>? checkpoint;
+      final expectsTerminal = operation.endsWith('/turns/start') ||
+          operation.endsWith('/turns/resume');
       await for (final line in response.stream
           .transform(utf8.decoder)
           .transform(const LineSplitter())) {
         if (line.isEmpty) {
-          if (data.isNotEmpty)
-            yield HandrailStreamFrame(
-              eventType ?? 'message',
-              eventId,
-              Map<String, Object?>.from(jsonDecode(data.join('\n')) as Map),
-            );
+          if (data.isNotEmpty) {
+            final decoded =
+                Map<String, Object?>.from(jsonDecode(data.join('\n')) as Map);
+            final frame =
+                HandrailStreamFrame(eventType ?? 'message', eventId, decoded);
+            sawTerminal |= frame.type == 'terminal';
+            if (decoded['checkpoint'] is Map)
+              checkpoint =
+                  Map<String, Object?>.from(decoded['checkpoint'] as Map);
+            yield frame;
+          }
           eventType = null;
           eventId = null;
           data.clear();
@@ -636,6 +830,15 @@ class HandrailAiClient {
           eventId = value;
         else if (field == 'data') data.add(value);
       }
+      if (expectsTerminal && !sawTerminal) {
+        yield HandrailStreamFrame('terminal', null, {
+          'type': 'terminal',
+          'result': {
+            'status': 'disconnected',
+            if (checkpoint != null) 'checkpoint': checkpoint
+          },
+        });
+      }
       _diagnose(
         operation,
         'succeeded',
@@ -643,6 +846,10 @@ class HandrailAiClient {
         statusCode: response.statusCode,
       );
     } catch (error) {
+      if (error is http.RequestAbortedException) {
+        _diagnose(operation, 'cancelled', started: started);
+        return;
+      }
       _diagnose(
         operation,
         'failed',

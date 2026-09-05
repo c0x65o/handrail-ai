@@ -5,9 +5,65 @@ import {
   createInMemoryLiveConversationActivityDelivery,
   InMemoryConversationActivityStore,
   PollingConversationActivity,
+  type ConversationActivityRecord,
 } from "../src/index.js";
 
 describe("conversation activity", () => {
+  it("does not erase live activity with a snapshot requested before that activity arrived", async () => {
+    let completeLoad!: (records: ConversationActivityRecord[]) => void;
+    const pending = new Promise<ConversationActivityRecord[]>((resolve) => { completeLoad = resolve; });
+    const delivery = createInMemoryLiveConversationActivityDelivery();
+    const activity = new PollingConversationActivity({ load: () => pending, intervalMilliseconds: 60_000,
+      subscribe: (signal) => (async function* () {
+        for await (const envelope of delivery.subscribe(signal)) yield envelope.record;
+      })() });
+    activity.start();
+    try {
+      await delivery.publish({ conversationId: "new", turnStatus: "running", unread: false });
+      await vi.waitFor(() => expect(activity.getSnapshot()).toHaveLength(1));
+      completeLoad([{ conversationId: "new", turnStatus: "completed", unread: true }]);
+      await pending;
+      await Promise.resolve();
+      expect(activity.getSnapshot()[0]).toMatchObject({ conversationId: "new", turnStatus: "running" });
+    } finally { activity.stop(); }
+  });
+
+  it("keeps one poll timer after manual refreshes and ignores a stopped request's late response", async () => {
+    vi.useFakeTimers();
+    const activity = new PollingConversationActivity({ load: async () => [], intervalMilliseconds: 1_000 });
+    try {
+      await activity.refresh();
+      await activity.refresh();
+      await activity.refresh();
+      expect(vi.getTimerCount()).toBe(1);
+      activity.stop();
+      expect(vi.getTimerCount()).toBe(0);
+      let finish!: (records: ConversationActivityRecord[]) => void;
+      const stopped = new PollingConversationActivity({ load: () => new Promise<ConversationActivityRecord[]>((resolve) => { finish = resolve; }) });
+      const changed = vi.fn(); stopped.subscribe(changed);
+      const refresh = stopped.refresh();
+      stopped.stop();
+      finish([{ conversationId: "late", turnStatus: "running", unread: false }]);
+      await refresh;
+      expect(changed).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { activity.stop(); vi.useRealTimers(); }
+  });
+
+  it("keeps completion and read state when live delivery and polling arrive out of order", () => {
+    const store = new InMemoryConversationActivityStore();
+    const turn = { conversationId: "conversation", turnId: "first", turnRevision: 2 };
+    store.upsert({ ...turn, turnStatus: "completed", unread: true });
+    store.replace([{ ...turn, turnStatus: "running", unread: false }]);
+    expect(store.getSnapshot()[0]).toMatchObject({ turnStatus: "completed", unread: true });
+    store.replace([{ ...turn, turnStatus: "completed", unread: false }]);
+    store.upsert({ ...turn, turnStatus: "completed", unread: true });
+    expect(store.getSnapshot()[0]?.unread).toBe(false);
+    store.upsert({ ...turn, turnId: "second", turnRevision: 20, turnStatus: "running", unread: false });
+    store.replace([{ ...turn, turnStatus: "completed", unread: true }]);
+    expect(store.getSnapshot()[0]).toMatchObject({ turnId: "second", turnStatus: "running" });
+  });
+
   it("tracks remote running, unread completion, errors, and read state", () => {
     const store = new InMemoryConversationActivityStore();
     const changed = vi.fn(); store.subscribe(changed);

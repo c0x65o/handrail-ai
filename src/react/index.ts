@@ -18,6 +18,7 @@ export {
 } from "./message-actions.js";
 export {
   useConversationLauncherBinding,
+  useConversationActivitySnapshot,
   useConversationWorkspaceSnapshot,
   type ConversationLauncherBinding,
   type ConversationActivityReadable,
@@ -298,3 +299,4 @@ export {
   type UseRealtimeVoiceControlsOptions,
 } from "./realtime-voice.js";
 export * from "./primitives.js";
+export { ToolActivity, type ToolActivityProps } from "./tool-activity.js";

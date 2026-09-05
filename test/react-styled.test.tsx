@@ -1,11 +1,56 @@
 // @vitest-environment jsdom
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import { parseConversationEvent } from "../src/conversation/events.js";
+import { reduceConversationEvent } from "../src/conversation/reducer.js";
 import { createInitialConversationState } from "../src/conversation/state.js";
 import { InMemoryConversationActivityStore } from "../src/conversation/activity.js";
 import { CatalogWorkspaceThreadPicker, HandrailAssistantLauncher, StandardConversationTitleObserver, StandardGatewayApprovals, StyledChatLauncher, StyledChatPreset, StyledChatPresetStyles, WorkspaceThreadPicker, createHandrailChatThemeStyle, gatewayAttachmentIntake, installToolRendererPlugins } from "../src/react-styled/index.js";
 
 describe("styled React preset", () => {
+  it("shows server completion for an open disconnected thread in both launcher and picker", () => {
+    const state = { ...createInitialConversationState("conversation" as never),
+      turns: [{ turn_id: "turn", status: "running" }] };
+    const snapshot = { selectedConversationId: null, runningCount: 1, errorCount: 0, unreadCount: 0,
+      threads: [{ conversationId: "conversation", runtime: { getSnapshot: () => state },
+        turnStatus: "running", unread: false, revision: 2 }] };
+    const workspace = { getSnapshot: () => snapshot, subscribe: () => () => undefined,
+      open: vi.fn(), select: vi.fn(), markRead: vi.fn() };
+    const activity = new InMemoryConversationActivityStore();
+    activity.upsert({ conversationId: "conversation", turnId: "turn", turnRevision: 2,
+      turnStatus: "completed", unread: true });
+    const view = render(<><StyledChatLauncher workspace={workspace as never} activity={activity}/>
+      <WorkspaceThreadPicker workspace={workspace as never} activity={activity}/></>);
+    const trigger = view.container.querySelector<HTMLButtonElement>(".hr-chat__launcher-trigger")!;
+    expect(trigger.dataset.turnStatus).toBe("completed");
+    expect(trigger.dataset.unreadCount).toBe("1");
+    expect(screen.getByRole("button", { name: "conversation Done" })).toBeTruthy();
+    expect(screen.queryByText(/running\)/)).toBeNull();
+    act(() => activity.upsert({ conversationId: "conversation", turnId: "turn", turnRevision: 2,
+      turnStatus: "completed", unread: false }));
+    expect(trigger.dataset.unreadCount).toBe("0");
+    expect(screen.queryByRole("button", { name: "conversation Done" })).toBeNull();
+  });
+
+  it("clears a stale running summary as soon as canonical completion arrives", () => {
+    const activity = new InMemoryConversationActivityStore();
+    const initial = createInitialConversationState("conversation" as never);
+    const started = reduceConversationEvent(initial, parseConversationEvent({ version: 1, conversation_id: "conversation",
+      event_id: "start", revision: 1, occurred_at: "2026-09-04T00:00:00.000Z", actor: { type: "assistant" },
+      source: { type: "runtime" }, payload: { type: "turn.started", turn_id: "turn", input_message_ids: ["input"] } }));
+    activity.upsert({ conversationId: "conversation", turnId: "turn", turnStatus: "running", unread: false,
+      summary: "Comparing revenue" });
+    const view = render(<StyledChatPreset state={started} activity={activity}/>);
+    expect(screen.getByText("Comparing revenue")).toBeTruthy();
+    const completed = reduceConversationEvent(started, parseConversationEvent({ version: 1, conversation_id: "conversation",
+      event_id: "complete", revision: 2, occurred_at: "2026-09-04T00:00:01.000Z", actor: { type: "assistant" },
+      source: { type: "runtime" }, payload: { type: "turn.completed", turn_id: "turn", outcome: "stop", output_message_ids: [] } }));
+    view.rerender(<StyledChatPreset state={completed} activity={activity}/>);
+    expect(screen.queryByText("Comparing revenue")).toBeNull();
+    expect(screen.getByText("Done")).toBeTruthy();
+    view.unmount();
+  });
+
   it("shows one current summary in the open conversation and clears it on completion", () => {
     const activity = new InMemoryConversationActivityStore();
     const state = createInitialConversationState("bulk-revenue" as never);
@@ -236,7 +281,8 @@ describe("styled React preset", () => {
   });
   it("binds completion and unread workspace state to the launcher button", () => {
     const snapshot = { selectedConversationId: "second", runningCount: 0, errorCount: 0,
-      unreadCount: 1, threads: [] } as never;
+      unreadCount: 1, threads: [{ conversationId: "first", runtime: {}, turnStatus: "completed",
+        unread: true, revision: 2 }] } as never;
     const { container } = render(<StyledChatLauncher title="Aegis" workspace={{ getSnapshot: () => snapshot,
       subscribe: () => () => undefined }}/>);
     const trigger = container.querySelector<HTMLButtonElement>(".hr-chat__launcher-trigger")!;
