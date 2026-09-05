@@ -5,6 +5,8 @@ behavioral parity for owner testing. This checklist is incomplete until each
 requirement has evidence from the relevant SDK and host paths. Passing unit
 tests alone does not establish live host parity.
 
+**Latest package:** [0.2.8 synchronization fixes](synchronization-fix-2026-09-05.md); earlier package evidence below is retained as history.
+
 ## Current qualification status — 2026-09-05
 
 The current source and packaged integrations have substantial automated evidence.

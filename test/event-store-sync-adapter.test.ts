@@ -52,6 +52,27 @@ function adapter(store: InMemoryConversationEventStore, userId: string, clientId
 }
 
 describe("event-store conversation synchronization adapter", () => {
+  it("returns a conflict when history advances during validation, but still denies invalid current batches", async () => {
+    const store = new InMemoryConversationEventStore();
+    const writer = adapter(store, "user", "writer");
+    let advance = true;
+    const sync = createEventStoreConversationSyncAdapter({ authorizationContext: {}, eventStore: store, authorize: () => true,
+      canonicalizeMutation: ({ proposedEvent }) => ({ actor: { type: "user" }, source: proposedEvent.source, payload: proposedEvent.payload }),
+      createEventId: () => "validation-race" as never,
+      async validateCanonicalBatch() {
+        if (advance) {
+          advance = false;
+          await writer.sync.appendMutations({ conversationId, expectedRevision: null, mutations: [proposal("concurrent", 1)] });
+        }
+        throw new TypeError("The replay advanced or the transition is invalid");
+      } });
+    await expect(sync.appendMutations({ conversationId, expectedRevision: null, mutations: [proposal("obsolete", 1)] }))
+      .resolves.toMatchObject({ status: "conflict", actualRevision: 1 });
+    await expect(sync.appendMutations({ conversationId, expectedRevision: 1 as never, mutations: [proposal("invalid", 2)] }))
+      .resolves.toMatchObject({ status: "unauthorized" });
+    expect(await store.getLatestRevision(conversationId)).toBe(1);
+  });
+
   it("returns a newer canonical revision before validating an obsolete batch", async () => {
     const store = new InMemoryConversationEventStore();
     const first = adapter(store, "user", "first");

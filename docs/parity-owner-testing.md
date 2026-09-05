@@ -1,6 +1,8 @@
 # SDK parity: owner testing handoff
 
-Current candidate: **@handrail/ai-assistant 0.2.7, 5683009ec79b**; shared Dart
+**Latest synchronization update:** [0.2.8 package and validation](synchronization-fix-2026-09-05.md). Older installation evidence below remains historical.
+
+Previous candidate: **@handrail/ai-assistant 0.2.7, 5683009ec79b**; shared Dart
 client **0.1.1**. This is the current local, unpublished integration in the AI
 Chatbot group: Mills Family Office web/mobile, Spartan Cyber ERP web/mobile,
 and Handrail AI Assistant SDK. No commit, push, PR, publication or deployment has

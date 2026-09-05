@@ -314,13 +314,22 @@ export function createEventStoreConversationSyncAdapter<TAuthorizationContext>(
           ...(canonical.metadata === undefined ? {} : { metadata: canonical.metadata }),
           payload: canonical.payload,
         }));
-        await options.validateCanonicalBatch?.({
-          authorizationContext: options.authorizationContext,
-          conversationId: input.conversationId,
-          expectedRevision: input.expectedRevision,
-          events: Object.freeze(events),
-          proposedEvents: Object.freeze(proposals.map(({ proposedEvent }) => proposedEvent)),
-        });
+        try {
+          await options.validateCanonicalBatch?.({
+            authorizationContext: options.authorizationContext,
+            conversationId: input.conversationId,
+            expectedRevision: input.expectedRevision,
+            events: Object.freeze(events),
+            proposedEvents: Object.freeze(proposals.map(({ proposedEvent }) => proposedEvent)),
+          });
+        } catch (error) {
+          // Validation replays history, which may advance after the revision read
+          // above. Let the client catch up instead of classifying that race as denial.
+          const latest = await options.eventStore.getLatestRevision(input.conversationId);
+          if ((latest ?? 0) > (observedRevision ?? 0)) return Object.freeze({ status: "conflict" as const,
+            expectedRevision: input.expectedRevision, actualRevision: latest });
+          throw error;
+        }
         try {
           const appended = await options.eventStore.append({ conversationId: input.conversationId,
             expectedRevision: input.expectedRevision, events });

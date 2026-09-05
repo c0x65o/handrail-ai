@@ -5,7 +5,7 @@ describe("Postgres reference persistence", () => {
   it("uses tenant-scoped transactions and contiguous event revisions", async () => {
     const query = vi.fn(async (text: string, values?: readonly unknown[]) => {
       void values;
-      return text.includes("ORDER BY revision DESC")
+      return text.includes("ORDER BY handrail_ai_events.revision DESC")
         ? { rows: [{ revision: "4" }], rowCount: 1 } : { rows: [], rowCount: 1 };
     });
     const client: PostgresSqlClient = { query: query as unknown as PostgresSqlClient["query"], transaction: async (operation) => operation(client) };

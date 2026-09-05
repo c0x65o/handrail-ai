@@ -119,7 +119,7 @@ describe("Postgres high-level adapters", () => {
           const latest = [...events].reverse().find((event) => event.revision >= minimum);
           return { rows: latest ? [{ revision: String(latest.revision) }] : [], rowCount: latest ? 1 : 0 };
         }
-        if (sql.includes("ORDER BY revision DESC")) {
+        if (sql.includes("ORDER BY handrail_ai_events.revision DESC")) {
           const latest = lagLatestRead ? events.at(-2) : events.at(-1);
           return { rows: latest ? [{ revision: String(latest.revision) }] : [], rowCount: latest ? 1 : 0 };
         }

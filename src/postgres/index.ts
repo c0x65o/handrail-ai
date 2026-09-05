@@ -269,7 +269,7 @@ export class PostgresAiPersistence {
     const expected = version(input.expectedRevision, "expectedRevision");
     return this.client.transaction(async (tx) => {
       await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [advisoryLockKey(tenant, conversation)]);
-      const latest = await tx.query<{ revision: string }>("SELECT revision::text AS revision FROM handrail_ai_events WHERE tenant_id=$1 AND conversation_id=$2 ORDER BY revision DESC LIMIT 1", [tenant, conversation]);
+      const latest = await tx.query<{ revision: string }>("SELECT revision::text AS revision FROM handrail_ai_events WHERE tenant_id=$1 AND conversation_id=$2 ORDER BY handrail_ai_events.revision DESC LIMIT 1", [tenant, conversation]);
       const actual = latest.rows[0] ? Number(latest.rows[0].revision) : null;
       if (actual !== expected) throw new PostgresPersistenceConflictError();
       let next = (expected ?? 0) + 1;
@@ -1192,7 +1192,7 @@ export class PostgresConversationEventStore implements ConversationEventStore {
       let actual = await this.latest(tx, input.conversationId);
       if (input.expectedRevision !== null && (actual ?? 0) < input.expectedRevision) {
         const evidence = await tx.query<{ revision: string }>(
-          "SELECT revision::text AS revision FROM handrail_ai_events WHERE tenant_id=$1 AND conversation_id=$2 AND revision >= $3 ORDER BY revision DESC LIMIT 1",
+          "SELECT revision::text AS revision FROM handrail_ai_events WHERE tenant_id=$1 AND conversation_id=$2 AND revision >= $3 ORDER BY handrail_ai_events.revision DESC LIMIT 1",
           [this.tenantId, input.conversationId, input.expectedRevision],
         );
         const evidencedRevision = evidence.rows[0] ? Number(evidence.rows[0].revision) as ConversationRevision : null;
@@ -1239,7 +1239,7 @@ export class PostgresConversationEventStore implements ConversationEventStore {
 
   private async latest(client: PostgresSqlClient, conversationId: ConversationId): Promise<ConversationRevision | null> {
     const result = await client.query<{ revision: string }>(
-      "SELECT revision::text AS revision FROM handrail_ai_events WHERE tenant_id=$1 AND conversation_id=$2 ORDER BY revision DESC LIMIT 1",
+      "SELECT revision::text AS revision FROM handrail_ai_events WHERE tenant_id=$1 AND conversation_id=$2 ORDER BY handrail_ai_events.revision DESC LIMIT 1",
       [this.tenantId, conversationId],
     );
     return result.rows[0] ? Number(result.rows[0].revision) as ConversationRevision : null;
