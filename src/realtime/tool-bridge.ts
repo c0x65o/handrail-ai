@@ -8,6 +8,7 @@ import {
 import {
   CONVERSATION_EVENT_VERSION,
   parseConversationEvent,
+  type ConversationEvent,
   type ConversationApprovalProposalId,
   type ConversationApprovalReviewedArguments,
   type ConversationId,
@@ -15,6 +16,8 @@ import {
   type ConversationToolCallId,
   type ConversationTurnId,
 } from "../conversation/events.js";
+import { replayConversation } from "../conversation/replay.js";
+import { originalApprovalEvidence } from "../conversation/approval-evidence.js";
 import type { ConversationEventAttribution } from "../conversation/state.js";
 import type { JsonObject, JsonValue, ToolDefinition, ToolResultContentPart } from "../protocol.js";
 import type { ApprovalExecutionResume } from "../tools/approval-execution.js";
@@ -531,6 +534,8 @@ class RealtimeVoiceServerToolBridgeImpl<
         fingerprint,
         controller.signal,
       );
+    } catch {
+      return completedErrorOutcome(call, "Tool approval or execution is temporarily unavailable.");
     } finally {
       callerSignal.removeEventListener("abort", abort);
       session.controller.signal.removeEventListener("abort", abort);
@@ -555,9 +560,18 @@ class RealtimeVoiceServerToolBridgeImpl<
         proposalId,
         signal,
       });
-      return approval?.proposalId === proposalId ? approval : undefined;
+      if (approval?.proposalId !== proposalId) return undefined;
+      const proposal = await this.#approvalWorkflow.proposalStore.get({
+        permissionContext: session.approval.permissionContext, proposalId,
+      });
+      if (proposal === null || proposal.turn_id !== session.approval.turnId || proposal.tool_name !== call.name) {
+        throw new RealtimeVoiceToolBridgeError("unavailable");
+      }
+      await recordProposalEvent(this.#approvalWorkflow.eventStore, session.approval.conversationId,
+        proposal, await scopedIdentity("call", call.session_id, call.call_id) as ConversationToolCallId);
+      return approval;
     } catch {
-      return undefined;
+      throw new RealtimeVoiceToolBridgeError("unavailable");
     }
   }
 
@@ -597,7 +611,7 @@ class RealtimeVoiceServerToolBridgeImpl<
         workflow.expiresAt(reviewInput),
       ]);
       const scopedCallId = await scopedIdentity("call", call.session_id, call.call_id);
-      const proposal = await workflow.proposalStore.create({
+      const created = await workflow.proposalStore.create({
         permissionContext: approval.permissionContext,
         proposalId,
         turnId: approval.turnId,
@@ -609,11 +623,18 @@ class RealtimeVoiceServerToolBridgeImpl<
         idempotencyKey: `realtime-proposal:${fingerprint}`,
         idempotencyFingerprint: `realtime-proposal:${fingerprint}`,
       });
+      // Idempotent creation may return the original pending snapshot after a
+      // later decision. Publish only the current durable proposal state.
+      const proposal = await workflow.proposalStore.get({
+        permissionContext: approval.permissionContext, proposalId: created.proposal_id,
+      });
+      if (proposal === null || proposal.status !== "pending") {
+        throw new RealtimeVoiceToolBridgeError("unavailable");
+      }
       await recordProposalEvent(
         workflow.eventStore,
         approval.conversationId,
         proposal,
-        approval.attribution,
         scopedCallId as ConversationToolCallId,
       );
       return Object.freeze({
@@ -850,66 +871,121 @@ async function recordProposalEvent(
   eventStore: ConversationEventStore,
   conversationId: ConversationId,
   proposal: Awaited<ReturnType<ApprovalProposalStore<unknown>["create"]>>,
-  attribution: ConversationEventAttribution,
   toolCallId: ConversationToolCallId,
 ): Promise<void> {
-  if (await hasProposalEvent(eventStore, conversationId, proposal.proposal_id)) return;
+  if (proposal.tool_call_id !== toolCallId) throw new RealtimeVoiceToolBridgeError("unavailable");
   for (let attempt = 0; attempt < REALTIME_VOICE_TOOL_LIMITS.approvalEventAppendAttempts; attempt += 1) {
-    const latest = await eventStore.getLatestRevision(conversationId);
-    const revision = ((latest ?? 0) + 1) as never;
-    const event = parseConversationEvent({
-      version: CONVERSATION_EVENT_VERSION,
-      event_id: `approval-created:${proposal.proposal_id}`,
-      conversation_id: conversationId,
-      revision,
-      occurred_at: proposal.created_at,
-      actor: attribution.actor,
-      source: attribution.source,
-      payload: {
-        type: "approval.proposal_created",
-        proposal_id: proposal.proposal_id,
-        ...(proposal.group_id === null ? {} : { group_id: proposal.group_id }),
-        turn_id: proposal.turn_id,
-        tool_call_id: toolCallId,
-        tool_name: proposal.tool_name,
-        status: "pending",
-        proposal_version: 1,
-        expires_at: proposal.expires_at,
-        reviewed_arguments: proposal.reviewed_arguments,
+    let reads = 0;
+    const boundedStore: ConversationEventStore = {
+      getLatestRevision: (id) => eventStore.getLatestRevision(id),
+      append: (input) => eventStore.append(input),
+      read: (input) => {
+        if (++reads > REALTIME_VOICE_TOOL_LIMITS.approvalEventReadPages) {
+          throw new RealtimeVoiceToolBridgeError("unavailable");
+        }
+        return eventStore.read({ ...input, limit: REALTIME_VOICE_TOOL_LIMITS.approvalEventReadPageSize });
       },
+      ...(eventStore.checkpoints ? { checkpoints: eventStore.checkpoints } : {}),
+    };
+    const replay = await replayConversation({ conversationId, eventStore: boundedStore, checkpointPolicy: false });
+    const visible = replay.state.approval_proposals.find((item) => item.proposal_id === proposal.proposal_id);
+    const tool = replay.state.tool_calls.find((item) => item.tool_call_id === toolCallId);
+    const turn = replay.state.turns.find((item) => item.turn_id === proposal.turn_id);
+    const terminalTurn = turn !== undefined && ["completed", "cancelled", "failed"].includes(turn.status);
+    if (terminalTurn && proposal.status !== "executed" && proposal.status !== "failed") {
+      throw new RealtimeVoiceToolBridgeError("unavailable");
+    }
+    if (tool && (tool.turn_id !== proposal.turn_id || (tool.name !== null && tool.name !== proposal.tool_name))) {
+      throw new RealtimeVoiceToolBridgeError("unavailable");
+    }
+    if (visible) {
+      if (visible.tool_call_id !== toolCallId || visible.turn_id !== proposal.turn_id || visible.tool_name !== proposal.tool_name) {
+        throw new RealtimeVoiceToolBridgeError("unavailable");
+      }
+      return;
+    }
+    if (terminalTurn) throw new RealtimeVoiceToolBridgeError("unavailable");
+    // Read retained evidence even if replay used a checkpoint that omitted an
+    // orphaned approval. Missing lifecycle evidence must never be invented.
+    const history = await readProposalEvents(eventStore, conversationId, proposal.proposal_id);
+    const original = history.find((event) => event.payload.type === "approval.proposal_created");
+    const attribution = proposal.created_attribution;
+    const created = original ?? parseConversationEvent({
+      version: CONVERSATION_EVENT_VERSION, event_id: `approval-created:${proposal.proposal_id}`,
+      conversation_id: conversationId, revision: 1, occurred_at: proposal.created_at,
+      actor: attribution.actor, source: attribution.source,
+      payload: { type: "approval.proposal_created", proposal_id: proposal.proposal_id,
+        ...(proposal.group_id === null ? {} : { group_id: proposal.group_id }),
+        turn_id: proposal.turn_id, tool_call_id: toolCallId, tool_name: proposal.tool_name,
+        status: "pending", proposal_version: 1, expires_at: proposal.expires_at,
+        reviewed_arguments: proposal.reviewed_arguments },
     });
+    if (created.payload.type !== "approval.proposal_created" || created.payload.tool_call_id !== toolCallId ||
+      created.payload.turn_id !== proposal.turn_id || created.payload.tool_name !== proposal.tool_name ||
+      canonicalJson(created.payload.reviewed_arguments as unknown as JsonValue) !==
+        canonicalJson(proposal.reviewed_arguments as unknown as JsonValue)) {
+      throw new RealtimeVoiceToolBridgeError("unavailable");
+    }
+    const lifecycle = original ? history : [created];
+    const versions = lifecycle.map((event) => event.payload.type === "approval.proposal_created" ||
+      event.payload.type === "approval.proposal_status_changed" ? event.payload.proposal_version : 0);
+    if (versions.some((version, index) => version !== index + 1) || versions.at(-1) !== proposal.proposal_version) {
+      throw new RealtimeVoiceToolBridgeError("unavailable");
+    }
+    const last = lifecycle.at(-1)!;
+    if (!("status" in last.payload) || last.payload.status !== proposal.status) {
+      throw new RealtimeVoiceToolBridgeError("unavailable");
+    }
+    let revision = Number(replay.lastRevision ?? 0);
+    const events: ConversationEvent[] = [];
+    if (!tool || tool.name === null) {
+      // This is the host-approved display snapshot, never the raw provider args.
+      // Reference-only or non-object reviews expose no inline argument fields.
+      const reviewed = proposal.reviewed_arguments;
+      const arguments_ = reviewed.type === "redacted_json" && reviewed.value !== null &&
+        typeof reviewed.value === "object" && !Array.isArray(reviewed.value) ? reviewed.value : {};
+      events.push(parseConversationEvent({ version: CONVERSATION_EVENT_VERSION,
+        event_id: `realtime-approval-tool:${proposal.proposal_id}`, conversation_id: conversationId,
+        revision: ++revision, occurred_at: created.occurred_at, actor: created.actor, source: created.source,
+        payload: { type: "tool_call.requested", turn_id: proposal.turn_id, tool_call_id: toolCallId,
+          name: proposal.tool_name, arguments: arguments_ },
+      }));
+    }
+    for (const event of lifecycle) {
+      // A repair is a projection of existing evidence, not another client
+      // decision. Keep the original immutable event as its audit reference.
+      const { mutation_id: originalMutation, ...evidence } = event;
+      void originalMutation;
+      events.push(parseConversationEvent({ ...(original ? evidence : event), revision: ++revision,
+        event_id: original ? `realtime-approval-repair:${(await sha256(event.event_id)).slice(0, 48)}` : event.event_id,
+        ...(original ? { metadata: { repair_of_event_id: event.event_id } } : {}),
+      }));
+    }
     try {
-      await eventStore.append({
-        conversationId,
-        expectedRevision: latest,
-        events: [event],
-      });
+      await eventStore.append({ conversationId, expectedRevision: replay.lastRevision, events });
       return;
     } catch (error) {
-      if (!(error instanceof ConversationEventStoreConflictError) ||
-        error.code !== "revision_conflict") throw error;
-      if (await hasProposalEvent(eventStore, conversationId, proposal.proposal_id)) return;
+      if (!(error instanceof ConversationEventStoreConflictError) || error.code !== "revision_conflict") throw error;
     }
   }
   throw new RealtimeVoiceToolBridgeError("unavailable");
 }
 
-async function hasProposalEvent(
+async function readProposalEvents(
   eventStore: ConversationEventStore,
   conversationId: ConversationId,
   proposalId: ConversationApprovalProposalId,
-): Promise<boolean> {
+): Promise<ConversationEvent[]> {
   let after: Parameters<ConversationEventStore["read"]>[0]["after"];
+  const events: ConversationEvent[] = [];
   for (let page = 0; page < REALTIME_VOICE_TOOL_LIMITS.approvalEventReadPages; page += 1) {
-    const result = await eventStore.read({
-      conversationId,
-      ...(after === undefined ? {} : { after }),
-      limit: REALTIME_VOICE_TOOL_LIMITS.approvalEventReadPageSize,
-    });
-    if (result.entries.some(({ event }) =>
-      event.payload.type === "approval.proposal_created" &&
-      event.payload.proposal_id === proposalId)) return true;
-    if (!result.hasMore || result.nextCursor === null) return false;
+    const result = await eventStore.read({ conversationId,
+      ...(after === undefined ? {} : { after }), limit: REALTIME_VOICE_TOOL_LIMITS.approvalEventReadPageSize });
+    events.push(...result.entries.map(({ event }) => event).filter((event) =>
+      (event.payload.type === "approval.proposal_created" || event.payload.type === "approval.proposal_status_changed") &&
+      event.payload.proposal_id === proposalId));
+    if (!result.hasMore) return originalApprovalEvidence(events);
+    if (result.nextCursor === null) throw new RealtimeVoiceToolBridgeError("unavailable");
     after = { cursor: result.nextCursor };
   }
   throw new RealtimeVoiceToolBridgeError("unavailable");

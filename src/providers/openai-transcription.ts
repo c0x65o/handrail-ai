@@ -1,3 +1,5 @@
+import { parseOpenAIReportedAudioUsage, type OpenAIReportedAudioUsage } from "./openai-audio-usage.js";
+export { parseOpenAIReportedAudioUsage, type OpenAIReportedAudioUsage, type OpenAIAudioTokenDetails } from "./openai-audio-usage.js";
 import {
   TRANSCRIPTION_AUDIO_FORMATS,
   TRANSCRIPTION_CONTRACT_VERSION,
@@ -68,10 +70,24 @@ export type OpenAITranscriptionRequestFunction = (
   options: OpenAITranscriptionRequestOptions,
 ) => unknown | Promise<unknown>;
 
+export interface OpenAITranscriptionUsageObservation {
+  readonly request_id: string;
+  readonly audio_id: string;
+  /** Same bounded identity supplied to the provider; stable across delivery retries. */
+  readonly provider_idempotency_key: string;
+  readonly model_id: string;
+  readonly usage: OpenAIReportedAudioUsage;
+}
+
 export interface OpenAITranscriptionOptions {
   readonly model: string;
   readonly resolve_audio: OpenAITranscriptionAudioResolver;
   readonly request: OpenAITranscriptionRequestFunction;
+  /** Trusted-server durable capture. Awaited before returning/validating the transcript.
+   * It may finish after caller cancellation; do not bind storage to that signal.
+   * The host supplies authoritative attribution and a deduplicating usage store.
+   */
+  readonly capture_usage?: (observation: OpenAITranscriptionUsageObservation) => Promise<void>;
 }
 
 type UnknownRecord = Record<string, unknown>;
@@ -343,6 +359,7 @@ class OpenAITranscriptionCapability implements SupportedTranscriptionCapability 
     private readonly model: string,
     private readonly resolveAudio: OpenAITranscriptionAudioResolver,
     private readonly requestProvider: OpenAITranscriptionRequestFunction,
+    private readonly captureUsage: OpenAITranscriptionOptions["capture_usage"],
   ) {}
 
   async transcribe(value: TranscriptionRequest): Promise<TranscriptionResult> {
@@ -410,10 +427,23 @@ class OpenAITranscriptionCapability implements SupportedTranscriptionCapability 
     let response: unknown;
     try {
       response = await awaitWithSignal(
-        Promise.resolve().then(() => this.requestProvider(providerRequest, {
-          signal: request.signal,
-          idempotency_key: idempotencyIdentity,
-        })),
+        Promise.resolve().then(async () => {
+          rejectIfAborted(request.signal);
+          const response = await this.requestProvider(providerRequest, {
+            signal: request.signal,
+            idempotency_key: idempotencyIdentity,
+          });
+          // Keep this inside the provider promise: a late response after caller
+          // cancellation still carries incurred usage that must reach storage.
+          if (this.captureUsage !== undefined) {
+            const source = safeRecord(response);
+            if (source === null) throw new TranscriptionOperationError("internal_failure");
+            await this.captureUsage(Object.freeze({ request_id: request.request_id,
+              audio_id: audio.audio_id, provider_idempotency_key: idempotencyIdentity,
+              model_id: this.model, usage: parseOpenAIReportedAudioUsage(source.usage) }));
+          }
+          return response;
+        }),
         request.signal,
       );
     } catch (error) {
@@ -442,9 +472,13 @@ export function createOpenAITranscriptionCapability(
   if (typeof options.request !== "function") {
     throw new TypeError("OpenAI transcription request operation must be a function");
   }
+  if (options.capture_usage !== undefined && typeof options.capture_usage !== "function") {
+    throw new TypeError("OpenAI transcription usage capture must be a function");
+  }
   return new OpenAITranscriptionCapability(
     options.model,
     options.resolve_audio,
     options.request,
+    options.capture_usage,
   );
 }

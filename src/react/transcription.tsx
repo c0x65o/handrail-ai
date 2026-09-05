@@ -553,6 +553,65 @@ export function useTranscriptionControls(
   };
 }
 
+export interface CapturedAudioTranscriptionInput {
+  readonly capture: BrowserAudioCaptureResult;
+  readonly conversationId: string;
+  readonly requestId: string;
+  readonly idempotencyKey: string;
+  readonly signal: AbortSignal;
+}
+
+export interface UseCapturedAudioTranscriptionOptions {
+  readonly conversationId: string;
+  readonly createCaptureController: TranscriptionCaptureFactory;
+  /** Authenticated host request that accepts the recording directly. */
+  readonly transcribeCapturedAudio: (input: CapturedAudioTranscriptionInput) => Promise<string>;
+  readonly applyTranscript: (text: string) => void | Promise<void>;
+}
+
+/**
+ * Direct-recording alternative to durable upload + transcription. Reuses the
+ * shared capture/cancellation controller. At most one bounded recording remains
+ * in browser memory for retry; local metadata is never a server content URL.
+ * Reload, conversation switch, cancellation, success and unmount release it.
+ */
+export function useCapturedAudioTranscription(
+  options: UseCapturedAudioTranscriptionOptions,
+): TranscriptionControlsController {
+  const retained = useRef<{ id: string; conversationId: string; capture: BrowserAudioCaptureResult } | null>(null);
+  const controller = useTranscriptionControls({
+    conversationId: options.conversationId,
+    createCaptureController: options.createCaptureController,
+    applyTranscript: options.applyTranscript,
+    uploadAudio: async ({ capture, conversationId }) => {
+      const id = `captured-${globalThis.crypto.randomUUID()}`;
+      retained.current = { id, conversationId, capture };
+      // Private metadata lets the existing controller retain one stable attempt.
+      // The binary is sent only by transcribeCapturedAudio, never uploaded here.
+      return parseTranscriptionAudioReference({ audio_id: id, content_ref: id,
+        format: capture.format, byte_size: capture.byteSize, duration_seconds: capture.durationSeconds });
+    },
+    createRequestIdentity: ({ audio }) => ({ requestId: `request-${audio.audio_id}` as TranscriptionRequestId,
+      idempotencyKey: `transcribe-${audio.audio_id}` as TranscriptionIdempotencyKey }),
+    transcribe: async (request) => {
+      const source = retained.current;
+      if (source === null || source.conversationId !== options.conversationId ||
+        request.inputs[0]?.content_ref !== source.id) throw new Error("Recorded audio is no longer available.");
+      const text = await options.transcribeCapturedAudio({ capture: source.capture,
+        conversationId: source.conversationId, requestId: request.request_id,
+        idempotencyKey: request.idempotency_key, signal: request.signal });
+      return parseTranscriptionResult({ status: "completed", request_id: request.request_id,
+        outputs: [{ audio_id: request.inputs[0]!.audio_id, text,
+          metadata: { language: null, duration_seconds: source.capture.durationSeconds } }] }, request);
+    },
+  });
+  useEffect(() => () => { retained.current = null; }, [options.conversationId]);
+  useEffect(() => {
+    if (controller.status === "success" || controller.status === "cancelled") retained.current = null;
+  }, [controller.status]);
+  return controller;
+}
+
 const TranscriptionControlsContext =
   createContext<TranscriptionControlsController | null>(null);
 

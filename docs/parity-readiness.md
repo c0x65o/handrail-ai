@@ -5,23 +5,27 @@ behavioral parity for owner testing. This checklist is incomplete until each
 requirement has evidence from the relevant SDK and host paths. Passing unit
 tests alone does not establish live host parity.
 
-## Requirements and current evidence
+## Current qualification status — 2026-09-05
 
-| Requirement | Current evidence / remaining work |
-| --- | --- |
-| Server-owned state independent of browser connections | Activity now follows durable writer status changes. Tests cover completion/failure/cancellation without observers and no repeated lifecycle notifications on replay. Need host reload/disconnect/recovery evidence and reconciliation after activity delivery failure. |
-| Reload/reconnect accurately reattaches without duplicate work | Durable replay/lease primitives exist. Verify high-level clients and both host modes, including mobile. |
-| Multiple running threads and persistent read markers | Workspace and activity stores exist. Verify remote/open-thread state merging and completion/read behavior across reloads and devices. |
-| One summary, tool counts, optional collapsible details | Persisted tool lifecycle and collapsed/expanded/hidden/custom counts panel implemented. SDK tests cover continuations, approval waiting/rejection, duplicate execution replay, and hidden private data. Host adoption and real long-tool flows remain unverified. |
-| Optional project approvals and bounded bulk work | Mills and Spartan mounted SDK paths now support required (default) and automatic project policies through existing domain executors. SQL/replay tests cover immutable intent, uncertain dispatch, policy evidence, and partial interruption. Required-mode continuation after external human confirmation and real financial workflows remain unqualified. |
-| Flexible UI with reusable execution fundamentals | Styled/headless APIs exist. Ensure replacing/hiding presentation preserves execution and telemetry. |
-| Speech-to-text and realtime voice | Separate SDK adapters/controls exist. Inventory both hosts and consolidate supported paths, including telemetry and cleanup. |
-| Durable attributed usage without duplicate charges | Chat usage outbox exists. Need host runtime evidence and supported voice/transcription coverage. |
-| SDK migrations and version compatibility | Schema V1 plus migrate method exist. Review upgrade locking/history/compatibility and host migration ordering. |
-| Mills web integration with both modes | Protected high-level gateway and legacy route are qualified with simulated provider/domain flows; UI retains Try new UI / Use legacy UI. Final live provider/browser and migration evidence remain pending. |
-| Spartan web integration with both modes | Protected mounted gateway tests cover both approval modes, actual SQL action persistence, usage attribution, canonical completion, and failure after streamed progress. UI retains Try new UI / Use legacy. Final live provider/browser and migration evidence remain pending. |
-| Mills and Spartan mobile integration | Shared Dart canonical recovery and stable new-turn admission now pass actual SDK HTTP gateway tests with a simulated provider. Both native apps now vendor the Dart candidate and expose authenticated SDK client factories; targeted cookie/session tests passed. Mills now wires its SDK repository, secure pending storage, activity and legacy/SDK selector into the existing screen. Spartan now also wires its SDK repository, account-scoped journal, activity and persisted selector into the rich phone/tablet screen. Full real device/host qualification remains outstanding. |
-| Reproducible adoption and test instructions | Both web hosts now vendor the same immutable 0.2.6 candidate with provenance and matching file dependencies/lock integrity. Fresh production/dev installs passed for the earlier 0.2.5 candidate; subsequent 0.2.6 candidates have matching dependency contracts, archive byte comparisons and scoped host compilation. Final clean-install proof must use the final artifact. Migration/live runtime sign-off and final mobile instructions remain pending. No commits/pushes/PRs or releases authorized by this goal. |
+The current source and packaged integrations have substantial automated evidence.
+**Live parity is not signed off.** The goal is blocked on the verified external dependencies in [the platform handoff](parity-platform-dependencies.md). Use [owner testing instructions](parity-owner-testing.md)
+for the exact mode switches, remaining runtime checks and external dependencies.
+The chronological work log below includes superseded candidates and gaps that
+later checkpoints close; this table is the current summary.
+
+| Requirement | Current evidence | Remaining acceptance |
+| --- | --- | --- |
+| Server-owned text state across disconnect/reload/cancel/recovery | Real SDK gateway/client fixtures exercise disconnected work, reopening before/after completion, canonical terminal races, activity-write repair and another send without duplicate provider execution. Runtime, reconciler, cancellation and sync tests passed. | Real browser reload during a provider/tool run in each host; deployed worker restart. |
+| Independent threads and persistent unread state | Ordered activity projection, background workspace observers, server read markers and shared native recovery pass targeted tests. Voice has a separate authorized workspace feed and lifecycle/read evidence. | Two actual concurrent host threads and cross-device completion/read checks. |
+| Short activity summary and tool counts with optional details | High-level and host tool loops persist lifecycle events. Default collapsed/expanded/hidden/custom presentations are tested. Web/native voice summaries retain last-known activity on refresh failure. | Owner review of real long-running business workflows and presentation. |
+| Project-controlled approvals and bounded multi-step execution | Both mounted host SDK routes cover required and automatic policies through existing domain executors. Required mode resumes after decisions. Durable intent/result ledgers reject changed requests and prevent redispatch of uncertain side effects. | Real provider selection of domain tools, representative bulk changes and domain result validation. |
+| Flexible UI and shared infrastructure | Mills uses the standard launcher; Spartan retains its custom presentation on SDK headless bindings. Both mobile apps use the vendored shared Dart client. Client replacement and late bootstrap cleanup are tested. | Real browser/device polish and host-specific business parity. |
+| Speech-to-text and realtime voice | Mills recorded audio has durable provider-operation replay and usage evidence. Mills mobile realtime has durable call ownership, explicit uncertain termination, approval review, tool activity and visible read acknowledgements; SQL/HTTP/Dart/widget tests passed. | Real microphone/provider/device acceptance. Web voice workspace is observational; per-call review/acknowledgement is in Mills mobile. Spartan declares no realtime voice capability. |
+| Attributed durable Handrail usage | Text receipt outbox/retry/deduplication and host attribution have automated evidence. Actual audio/text/cache/duration evidence is durably retained for supported Mills audio paths. | Live Handrail receipt/deduplication proof. Audio evidence is **not** yet a supported billed receipt: authoritative modality/duration/pricing/acceptance contract is missing. |
+| Schema/migrations/compatibility | SDK schema V1 matches host migration output; reapplication retains execution records. Single migration job and compatible shared workers are documented. | Confirm migration journals in the exact environment under test; no staging/production migration or rollout performed. |
+| Both web modes | Protected host gateway/domain fixtures and scoped compiles passed. Existing/SDK switches remain. Both local web services now start after restoring their managed databases. | Mills real browser login, legacy/SDK bootstrap and fallback now passed. Spartan authenticated browser and both host provider flows remain acceptance work; health endpoints alone are insufficient. |
+| Both mobile modes | Account-scoped Try SDK / Use legacy selectors, protected transports, pending journals and recovery have targeted HTTP/widget/Dart analysis evidence. | Real device login, background/reload/voice behavior against current servers. |
+| Reproducible candidate | Both web hosts pin **0.2.7 / 5683009ec79b**. Four clean dev/production installs passed, with all 24 JS exports imported and all 317 package files matching. Shared Dart 0.1.1 source/provenance matches in both mobile vendors. | Publish/release only after owner approval; archive, manifests, lockfiles and provenance must remain together. |
 
 ## Work log
 
@@ -43,12 +47,12 @@ tests alone does not establish live host parity.
   counts are presented as authoritative. Approval rejection/expiry must also
   settle the displayed tool state. Verify synchronized-client ordering.
 
-## Owner testing handoff (pending)
+## Owner testing handoff
 
-Add exact URLs/navigation, mode switches, supported feature differences, tested
-SDK/dependency versions, migrations, test outputs, and known limitations here
-after host integration and runtime validation. Do not describe readiness as
-complete while any material row above remains unverified.
+See [current owner testing instructions](parity-owner-testing.md),
+[installation and upgrade](parity-installation-and-upgrade.md), and
+[clean-install evidence](parity-install-evidence.json). The remaining live and
+billing checks are explicit acceptance work, not passing results inferred from mocks.
 
 ## Continued implementation evidence
 
@@ -1312,3 +1316,1126 @@ these claims plus the SDK tool ledger and a stable proposal-derived execution ke
 then saved-result observation and staged-ID completion in the SDK provider path.
 
 Final scoped Flutter analysis of the changed models, repository, screen and test passed with no issues.
+
+## Mills required approval continuation and shared execution outcomes
+
+Both Mills confirmation endpoints now claim the proposal before dispatch and use
+one SDK ledger key derived from the proposal ID. The winning caller executes the
+existing domain service; concurrent requests and later retries read its saved
+result. Discard cannot win after execution is claimed. A lost acknowledgement can
+repair the domain projection from the retained result. A failed or uncertain
+execution requires review and is never dispatched again by confirmation. Older
+already-confirmed proposals with no SDK receipt still return no execution result;
+they are never executed merely to manufacture new evidence.
+
+For new SDK turns with required approvals, Mills stages each immutable proposal
+before waiting, publishes its approval activity/history, and uses the shared SDK
+bounded observer to wait for the existing confirmation endpoint. Saved success
+returns to the provider before dependent work. Rejection, expiry or Stop closes
+only an unclaimed proposal; executing changes retain their outcome. Final message
+persistence preserves the staged proposal IDs and decisions. Automatic SDK policy
+and legacy automatic application remain available. Mobile already permits proposal
+decisions during SDK runs; no mobile source changed in this continuation.
+
+The SDK coordinator now preserves a host-returned executing/executed/failed record
+instead of appending that execution outcome as another confirmation decision. This
+avoids turning a saved failed outcome into a malformed decision-event error.
+
+Both web repositories use `handrail-ai-assistant-0.2.6-parity.39b1edbba260.tgz`
+(SHA-256 `39b1edbba260ae22c656fb3b11bf5d9a9bd4df27e0bc2b7f582c5f7e681b69c2`). Manifests, locks, provenance and installed archive files match.
+This is a local candidate, not a publication or deployment. Hosts must run Mills
+migration 0098 (and earlier SDK-table migration 0096) before activating the new
+confirmation code. Old binaries do not understand executing/failed proposals;
+changing the UI selector is distinct from downgrading the application/database.
+
+Evidence: all 21 Mills SQL gateway cases pass, including four mounted high-level
+confirm/reject/Stop/failed-action flows, one visible waiting summary, canonical
+executed history, same-proposal completion, concurrent confirmation, lost ledger
+acknowledgement and retained uncertain effects. Three legacy HTTP/domain tests
+pass, including a staged change applied once and replayed with a different client
+key, plus existing automatic/sensitive-profile behavior. All 11 mutation/provider
+cases pass, including a required-confirmation result returned before subsequent
+model/read rounds. SDK coordinator tests (13), SDK typecheck/build and Mills scoped
+compilation pass. These providers and external failure conditions are controlled
+fixtures; they do not prove live business validation, real provider behavior or
+production billing.
+
+Remaining qualification includes imported/older pending proposals that lack a
+canonical proposal event, authoritative decision timestamps when confirmation
+outlives observation/expiry, restart after external dispatch, stale running state,
+voice/transcription billing units and durable capture, protected browser/device
+flows, Spartan's custom approval polling hook, and a clean install of the final
+artifact. Do not mark full parity or owner-ready completion from this milestone.
+
+Final candidate validation for `39b1edbba260`: both scoped web compiles passed.
+Spartan's six mounted required/automatic/cancellation cases passed against the
+new archive. Mills touched-source lint and SDK coordinator lint passed. Current
+SDK source hash, both archive hashes, and both package lock integrities were
+rechecked after external workspace checkpoints and still match the qualification
+record. No commit, push, PR, publication or deployment command was issued by this
+agent. No expensive check remains running.
+
+## Shared approval UI state and older proposal compatibility
+
+`useConversationApprovals(resources, conversationId)` is now exported from the
+SDK's React and React headless entry points. It owns serialized polling, queued
+refresh, scope isolation across conversation/credential changes, synchronous
+protection against duplicate decisions, stale-read invalidation after a decision,
+and cleanup. It exposes `proposals`, `busy`, `error`, `decide` and `refresh` so hosts
+can present their own cards. Unmounting stops observation; it does not cancel a
+server action. The default SDK panel and Spartan's custom web panel both use it.
+For example, a custom panel can call
+`useConversationApprovals(client.resources, selectedConversationId)` and render
+`proposals` in its own design; decisions call `decide(proposal, 'confirmed')` or
+`decide(proposal, 'rejected')`. Authorization still runs on the server.
+
+The high-level SDK can now decide older host-owned proposals that have no SDK
+creation event, only when `approvalStoreFor` explicitly supplies an existing host
+authority and that authority's `listGroup` proves proposal membership in the
+requested authorized conversation. It delegates the decision to the existing
+host store with server-derived actor attribution. It does not fabricate a tool
+call or proposal event. SDK-owned proposals still require canonical creation.
+The shared boundary preserves catalog permission/not-found errors, and Mills now
+translates domain catalog errors into that SDK contract.
+
+Spartan's selected conversation also remains usable when the server declares no
+attachment capability. Previously its zero file-byte limit made the SDK composer
+throw. It now omits attachment intake, upload controls and drop handlers when
+attachments are unsupported; supported attachments retain their configured limits.
+
+Evidence: six existing default-panel cases and five new headless cases pass,
+including switching without remount, changed credentials, late decision/read
+completion, duplicate clicks, and retained failed results. Two SDK HTTP cases
+cover both decisions, older proposal membership, forged caller attribution and
+forbidden callers. Seven rendered Spartan UI cases pass, including two new actual
+selected-conversation tests with real SDK runtimes, late approvals and attachment
+capability on/off. Six Mills SQL/HTTP cases pass: four ongoing required-approval
+flows plus two older-proposal flows proving repeat decisions and wrong-user,
+wrong-household and wrong-conversation rejection. No live provider/browser/device
+or real billing claim follows from these fixtures.
+
+Both web hosts use `handrail-ai-assistant-0.2.7-parity.ca2a24809621.tgz`
+(SHA-256 `ca2a2480962120fd27f9e70cc49a359e8421b020d8146dcc3e4007b27dd602bc`), built from the repository's current 0.2.7 version. The version was
+already present; this work does not publish a release. Archive bytes, manifests,
+lock integrity and installed package files match. Earlier 0.2.6 and intermediate
+0.2.7 artifacts remain as prior evidence. No schema change is introduced here.
+The full goal remains active: interrupted execution/recovery and timestamps,
+voice/transcription billing and durable capture, protected runtime qualification,
+and a final clean install/owner handoff still require work.
+
+Final validation for `ca2a24809621`: SDK typecheck/build and touched-source lint
+passed; both host scoped compiles and touched-source lint passed. The final SDK
+source hash is `32379eee82c065da6295eb72b770689d41bf7b7e680ed32228deb7ff47c906ef`.
+Mills' six targeted SQL cases passed against this final archive. Spartan's seven
+UI cases exercised the identical packaged hook before the final server-only error
+mapping fix; its compile includes the final archive. No checks remain running.
+No commit/push/PR, release publication or deployment command was issued.
+
+
+## Immediate Mills usage capture before dependent work
+
+Mills previously buffered provider receipts until the complete turn (or auxiliary
+request) settled. With telemetry configured and the production SQL outbox
+attached, `beginMillsAIRuntimeUsage().recordUsage()` now awaits the SDK outbox
+write immediately. The SDK gateway likewise captures each receipt before the
+provider result is validated or a dependent tool is executed. Chat rounds,
+compaction, conversation titles, and recorded-audio transcription await the
+callback. A failed capture stops processing; it does not trigger another provider
+call or replace reported quantities with an unavailable receipt. Final settlement
+can retry the same receipt identity, including after a lost acknowledgement.
+Custom clients without an outbox retain their existing settlement-only behavior;
+this does not add durability when telemetry is disabled or storage is absent.
+
+The gateway also attempts host message failure finalization if its capture retry
+fails, so a usage-storage failure alone does not skip clearing the running message.
+This still depends on the host message store being available.
+
+Evidence: seven usage-client/SQL tests passed, including SQL recovery without any
+final settlement and duplicate delivery after a lost acknowledgement. Seven
+selected provider cases passed, including waiting before tools execute and failure
+of asynchronous capture for transcription, titles, and chat. Two gateway cases
+passed for capture before response completion and host failure finalization after
+two storage errors (16 targeted tests total). The scoped TypeScript compile
+and lint of all seven touched source/test files passed.
+
+These are local source and controlled SQL/transport checks. They do not prove live
+Handrail acceptance, pricing, realtime audio usage, or production restart behavior.
+No audio billing units or prices were invented. Both assistant modes and the
+previous SDK candidate remain in place; no release or deployment was performed.
+
+
+## Provider-reported audio evidence and capture callbacks
+
+Added a shared OpenAI audio usage parser and optional trusted-server
+`capture_usage` callbacks to the transcription and realtime adapters. Transcription
+captures before output validation, including provider responses that arrive after
+caller cancellation. Realtime captures response completion and input transcription
+as separate operations, coalesces concurrent duplicates, rejects changed evidence,
+and permits an identical retry after a failed storage write. Late final usage for
+a still-tracked session is captured after hangup without reopening the session.
+
+Evidence: 45 transcription tests, 10 parser tests, and 36 realtime tests passed
+(91 total), with scoped lint, package typecheck and package build passing. Earlier
+approval/UI changes remain in the SDK worktree.
+
+The optional callback is an integration boundary, not proof of durable billing.
+The two hosts still use the previous candidate; Mills' voice providers are not yet
+connected to these hooks. Handrail audio/duration receipt and pricing contract,
+durable evidence retention, host adoption and live usage delivery are still open.
+See [audio usage integration contract](audio-usage-capture.md).
+
+
+## Durable audio evidence in the existing SDK schema
+
+Added `PostgresOpenAIAudioUsageEvidenceStore`, using a separate immutable document
+kind in the existing SDK table. It validates normalized identity/attribution and
+provider-reported audio usage, requires the configured service environment, and
+provides bounded tenant/environment-scoped reads for reconciliation. It deliberately
+does not enqueue a billing receipt or infer audio prices.
+
+One real PGlite integration scenario passed: committed write with lost acknowledgement,
+restart and identical retries, concurrent first captures, changed evidence/model
+conflict, keyset reads, tenant/environment isolation and no billing outbox entry.
+Scoped lint and package typecheck passed; the following candidate adoption
+includes the store and capture callbacks.
+Host voice wiring and the authoritative Handrail audio billing contract remain open.
+
+
+## Shared audio capture candidate
+
+Both web projects now reference `handrail-ai-assistant-0.2.7-parity.2d90a0faa5e1.tgz` with SHA-256
+`2d90a0faa5e1a028bff282660a136335e6debd8880c89183f6c7248fc611fd7f`. Manifest/lockfile references, dependency contracts and installed
+SDK file bytes were checked against the same archive. The SDK package typecheck,
+scoped lint and package build passed. The retained approval/state/cancellation
+changes are included; neither application mode was removed. Native Dart source
+was unchanged by this candidate.
+
+The candidate adds optional OpenAI transcription/realtime usage callbacks, a
+parser for reported audio/text/cache/duration evidence, and SDK-owned immutable
+PostgreSQL evidence storage. SDK tests cover capture/cancellation and duplicates
+(91 cases), plus a real SQL scenario for restart, lost acknowledgement, concurrent
+capture, immutable evidence and tenant/environment isolation. The evidence store
+uses the existing SDK document table and does not submit billing receipts.
+
+This adoption makes the APIs available; it does not yet connect Mills voice to
+the evidence store or qualify audio billing. Host wiring, Handrail's audio receipt
+and pricing contract, and live delivery remain open. Both host scoped compiles passed, and installed package imports for the capture
+parsers and evidence store were verified in each host. No publication or
+deployment was performed.
+
+
+## Mills recorded-audio evidence wired to production composition
+
+When Handrail telemetry is configured, Mills now supplies the SDK's
+`PostgresOpenAIAudioUsageEvidenceStore` to its auxiliary usage client. The existing
+recorded-audio provider parses the provider's `usage` object with the shared SDK
+parser and awaits evidence capture before its normal receipt capture and response
+validation. Recorded words and audio bytes are not included in evidence.
+
+Both the provider's token modality details and reported duration are retained with
+the request's server-derived user/session/project/environment and configured
+transcription model. A first evidence-write failure stops the transcription result.
+Final settlement retries the exact retained evidence before submitting the existing
+receipt; it does not call the provider again. Missing audio usage remains explicitly
+unavailable. Existing clients without an audio evidence sink retain their previous
+behavior. This addition does not change Handrail's billing receipt wire format or
+invent audio prices, and live voice billing remains unqualified.
+
+Validation: eight auxiliary usage/unit/SQL tests, four selected provider tests and
+one authenticated WAV endpoint test passed (13 total). The SQL scenario invokes the
+actual Mills transcription provider with controlled HTTP responses and the actual
+SDK evidence/outbox stores; it covers token details, fractional duration, failed
+capture/retry, restart reads, attribution and exclusion of recorded words. Scoped
+TypeScript compile and lint of all five touched source/test files passed. The
+existing 0096 SDK migration creates the generic document table; no new DDL is needed
+for the audio evidence document kind.
+
+Both assistant modes remain available. Realtime is not yet wired: its current
+provider handler skips completion events without tool calls, and its queued work
+needs to be drained safely on shutdown. The SDK candidate remains
+`handrail-ai-assistant-0.2.7-parity.2d90a0faa5e1.tgz`. No release or deployment ran.
+
+
+## Mills realtime response evidence and shutdown ordering
+
+When telemetry is configured, the Mills realtime provider now uses the SDK event
+parser and audio evidence store for every `response.done`, including responses
+without tools and completed, cancelled, failed or incomplete outcomes. Evidence
+uses the authenticated household/user, server request, provider call/response
+identity and the model actually selected in Mills' realtime request. Replayed
+response evidence retains the same deterministic ID; a mismatched call identity
+is rejected. This captures evidence only and does not invent a voice billing
+receipt or price.
+
+The provider awaits capture before dependent tools. It retries an evidence write
+once with the same record; two failures stop queued tools and close the call.
+Already-received response evidence is still drained during shutdown. Queued tools
+are stopped, an already-started tool can finish, and per-call resources close once
+after queued work settles. After the server marks a call stopped, it sends no further tool outputs or continuations.
+Provider hangup HTTP requests now use the configured timeout. Mills' main shutdown
+sequence drains realtime before flushing usage and closing shared stores, removing
+the previous race between active voice work and store closure.
+
+Validation: 12 realtime provider tests and two real SQL usage tests passed (14
+cases). They cover responses without tools, every terminal response outcome,
+duplicate tool events, storage retry/failure, blocked capture at shutdown, an
+already-started tool at shutdown, hangup timeout, stable SQL evidence across
+restarts/replays, attribution, and keeping voice evidence out of the billing queue.
+The final scoped TypeScript compile (including realtime tests) and lint of all five
+touched source/test files passed.
+
+Scope and remaining qualification: Mills does not request realtime input
+transcription, so only voice response usage has a known model in this path. The
+recorded-audio transcription endpoint is wired separately. Both assistant modes
+remain available. Live headset/browser behavior, provider control-channel closure
+and billing delivery are not proven by these controlled tests. Voice mutation
+approval-policy parity still needs an explicit audit; this change preserves the
+existing domain execution policy. Handrail audio receipt/pricing reconciliation
+remains open. The SDK candidate is unchanged; no release or deployment ran.
+
+
+## Shared recording controls and selected composer (2026-09-05)
+
+Added `useCapturedAudioTranscription` in the React entry point for applications
+whose authenticated endpoint accepts a recording directly. It reuses the existing
+capture/transcription coordinator, retains the completed Blob locally for a retry,
+and sends the same request identity for retries of that recording. Its private
+metadata is never a durable server upload reference. Reload does not preserve a
+local microphone recording. Conversation changes, cancellation and unmount abort
+local work and suppress late text; successful transcription releases retained audio.
+
+`renderVoiceControls` on the styled chat/launcher receives the selected conversation
+and its actual composer. The workspace remounts controls on thread changes. The
+existing static `voiceControls` slot remains supported. Voice controls occupy a
+full-width wrapping row above the text field. Hosts can omit or replace this UI.
+`composer.acquireSubmissionBlock()` returns an idempotent release callback. While
+any block is held, the button, keyboard and direct `submit()` paths reject sending;
+this lets hosts finish local draft preparation without racing message submission.
+
+SDK validation: 31 focused tests (14 composer, 16 transcription, one selected
+voice-renderer test), package typecheck, scoped lint, and both pack lifecycle builds
+passed. The new tests cover synchronous submit rejection, multiple blockers,
+stable Blob/request identities, late-response suppression and thread disposal.
+Mills host integration uses the actual installed package and authenticated endpoint
+client, with a controlled capture device and HTTP responses. Six tests cover
+recording/transcription submission guards, appending to an edited draft, same-key
+retry, cancellation, unmount, synchronous microphone failure recovery, and the
+existing host session-expiry callback.
+
+Both web hosts use local candidate
+`handrail-ai-assistant-0.2.7-parity.6cdd45f0f852.tgz` (SHA-256
+`6cdd45f0f8527ee9f39e983e5440277965a16763a5ee36e0bd789d8b01d84bb4`).
+Every installed package file was compared to the archive; manifests/locks and
+provenance identify the same artifact. Source base is
+`9724454d0be29b33e47a7004d5529e4be3681227`; source tree digest is
+`0788670b50a1c3ba3847b13d0bdd4782eace9a59a31be6d5b06ea9667b34a697`.
+Native Dart source is unchanged. No release, commit or deployment was performed.
+
+Open audit finding: Mills `/transcriptions` forwards a stable idempotency key to
+the provider but does not yet durably claim/replay host transcription results. Its
+usage identity also currently follows the HTTP request ID. Retrying a lost HTTP
+response therefore does not have demonstrated protection against repeat provider
+invocation or duplicate accounting. Do not treat client same-key tests as proof of
+server idempotency. Mobile realtime mutation approval policy, Handrail audio
+pricing/receipt reconciliation, final clean install, and real browser/device/provider
+qualification also remain open. This goal is not complete.
+
+Both web hosts passed their scoped qualification TypeScript checks with candidate
+`6cdd45f0f852`; Mills included the final voice component and six tests.
+
+
+## Provider-operation claims and Mills transcription replay (2026-09-05)
+
+The previous transcription replay finding is now patched in production composition.
+The SDK adds `PostgresProviderOperationStore`, which commits a durable claim before
+external dispatch, validates/minimizes JSON results, and replays completed results.
+Same-key changed input raises an identity conflict. Concurrent/restarted requests
+with an unresolved claim do not invoke the provider again. Lost completion
+acknowledgements are repaired by reading the saved result. Lost admission
+acknowledgements never grant permission to dispatch. The new record kind uses the
+existing V1 document table; see audio-usage-capture.md for compatibility and limits.
+
+Mills supplies this store to its authenticated transcription route in **both**
+legacy and SDK modes, independently of telemetry being enabled. Operation identity
+includes the server-selected scope, household, user and request key. The fingerprint
+binds audio bytes and media type. The provider key and usage turn identity derive
+from that scoped identity. Authentication, role, CSRF, audio validation and rate
+limits run before replay. Completed replay bypasses provider execution and usage
+capture/settlement. Different authorized users cannot read each other's result even
+if they present the same request key. No raw recording is retained by this ledger;
+its validated result contains transcript text.
+
+The SDK SQL scenario passed for concurrency, restart, changed input, lost admission
+and completion acknowledgements, provider failure, and tenant/environment isolation.
+Two mounted Mills HTTP/SQL tests passed: existing authenticated WAV validation and
+a new scenario covering concurrent requests, router restart, exactly one provider
+call/usage receipt, owner isolation, rejected unauthenticated/viewer access, changed
+audio and unresolved outcome replay. Seven host UI tests passed, including retrying
+an uncertain status with the same recording/key. The Mills scoped TypeScript check
+passed with the new route and tests.
+
+Both hosts now use `handrail-ai-assistant-0.2.7-parity.47184f13f68e.tgz`, SHA-256
+`47184f13f68e5f88a02a6f68d21cbf522bff1a4bd42fd6ef7b1267ecf2493344`, source tree
+`5255efdf37f9c7c60d3f55c4cd6de49e4ce50d3b0c440b87879c4886f8bd9b63` based on
+`9724454d0be29b33e47a7004d5529e4be3681227`. The two pack builds passed. Both archives,
+manifest/lock contracts and all installed package files were verified. No native
+Dart changes, release, deployment or commit occurred.
+
+Remaining limit: an admitted provider call with no saved result still needs
+provider/host reconciliation. The SDK does not expire its claim or infer that an
+unknown outcome was free or safe to repeat. Mills returns
+`transcription_outcome_uncertain`; its SDK UI explains the uncertainty and Retry
+checks the same request. All workers handling this endpoint must adopt the ledger
+before duplicate-request protection is claimed, and its deployment scope must stay
+stable. Older workers ignore these claims. Live provider/device/Handrail billing,
+mobile realtime approval policy, final clean install and broader parity qualification
+remain open; the goal remains active.
+
+Spartan passed its scoped qualification TypeScript check with candidate `47184f13f68e`.
+
+
+## Voice cancellation boundary and approval integration audit (2026-09-05)
+
+Mills realtime now checks whether its call stopped immediately after awaiting tool
+preparation and before dispatching a proposed mutation. Previously a delayed tool
+could return a proposal after close/shutdown and still execute that change. A
+control-socket error now stops work and closes the socket instead of only logging.
+Setup rejects a connection that closed before its readiness promise resolved.
+
+A trusted-host `resolveProposal` callback can now replace immediate domain mutation
+execution. It receives the proposal, a session/call-scoped tool identity and an
+AbortSignal. Close/error/shutdown abort this signal; the actual shared SDK
+`waitForApplicationApproval` is exercised in the cancellation test. A callback's
+completed result is passed to the voice provider without executing the domain
+mutation again. Callers omitting it preserve the existing executor. This callback
+is **not yet wired to a voice approval policy in production**; no approval parity
+claim follows from these boundary tests. An already-dispatched action is still
+drained before its tool runtime is released; close cannot undo its effects.
+
+Eighteen targeted realtime tests passed (the previous twelve plus six new cases),
+including delayed proposal preparation after close/error/shutdown, a cancelled
+SDK approval wait, exact completed-result use, duplicate calls and setup-close
+ordering. The scoped Mills TypeScript check passed. No SDK source/package or native
+source changed in this slice; candidate `47184f13f68e` remains installed.
+
+Integration findings for the next step:
+
+- The native voice call-creation request currently carries speaker context but no
+  selected conversation or legacy/SDK mode. The route constructs a virtual
+  realtime context, and its fallback mutation executor remains immediate.
+- The voice sheet has no proposal review surface. The existing domain proposal
+  card and confirmation route are reusable, but pending approvals must be tied to
+  actual server-owned state, shown in that sheet and cancelled on hangup. Do not
+  fabricate a user-authored text message from a provider-generated tool request.
+- SDK `realtime/tool-bridge.ts` currently records `approval.proposal_created` without
+  recording the referenced tool call. Its test checks the proposal store and actual
+  execution, but never replays that event stream. The conversation reducer ignores
+  an approval whose tool call is missing or unnamed. This is an apparent SDK
+  projection gap to reproduce and repair before using the bridge for visible voice
+  approvals. Preserve the host's reviewed/redacted argument boundary; blindly
+  emitting raw provider arguments would violate the bridge's review contract.
+
+The broader voice policy, live billing and final parity qualification remain open.
+
+## Realtime approval recovery qualification
+
+The SDK realtime tool bridge previously stored approval creation without a named
+tool-call event. Canonical replay therefore omitted the approval even though the
+proposal store could confirm and execute it. New approvals now atomically append
+the named tool call and proposal, using only the host-reviewed/redacted argument
+snapshot for display. Raw provider arguments remain outside these events.
+
+For older orphaned streams, bounded replay and retained-history reads restore the
+projection by linking exact copies to the original immutable approval events.
+Execution audit validates the original payload, time and actor/source on every
+copy, then uses the original evidence. Missing confirmation evidence, altered
+review/attribution, incomplete pagination and incompatible identities fail closed.
+Idempotent proposal creation is followed by a current-store read so an old pending
+snapshot cannot replace a later decision. A persisted terminal turn prevents new
+confirmed execution; already-completed ledger results remain replayable.
+
+Validation: 15 realtime bridge and 6 approval execution tests pass, including
+new and orphaned streams, repair before/after confirmation, original reviewer
+attribution, replay after bridge recreation, altered recovery evidence, missing
+confirmation, cancellation before resume, and no repeated domain invocation.
+These are shared SDK tests. Mills native realtime still needs selected-conversation
+and SDK-mode policy wiring plus a review surface; this patch alone does not
+establish native voice parity or live provider/billing qualification.
+
+## Mills voice message foundation (route wiring remains open)
+
+The SQL assistant store now provides `startVoiceMessage` for authenticated, owned
+conversation activity. It creates only an assistant message with explicit
+`realtime_voice` metadata; it never fabricates an authenticated user utterance
+from provider output. A conversation lock and stable request identity prevent
+duplicate messages/audit entries. Replays return the current stored message,
+including completion, without starting another response. Existing immutable
+proposal staging, decisions and completion work with this message.
+
+A targeted real PGlite/migration test passed: concurrent same-key starts create
+one message, other users in the same or another household get 404, no user
+message is inserted, a staged rejection appears in conversation history, and
+completion plus store recreation retain the original decision. Scoped Mills
+TypeScript compilation and lint passed. No route invokes this method yet; it is
+the domain persistence boundary needed for the next native voice integration.
+
+Next unfinished point: wire Mills native selected conversation and assistant
+mode through the SDP route. Apply the existing server-owned required/automatic
+policy using the shared approval continuation and durable domain mutation ledger;
+connect a review surface during the voice sheet and persist actual voice run
+state/cancellation/completion. The current realtime route still generates a
+virtual conversation ID and invokes the legacy executor. Do not claim SDK voice
+policy parity, automatic hangup recovery, or live billing proof from these tests.
+Coverage Q&A search for Mills realtime returned no matching owner decisions.
+
+## Mills native SDK voice policy and review integration
+
+SDK-mode realtime SDP requests now identify the selected owned conversation and
+a stable call UUID. Production enables this route policy only with
+`MILLS_HANDRAIL_AI_MODE=dual_write`, using `MILLS_HANDRAIL_AI_APPROVALS`
+(required by default, or automatic). Legacy requests retain their existing voice
+executor. The SDK request checks ownership before constructing plugins or
+starting the provider; duplicate admitted call identities return 409 instead of
+starting another remote call. A server `X-Assistant-Mode: sdk` acknowledgement is
+required before the native SDK client accepts the SDP answer, so an older server
+cannot silently supply legacy approval behavior. The OpenAPI contract documents
+these headers and response cases. No environment values were changed.
+
+`realtime-conversation.ts` composes the existing SDK-backed mutation resolver,
+durable domain confirmation ledger, and shared approval continuation with the
+assistant-only voice message. Required approval waits for the real domain
+decision. Automatic execution retains project-policy evidence and known applied
+changes. Repeated tool identities reuse saved results; rejected, cancelled or
+uncertain proposal resolution prevents further dependent work in the voice call.
+Call cleanup preserves staged decisions and the final conversation summary.
+
+Mills native passes the selected conversation only in SDK mode. Its voice sheet
+shows conversation proposals and polls while open; pending changes can be
+confirmed/discarded without closing the voice view. Review data is available in
+the shared proposal card. Read/decision generations prevent a delayed pre-decision
+refresh from restoring a stale pending proposal. Closing the sheet cancels its
+local reads. The label counts conversation proposals, not all voice tool calls.
+
+Evidence: four real SQL/migration cases cover required confirmation/rejection,
+cancellation and automatic execution, result replay, one invocation and retained
+history. The mounted SDK HTTP flow confirms through the existing real endpoint;
+five existing realtime route cases also passed. All 19 controlled realtime
+provider tests pass, including stopping the second dependent tool after a policy
+failure. Seven native widget cases cover SDK voice review, retained legacy mode,
+voice/speaker controls and proposals; four native transport cases cover credentials,
+SDK identities, acknowledgement and shared-speaker context. The SDK voice widget
+case also passes with an intentionally delayed refresh after confirmation.
+Scoped Dart analysis reports no issues. These use controlled provider/WebRTC
+fixtures, not a real microphone, provider session or billable account.
+
+Remaining lifecycle work: native stop still closes local WebRTC; an explicit
+authorized server hangup with durable call identity is needed for reliable remote
+cleanup across workers/restarts. This voice integration does not yet publish a
+canonical SDK run/activity lifecycle or recover stale pending voice messages after
+a worker crash. Do not claim reload-safe voice running/unread markers or accurate
+voice tool counts from the proposal panel. Close these gaps through shared SDK
+lifecycle/persistence primitives, retaining domain schema/policy in Mills.
+
+Owner test navigation (source candidate): select Try SDK in the native assistant,
+open Voice on the chosen conversation, choose Just me or Shared device, then open
+Conversation changes when a proposal appears. Expand Review change to inspect
+its saved fields and Confirm or Discard. Use legacy returns to the prior voice
+path. In automatic mode approved domain changes continue without per-change
+confirmation. A repeated failed call-start identity requires checking the saved
+conversation before closing/reopening voice for a new call. This is still an
+active qualification candidate, not deployment approval or final readiness.
+
+Final scoped Mills web TypeScript compilation and lint passed for the native
+voice policy integration and HTTP compatibility acknowledgement. No builds or
+checks remain running at this checkpoint. Next unfinished work is authoritative
+remote hangup and persisted voice lifecycle/activity/recovery.
+
+## Durable realtime call store and strict termination foundation
+
+Both web hosts now use `vendor/handrail-ai-assistant-0.2.7-parity.6927a606ed83.tgz` with SHA-256
+`6927a606ed83b3a8328ee379aeaca7e748014c529d5cce32864ba5c2577a38ac`. Manifest/lock integrity and all installed archive file
+bytes match in both hosts. The SDK supplies `PostgresRealtimeCallStore` and
+`createRealtimeCallLease`; see `docs/realtime-call-lifecycle.md` in the SDK.
+
+The store separates admission from the durable claim to create a provider call.
+Cancellation that wins before creation prevents dispatch. Later cancellation
+remains ending until a known remote reference is terminated. Provider attachment
+cannot overwrite a concurrent end request or revive an expired worker. Leases
+expire to uncertain, preserving the distinction between lost control and known
+remote termination. Call records remain scoped, immutable in identity, and
+readable through bounded keyset pages. Heartbeats are serialized and have an
+independent last-confirmed-deadline watchdog; stalled storage aborts local work
+and late replies cannot revive the lease. The existing SDK documents migration
+supports the new record kind; no additional domain DDL is introduced.
+
+One real SQL integration scenario passes admission/attachment/cancellation races,
+owner/environment isolation, changed bindings, worker expiry, lost commit
+acknowledgements and pagination. Two controlled-clock tests pass stalled renewal,
+termination conflicts, explicit close and late replies. SDK package typecheck,
+scoped lint and packaging builds pass. SDK Coverage Q&A search for voice was empty.
+
+Mills provider now exposes a strict server-only `hangupCall`: unsuccessful HTTP
+responses propagate failure, local work is stopped and drained, and another
+provider instance can terminate a retained reference. General shutdown still uses
+best-effort cleanup. `onCallCreated` is awaited before a tool-control channel is
+opened; storage failure tears down the known remote call. All 21 controlled Mills
+realtime provider tests pass, including these boundaries. This callback and the
+new SDK store are not yet connected to the Mills HTTP lifecycle.
+
+Next unfinished integration: persist/claim the SDK call before provider creation,
+attach the private provider reference in `onCallCreated`, bind the lease signal
+to provider setup/control and approval waits, and add an ownership-checked end
+route that records ending before strict remote hangup. Native End must use that
+route. Domain voice history/proposals and canonical activity/unread state still
+need reconciliation after worker loss; publishing these primitives alone does
+not establish reload-safe native voice or live provider/billing qualification.
+
+Both scoped web host TypeScript qualification compiles passed against candidate
+`6927a606ed83`. Final clean-install and live provider/runtime evidence remain open.
+
+
+### Resumed qualification: durable Mills voice end control (2026-09-05)
+
+The unfinished HTTP lifecycle integration above is now connected in source. SDK
+voice admission, provider-creation claim and private provider-reference storage
+use the shared PostgresRealtimeCallStore. Lease renewals and every new tool start
+reauthorize the original session. The lease abort signal stops provider setup and
+local tool work. The end route persists `ending` before remote hangup and records
+`ended` only after confirmation (or when provider creation never began).
+
+`GET /api/v1/ai/realtime/calls?conversationId=<uuid>` returns owner-scoped public
+call status with keyset pagination. `POST /api/v1/ai/realtime/calls/<callId>/end`
+with JSON `{ "conversationId": "<uuid>" }` uses session/CSRF authorization and
+allows the owner to stop a retained call after transcript deletion. It returns
+200 for ended or 202 for ending. Provider references never enter these responses.
+A failed remote hangup remains ending and can be retried from another worker.
+The OpenAPI contract documents both routes. No additional DDL is required beyond
+the existing SDK document persistence migration.
+
+Mills mobile now requires `X-Assistant-Call-Lifecycle: 1` plus
+`X-Assistant-Mode: sdk` before accepting SDK SDP. Deploy the matching backend
+before testing this native candidate. Only SDK voice End uses the new route:
+local audio is released first; unconfirmed termination retains the same call
+identity and shows Retry ending call. SDK sheet back/close controls request
+termination; drag/barrier dismissal is disabled. An explicit Close view option
+allows leaving after an unconfirmed end without claiming termination. Legacy
+voice behavior remains.
+
+Controlled validation: 23 provider tests pass, including SDP-read/socket-factory
+failure cleanup and cancellation during a stalled provider-reference write.
+Mounted HTTP tests pass real database call persistence, owner/CSRF rejection,
+repeatable end, retained ending after a failed provider hangup, and denial after
+the auth adapter reports session revocation. Provider transport and auth adapter
+are controlled in these tests; they are not live provider/session proofs. Five
+mobile transport cases and four voice/mode widgets pass, including keeping the
+sheet open after unconfirmed end and closing after a successful retry. Scoped
+web TypeScript compilation/lint and touched native Dart analysis pass.
+
+An end request which arrives before admission now proves live conversation
+ownership and reserves the same call ID in SDK persistence before marking it
+ended. A delayed start with that identity returns 409 without contacting the
+provider. Unknown persistence outcomes remain errors; only known admission
+conflicts can be reconciled by reading and ending the winning record.
+
+Still unfinished: native status-list recovery after process restart, durable
+voice activity/tool counts/unread projection, and worker-loss reconciliation of
+domain voice history/proposals. No device/provider/billing delivery proof is
+claimed. The shared SDK archive remains `6927a606ed83`; this checkpoint
+changes the Mills host wiring and native client, not the SDK package payload.
+
+
+### Shared voice-call recovery monitor and Mills native adoption (2026-09-05)
+
+The Dart SDK now supplies HandrailRealtimeCallMonitor, public call/page models,
+and immutable observation state. Hosts inject protected page reads and end
+requests. The monitor serializes reads, bounds pagination/retained records,
+retains unfinished evidence after failed or omitted reads, prevents lifecycle
+regression from stale replies, and separates accepted end from confirmed end.
+Disposal stops polling and ignores late responses. It does not resume WebRTC or
+re-create provider calls. The host retains server authorization/admission duties.
+
+Mills native creates the monitor for the selected SDK conversation when opening
+the voice sheet. Saved unfinished calls are visible before microphone startup,
+with End saved call and Refresh controls. New voice controls remain disabled
+until a complete fresh read reports no unfinished calls; starting also rechecks.
+An old backend without these endpoints therefore cannot silently start legacy
+voice from this SDK sheet. These call reads are outside Mills' offline read-cache
+allowlist. Legacy voice remains unchanged. Ending a retained call requires the
+same session/CSRF-protected server endpoint as the current live call.
+
+Evidence: 5 shared SDK recovery tests, 5 scoped Mills voice/mode widgets, and 6
+Mills realtime transport tests pass. The recovery widget restores uncertain
+server calls in a new monitor, rejects premature startup, retains accepted end,
+and permits startup after confirmed termination. SDK and touched Mills Dart
+analysis pass. Spartan's new vendored recovery file analyzes without issues;
+analysis of its entire vendored library found only existing style information,
+with no compile errors. This is controlled transport/widget evidence, not a
+physical-device reboot or real provider/billing receipt.
+
+Both native apps vendor exactly the same 11 SDK package files with per-file
+SHA-256 provenance. Spartan receives the reusable SDK API; it does not gain an
+unsupported realtime UI. The matching unpublished JS-package candidate is
+handrail-ai-assistant-0.2.7-parity.18759f975a2c.tgz, SHA-256
+18759f975a2ca3b66345f4c5acfda335f586a3fe38e71bf995d4276f047ff5ce.
+Both web hosts have matching archive dependencies, lock integrity and installed
+bytes; both native payloads also match the Dart files embedded in this tarball.
+SDK packaging builds pass. No package version, deployment environment, published
+release, Git commit, push or PR was created by this checkpoint.
+
+Next unfinished voice requirement: reconcile the domain transcript/proposals
+when a retained call is terminated by a different worker. The SDK call record can
+be ended while the old domain assistant message still says voice is in progress.
+The current recovery UI must not be treated as evidence that this separate
+transcript state, canonical activity/tool counts or unread markers are complete.
+Live host/device/usage delivery and final clean-install evidence remain open.
+
+Both scoped web host TypeScript qualification compiles passed against candidate
+`18759f975a2c`. Final clean-install and live runtime qualification remain open.
+
+
+### Mills ended-voice transcript reconciliation (2026-09-05)
+
+Mills now repairs voice transcripts from confirmed SDK call termination evidence.
+Both the authenticated End route and paged status reads reconcile ended call IDs
+against the owned conversation. Repair runs in a bounded domain transaction,
+updates the conversation version, and writes one recovery audit per interrupted
+message. Missing/deleted transcripts do not reverse remote termination.
+
+For a still-pending voice message, repair records a failed/interrupted transcript
+with explicit text that the call ended and saved changes need review. It rejects
+only proposals still proposed/unclaimed. Executing, confirmed, failed and already
+rejected proposals retain their status. Provider termination never proves a
+mutation outcome. A normal completed voice transcript is not rewritten.
+
+Voice completion now separately retains voiceRemoteEnded metadata. A transcript
+closed with unconfirmed termination is updated when confirmation arrives. A late
+original worker may complete a recovered voice message with its real result,
+including existing proposal identities/decisions; an older unconfirmed signal
+cannot overwrite confirmed termination or restore the uncertain wording.
+Ordinary failed text messages remain ineligible for late completion.
+
+Six scoped SQL voice cases pass, including concurrent/idempotent repair, same
+household ownership isolation, unclaimed rejection, claimed-state preservation,
+late settlement/completion, unconfirmed-to-confirmed history, and the unchanged
+failed-text boundary. The mounted HTTP recovery test simulates a new provider
+instance terminating the saved reference without the original close callback;
+status read repairs the pending transcript, and a late original callback can
+finish it. Provider/auth adapters are controlled; this is not live worker-kill
+or device evidence. Scoped Mills TypeScript compilation and lint pass.
+
+No SDK archive or migration changed in this checkpoint. Candidate `18759f975a2c`
+remains the current shared dependency. Remaining work includes recoverable domain
+projection of automatic voice execution intent/results when the original worker
+never returns, canonical voice activity/tool counts/unread state, live runtime
+and billing qualification, and final clean-install/release instructions. Repair
+uses a review-required summary where outcomes are unresolved; it does not claim
+that those business outcomes have been reconciled.
+
+
+### Automatic voice intent and execution-result recovery (2026-09-05)
+
+Mills SDK voice automatic mode now saves each immutable domain proposal and its
+project-policy execution claim before invoking a mutation. The initial proposal
+status is executing, so automatic mode does not briefly offer a confirmation
+step. Required approvals retain their original proposed/confirmation flow.
+Automatic mode uses the shared SDK claim/result ledger and the existing domain
+executor; conversation context is retained. Completed receipts carry
+mills.sdk.automatic.v1 plus a policy request ID, not a fabricated user
+confirmation request ID. Initial policy evidence is audited before dispatch.
+
+Voice close binds both approval modes to their existing staged proposal IDs.
+Known, executing and failed proposals remain reviewable even if the original
+worker cannot finalize its transcript. After confirmed call termination, the
+host finds outstanding voice executions and repairs their status only from
+completed SDK receipts with matching proposal, owner, execution identity,
+authorization and successful result fields. Missing or malformed evidence does
+not authorize redispatch or mark success. Other failed text messages retain the
+existing late-completion prohibition. This checkpoint scopes the new automatic
+proposal continuation to voice; text-mode automatic projection should be
+reviewed separately before making a whole-assistant recovery claim.
+
+The SDK adds getToolResults for bounded, tenant-scoped batches of up to 100 tool
+identities. It returns completed entries only; absence is not a failed result.
+The host first verifies conversation ownership, then reads batches and settles
+only the corresponding owned proposals. No new database migration is needed.
+
+Validation: 18 scoped Mills SQL voice/proposal/confirmation/execution cases,
+11 mutation-policy cases, and 4 mounted SDK voice HTTP cases pass. A controlled
+projection-write failure leaves one executed automatic change in executing state;
+a fresh store recovers it without another mutation. A corrupted owner receipt is
+rejected and does not alter that status. The mounted automatic-mode test completes
+without any confirmation endpoint request, shows the saved change before voice
+close, and replays the same tool call without a second execution. The SDK real-SQL
+ledger case now also covers batch bounds, deduplication, tenant separation,
+legacy completed results, and missing/uncertain entries. SDK typecheck, scoped
+lint and packaging builds pass; scoped Mills compile/lint pass.
+
+Both web hosts now pin handrail-ai-assistant-0.2.7-parity.678dde784841.tgz,
+SHA-256 678dde7848416883699621f3b8460b7d6f10e113853df541d14fea825ac7c9e2.
+Manifests, lock integrity and installed files match the archive. The existing
+Dart files in both mobile hosts still match its embedded Dart package exactly.
+No publish, commit, push, PR, deployment or project environment change occurred.
+
+Remaining: canonical voice activity/tool counts/unread state, complete text-mode
+automatic recovery qualification, live host/device and billing receipt evidence,
+final clean-install proof, and the consolidated parity/testing handoff. The
+controlled recovery tests do not prove real provider/device/runtime parity.
+
+Both scoped web host TypeScript qualification compiles passed against candidate
+`678dde784841`. Final clean-install and live runtime evidence remain open.
+
+## Mills automatic text recovery checkpoint — 2026-09-05
+
+Mills SDK text now stages automatic domain proposals before dispatch, preserving
+original user-message context and using the already-qualified SDK dispatch ledger.
+Message completion reuses staged IDs; a failed reply retains the saved proposal.
+Protected proposal-group/history reads restore confirmed status only from valid,
+completed SDK execution receipts and never execute again. Failed text messages
+remain failed. Spartan source already stages action requests before automatic
+project-policy execution. No Spartan source changed for this checkpoint.
+
+Mills validation: 17 gateway tests, 18 selected SQL gateway tests, two existing
+confirmation HTTP cases and one new history-reopen recovery test passed (38 total).
+Scoped host TypeScript compilation passed. This does not establish live provider
+or process-restart parity. SDK 678dde784841 candidate and both native vendors are
+unchanged. Canonical voice activity/unread, final clean dependency installation,
+protected runtime qualification and billing receipt evidence remain outstanding.
+
+## Current candidate installation and schema verification — 2026-09-05
+
+Four independent clean npm installs passed using current 678dde784841: Mills and
+Spartan, each with development and production dependencies. All package files
+match and every JavaScript entry point imports. New/expanded host SQL migration
+checks pass (Mills three, Spartan one), comparing the installed SDK schema and
+retaining execution evidence on reapplication. Evidence and migration/upgrade
+instructions are in parity-installation-and-upgrade.md and parity-install-evidence.json.
+These checks do not verify deployed migrations, provider sessions or billing.
+
+Both host scoped qualification TypeScript checks and lint on the new/expanded
+migration tests passed after this checkpoint. No SDK source, archive, mobile
+vendor, deployed configuration, commit, push or PR changed in this checkpoint.
+
+## Durable voice tool activity checkpoint — 2026-09-05
+
+SDK `PostgresRealtimeToolActivityStore` now persists one record per tool identity
+within an owned call. It prevents name rebinding and terminal reversal, handles
+duplicate callbacks without counter increments, and permits a recorded in-flight
+tool to settle after remote termination. Summary counts come from SQL; details
+are paginated and contain only identity/name/status/timestamps. Missing outcomes
+stay unresolved. Existing SDK document tables support the new kind; no DDL changed.
+
+Mills SDK voice lifecycle now connects the provider's start/result hooks to this
+store. A failed start-record write stops before domain dispatch. The protected
+GET `/api/v1/ai/realtime/calls/:callId/activity?conversationId=...` returns counts;
+`details=true` includes at most 50 tool records and `nextToolCallId` for paging.
+The HTTP route requires SDK mode availability, an admin/member session and owned
+conversation. Existing call status/end payloads are unchanged. Legacy voice has
+no new activity callback. These are display records, never mutation authorization.
+
+Evidence: SDK tool-activity and call-lifecycle SQL tests passed (2); Mills provider
+suite passed (25), including callback ordering, duplicate failed-tool delivery and
+stopping before dispatch when activity persistence fails; mounted SDK voice HTTP
+selection passed (2), including count/detail/ownership checks. SDK typecheck,
+scoped SDK lint and package builds passed; Mills scoped compilation passed.
+Native rendering of counts/details, workspace voice completion/unread and genuine
+browser/device/provider evidence remain open. No voice UI claim is made yet.
+
+Both web hosts now pin `handrail-ai-assistant-0.2.7-parity.20a847660a2b.tgz`, SHA-256
+`20a847660a2b4d59fef46847bdc2013cece4caf7e5d065c6fe859f1d8f4e313e`.
+Installed files, manifest/lockfile identity and provenance match the archive.
+The prior four clean installs qualify 678dde784841, so the new artifact needs
+renewed clean-install verification once integration is finished. Both native
+Dart vendors are unchanged. Nothing was committed, pushed, published or deployed.
+
+Spartan scoped qualification compilation and Mills lint on all touched voice
+source/tests also passed. The new archive contains 308 files, including the
+compiled shared voice activity store. Native UI wiring is the next unfinished step.
+
+## Shared native voice activity checkpoint — 2026-09-05
+
+Shared Dart `HandrailRealtimeActivityMonitor` now owns polling for an authenticated
+voice call's counts and optional details. It joins overlapping reads, validates
+call/conversation scope, rejects count/outcome regression, retains bounded loaded
+page windows and drops late replies after detail-mode changes or disposal. On
+failure it preserves saved counts and reports a safe refresh error. Typed models
+expose no arguments or business results.
+
+Mills native composes the monitor through its protected transport and repository.
+The voice sheet shows one selected call's counts, collapsed opt-in tool details,
+and bounded saved-call selection (including ended calls). Its existing
+showActivityDetails=false hides voice details while keeping counts. Interrupted,
+ending and ended calls label missing outcomes unresolved. Domain proposal review
+is retained. Activity reads are outside the native offline-cache allowlist.
+
+Evidence: four shared Dart tests, one protected transport test, and three Mills
+voice widgets passed (active/recovery/hidden details). Shared Dart analysis,
+scoped Mills analysis and analysis of Spartan's new shared file passed. Both
+mobile vendors have identical 12-file hashes and match the embedded SDK archive.
+No new Spartan voice capability, project configuration, release or deployment was
+introduced. Voice workspace completion/unread, live provider/device/billing proof
+and renewed clean-install validation remain outstanding.
+
+Both web manifests/locks/provenance now reference
+`handrail-ai-assistant-0.2.7-parity.cf54452ea2c5.tgz`, SHA-256
+`cf54452ea2c57d5760a1007f38b890167909eb599031ecfb332d1d5f4d7508e5`.
+Package builds passed and installed files match the archive. Its 276 compiled
+TypeScript files are byte-identical to the host-compiled 20a847 candidate; changes
+in this checkpoint are mobile client source and documentation. The previous
+four clean installs qualify 678dde784841, not this new archive.
+
+## Voice completion read receipts — 2026-09-05
+
+The SDK voice activity store now supplies readState()/markRead(token). An ended,
+dispatched call is unread until its displayed lifecycle version and monotonic
+tool counts are acknowledged. Tokens bind tenant/owner scope and call identity.
+Duplicate receipts are idempotent; older receipts cannot roll back a read marker;
+late tool outcomes make a previously read call unread again. No text activity or
+execution authorization changes. Existing SDK documents hold the receipts; no DDL.
+
+Mills activity GET now includes unread/readToken. Protected POST
+`/api/v1/ai/realtime/calls/:callId/activity/read` checks ownership, CSRF, scope and
+token bounds before recording it. The server returns current state, so an older
+acknowledgement may return unread=true if a newer result has arrived. The OpenAPI
+contract is updated. Native models continue to tolerate the additive fields.
+
+Evidence: the SDK SQL activity test covers concurrent acknowledgements, invalid
+scope/future tokens, lost write acknowledgement, late outcomes and old-token
+replay. The mounted Mills voice HTTP test covers read, late completion, stale
+acknowledgement, forged scope and CSRF. Both passed. SDK typecheck/scoped lint and
+package builds passed; Mills scoped qualification compilation passed.
+Client acknowledgements after actual visible rendering and conversation-workspace
+voice activity discovery/aggregation remain unfinished. This API alone does not
+complete the cross-thread unread requirement. SDK Coverage Q&A search for unread
+returned no matching decisions.
+
+Both web hosts now pin `handrail-ai-assistant-0.2.7-parity.bc15f37e420d.tgz`, SHA-256
+`bc15f37e420d16c51fe46c5004d3cc99de03e548c30e9badf006c8f6f8c25e98`.
+Manifests, lockfiles, provenance and installed files match. Both mobile vendors'
+12 files still match the packaged shared Dart source; no native change occurred.
+The prior four clean installs qualify 678dde784841, so current installation proof
+must be renewed after the remaining integration. No commit, push, PR or deployment.
+
+Spartan scoped qualification compilation and Mills lint on the changed voice
+route/tests passed. The next unfinished work is client read-token handling and
+voice activity/unread aggregation in conversation workspaces.
+
+## Visible native voice read acknowledgements — 2026-09-05
+
+The shared Dart activity monitor now validates completion tokens against the
+returned call and counts, queues acknowledgements for distinct displayed tokens,
+and keeps unread state until the server confirms it. Failed or disposed requests
+cannot clear saved evidence. Regressed lifecycle responses cannot turn an ended
+call's unread flag off. Older endpoints without receipts retain counts/details.
+
+Mills mobile supplies the protected CSRF read request through its SDK repository.
+The voice sheet acknowledges the captured token only after the summary is fully
+within the visible scroll viewport on the current route while the app is resumed.
+Selecting an ended call whose summary is offscreen does not mark it read. Failed
+receipts display a safe message and retry on a later visible refresh. Hosts hiding
+tool details still display counts and can acknowledge that displayed summary.
+
+Evidence: nine shared Dart activity tests and SDK Dart analysis passed. The
+protected Mills transport test verifies token/body/CSRF and rejects a foreign
+conversation receipt. Four Mills voice widget tests pass, including offscreen and
+paused visibility plus failed-receipt retry. Scoped Mills Dart analysis passes.
+Both mobile vendors contain the same shared Dart source. These tests use injected
+transport and widget fixtures; they are not live provider/device evidence.
+
+Still outstanding: conversation-workspace voice discovery and completion/unread
+aggregation, final clean installs of the resulting SDK archive, and protected
+runtime/billing evidence. This checkpoint completes selected-call native read
+receipts, not the global voice workspace requirement. Existing modes remain.
+
+Both web hosts now pin `handrail-ai-assistant-0.2.7-parity.1c926ba41f36.tgz`, SHA-256
+`1c926ba41f36190d129208189dc15a4a58b86460089b0539c9559d9feda8408d`. Package builds passed; installed package files match the archive.
+Both mobile vendors' 12 files match the archive's Dart source and provenance.
+All 276 compiled JS/type files are identical to the previously host-compiled
+bc15f37e420d candidate; this checkpoint changes mobile source and documentation.
+Spartan's scoped vendored activity analysis also passed. The earlier four clean
+installs qualify 678dde784841, not this archive. No commit, push, PR or deployment.
+
+## Authorized voice workspace feed — 2026-09-05
+
+The SDK now supplies PostgresRealtimeWorkspaceActivityStore. Hosts provide up to
+100 explicit tenant/owner/conversation scopes; the feed never infers ownership
+from an ID prefix. Calls are paged by conversation ID and call ID (20 by default,
+50 maximum), and evidence reads run in bounded batches of four. The whole batch
+settles before returning a failure, avoiding unfinished database reads after an
+error. Only call/conversation IDs, lifecycle status, tool counts and unread are
+projected. Provider/worker references, settings, read tokens, tool names/arguments
+and business results are excluded. Reading neither acknowledges calls nor writes
+text activity. Expired calls stay uncertain, and late tool results restore unread.
+
+Mills exposes protected GET /api/v1/ai/realtime/activity. Repeat conversationId
+for each owned conversation (maximum 100); pass both afterConversationId and
+afterCallId to continue its 20-call pages. All conversations are authorized first.
+The route rejects missing authentication, unknown conversations, duplicate IDs
+and incomplete cursors. No domain actions are executed or reconciled by this feed.
+The OpenAPI contract describes the exact response and bounds.
+
+Evidence: SDK real SQL test passes for two independent conversation scopes,
+paging, tenant/owner isolation, cancelled/expired/ended behavior, retained read
+receipts, late results and failed reads. SDK typecheck, scoped lint and package
+builds pass. Mills mounted HTTP test passes with its existing required approval,
+call lifecycle and read receipt flow plus workspace queries. Both web scoped
+qualification compiles pass. This is server feed evidence, not conversation-list
+rendering, live provider or deployment evidence. SDK Coverage Q&A voice search
+returned zero matching decisions.
+
+Both web hosts now pin `handrail-ai-assistant-0.2.7-parity.64eb98f43b3c.tgz`,
+SHA-256 `64eb98f43b3c834d0d0dc9845b7fe507272e2bbbad1ef454571cf45ce31b7ff2`. Manifests,
+locks, provenance and installed package files match. Both native vendors' 12
+files still match the packaged Dart source; this checkpoint makes no native edits.
+Current archive clean installs remain pending (the four prior clean installs
+qualify 678dde784841).
+
+Next unfinished work: shared client observation of this separate feed and voice
+status/unread summaries in conversation lists, starting with Mills mobile and
+then the shared web presentation. Text run/cancellation state and text read
+receipts must remain independent. No commit, push, PR, publish or deployment.
+
+## Native conversation-list voice activity — 2026-09-05
+
+Shared Dart now supplies HandrailRealtimeWorkspaceMonitor plus typed page/call/
+cursor models and per-conversation summaries. It observes up to 100 conversation
+IDs per request, serializes paging/refreshes, bounds total pages, rejects foreign,
+duplicate, missing or regressed records, and ignores late replies after scope
+changes or disposal. Failed or truncated refreshes retain the previous complete
+snapshot and expose a safe error. Active, end-unconfirmed, unread and unresolved
+outcomes remain separate from text turn/cancellation state. This observer has no
+acknowledgement or provider-operation API.
+
+Mills mobile supplies the protected transport and account-scoped repository
+observer. Its mode screen enables observation only when realtime voice is
+available to an admin/member. Initial catalog load and subsequent conversation
+changes update observed IDs; clearing a conversation removes it. Successful
+visible-call acknowledgements refresh the workspace. The SDK conversation list
+shows independent voice/text state and its icon counts unread voice calls.
+Opening a thread leaves voice unread receipts untouched. Refresh failures retain
+markers, show a retry message and label cached active calls as last reported.
+
+Evidence: five shared Dart workspace tests pass (paging/concurrency/scope changes,
+late disposal replies, completion/read state, invalid/truncated/regressed feeds).
+Mills protected transport test, actual SDK repository test and seven SDK widget
+tests pass. The repository test proves text idle/cancellation and voice activity
+remain independent; the widget proves unread persists through selection and
+failed refreshes. Existing mode switching, call recovery, required approval review
+and visible read receipts still pass. SDK Dart analysis, scoped Mills analysis
+and Spartan's scoped vendored workspace-file analysis pass. Both mobile vendors
+now have 13 matching source/provenance files. Spartan has no enabled realtime
+voice capability; these shared sources do not add one.
+
+Remaining: shared web voice feed observation/presentation, final clean installs,
+protected live browser/device/provider and billing evidence, and final owner
+readiness handoff. These native tests use injected HTTP/provider/widget fixtures,
+not a real device or provider. Existing and SDK modes are preserved. No commits,
+pushes, PRs, release publishing, project configuration edits or deployments.
+
+Both web hosts now pin `handrail-ai-assistant-0.2.7-parity.273042ed17e6.tgz`, SHA-256
+`273042ed17e6858a60cffe04f0a902c75b16e1a9f21e57d60424e01c5a95d867`. Package builds pass;
+manifests, lockfiles, provenance and installed files match the archive. Both
+mobile vendors' 13 files match its embedded Dart source. All 278 compiled JS/type
+files are byte-identical to the previously host-compiled 64eb98f43b3c candidate.
+This checkpoint changes native client/integration and documentation. The four
+prior clean installs qualify 678dde784841, not this new candidate.
+
+## Shared web voice workspace and client replacement — 2026-09-05
+
+Core SDK RealtimeWorkspaceMonitor now provides browser-safe, serialized catalog/
+feed observation, request timeouts/abort, bounded paging, scope validation and
+retention on missing/duplicate/regressed/failed reads. summarizeRealtimeWorkspace
+separates active, unconfirmed, unread and unresolved outcomes. React and headless
+exports supply useRealtimeWorkspaceActivity. Default styled launchers accept
+stable voiceActivity loader options, discover the full active authorized catalog
+and observe while closed. Threads/launcher summaries and per-thread rows display
+independent voice status. Hosts can hide/replace them through renderVoiceActivity
+or render headless state. onWorkingChange includes active voice calls; voice
+never enables text cancellation or changes text read receipts.
+
+The default launcher's old client UI is now hidden immediately when endpoint,
+client/device identity or transport configuration changes. Uploader caches and
+voice observers are disposed at that boundary. A client resolving after unmount
+is disposed before catalog reads; failed catalog bootstrap also releases client
+resources. Working callbacks clear on observer unmount. These are shared SDK
+changes used by both web hosts.
+
+Mills advertises voiceActivityAvailable only when its realtime provider/routes
+and SDK lifecycle integration are configured. Its web adapter sends scoped,
+uncached authenticated GETs, honors cancellation, rejects foreign records and
+handles expired sessions. The standard UI supplies voice options only for that
+advertised capability and admin/member roles. Its client ID includes household,
+user and role. Older hosts omitting the capability default to disabled. Legacy
+mode remains accessible. Spartan has no declared realtime voice integration and
+does not supply a voice loader.
+
+Evidence: six core observer tests, two headless/styled tests, three default
+launcher discovery/replacement/cleanup tests, and the existing 18 styled tests
+pass. SDK typecheck, scoped lint and package builds pass. Mills has six client
+transport/config tests, four runtime-selection tests, two rollout route tests
+and one mounted SDK voice lifecycle/approval/read test passing. Both web scoped
+qualification compiles pass. The test providers/transports are injected; these
+are not live browser/provider/billing results.
+
+Both hosts pin `handrail-ai-assistant-0.2.7-parity.5683009ec79b.tgz`, SHA-256
+`5683009ec79b0fde28bfd119737fa68ea8985155ba27d0b990b3cf7fecfe2102`. Manifests, locks,
+provenance and installed package files match. Both native vendors' 13 files are
+unchanged and match the archive's Dart source. Earlier clean-install evidence
+still qualifies 678dde784841, so final clean installs must use this candidate.
+
+Web voice workspace display is observational. It does not create a WebRTC call or
+acknowledge voice results merely because a thread is selected. Mills currently
+provides per-call detail review/token acknowledgements in its mobile voice sheet;
+web summaries leave those receipts unread. See realtime-workspace.md for the
+explicit API, bounds, lifecycle and custom-presentation contract.
+
+Next: final installation qualification and a requirement-by-requirement owner
+readiness audit, including remaining runtime access/billing evidence and exact
+test instructions. No commits, pushes, PRs, project configuration edits, release
+publishing or deployments occurred.
+
+## Current candidate clean installs and first real web acceptance — 2026-09-05
+
+- Candidate **5683009ec79b** passed all four isolated dev/production `npm ci`
+  runs with scripts enabled. All 24 JS entry points load and all 317 package
+  files match the archive in every install. Both native vendors' 13 files match
+  current source, provenance and the archive. This supersedes older candidates'
+  installation evidence without repacking unchanged executable code.
+- Started existing managed development databases non-destructively and web
+  services in both hosts. Spartan development startup migrations completed;
+  no staging/production migration, seed/reset, publish or deployment was run
+  manually. Full Mills runtime startup later timed out while connecting.
+- Real Mills browser login, existing/SDK switches, SDK conversation controls and
+  fallback passed in task `a8d716d1-a9ef-4273-8b9d-8b05999720ee` with no page
+  errors or same-origin 5xx. Its first attempt found stale Vite optimized SDK
+  exports; moving generated deps caches aside and restarting fixed that error.
+- A live text/reload attempt failed before provider dispatch due to missing
+  generated APP_AI_PROVIDER/OPENAI_MODEL in the actual Mills process. SQL and
+  bounded server logging show a failed assistant/durable turn. Revalidating and
+  reapplying the unchanged declared capability model, then restarting, did not
+  repair injection. Do not repeat billable-flow acceptance until env is fixed.
+- Added dev-only browser scripts to both web repos. Mills has an isolated Vault
+  task with optional `text=true`; default mode sends no provider request. The
+  equivalent Spartan task creation was denied by the tool's config scope check,
+  despite the group's stated permission. No unsupported credential access or
+  replacement of unrelated tasks was used.
+- Current owner handoffs and machine-readable runtime evidence now distinguish
+  installed/source evidence, passing real UI bootstrap and missing live reply/
+  device/billing proof. Audio billing still requires the authoritative Handrail
+  modality/duration/receipt contract. Goal remains active; this turn made progress
+  and does not meet the three-consecutive-turn blocked threshold.
+
+- Both new dev browser scripts pass syntax checks and scoped ESLint. Current
+  SDK/Mills/Spartan whitespace checks pass. No typed production source changed
+  in this qualification turn; the prior package compile evidence still applies.
+
+## Primary platform dependency audit — 2026-09-05
+
+Read-only Handrail source identified the existing v1 every-invocation receipt
+contract and proved its current schema/cost function lack audio modality/duration
+support. Recorded transcription already queues v1 receipts; realtime still only
+retains evidence. This distinction corrects any earlier blanket description of
+all audio paths. See [concrete platform handoff](parity-platform-dependencies.md).
+The actual Mills process still lacks provider/model configuration; the Spartan
+task tool still contradicts the current group's allowed configuration scope.
+No production source, package artifact, pricing or credential change was made
+in this audit turn. Prior qualified package bytes remain unchanged.

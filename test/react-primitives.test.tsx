@@ -104,6 +104,7 @@ function composer(
   });
   return {
     draft: "hello",
+    acquireSubmissionBlock: vi.fn(() => vi.fn()),
     setDraft: vi.fn(),
     attachments: [],
     errors: [],

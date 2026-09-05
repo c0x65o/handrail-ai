@@ -394,3 +394,54 @@ describe("OpenAI trusted-server transcription capability", () => {
     })).toThrow(/resolver/);
   });
 });
+
+describe("OpenAI transcription usage capture", () => {
+  it("waits for capture before validating output and excludes transcript/audio from the observation", async () => {
+    const stored = deferred<void>();
+    const capture = vi.fn(() => stored.promise);
+    const adapter = createOpenAITranscriptionCapability({ model: "gpt-4o-mini-transcribe",
+      resolve_audio: async () => resolvedAudio(), capture_usage: capture,
+      request: async () => ({ text: null, usage: { type: "duration", seconds: 1.25 } }),
+    });
+    let finished = false;
+    const result = adapter.transcribe(transcriptionRequest()).then(() => { finished = true; },
+      (error: unknown) => { finished = true; return error; });
+    await vi.waitFor(() => expect(capture).toHaveBeenCalledOnce());
+    expect(finished).toBe(false);
+    expect(capture.mock.calls[0]).toEqual([{
+      request_id: "request-1", audio_id: "audio-1", model_id: "gpt-4o-mini-transcribe",
+      provider_idempotency_key: expect.any(String), usage: { type: "duration", seconds: 1.25 },
+    }]);
+    stored.resolve();
+    expect(normalizeTranscriptionError(await result).code).toBe("internal_failure");
+  });
+
+  it("captures a late provider response even after the caller cancels", async () => {
+    const controller = new AbortController();
+    const response = deferred<unknown>();
+    const capture = vi.fn(async () => undefined);
+    const provider = vi.fn(() => response.promise);
+    const adapter = createOpenAITranscriptionCapability({ model: "gpt-4o-mini-transcribe",
+      resolve_audio: async () => resolvedAudio(), request: provider, capture_usage: capture });
+    const result = safeFailure(adapter.transcribe(transcriptionRequest({ signal: controller.signal })), controller.signal);
+    await vi.waitFor(() => expect(provider).toHaveBeenCalledOnce());
+    controller.abort();
+    expect((await result).code).toBe("cancelled");
+    response.resolve(providerResponse({ usage: { type: "tokens", input_tokens: 17,
+      output_tokens: 9, total_tokens: 26, input_token_details: { audio_tokens: 17, text_tokens: 0 } } }));
+    await vi.waitFor(() => expect(capture).toHaveBeenCalledOnce());
+    expect(capture.mock.calls[0]).toMatchObject([{ usage: { type: "tokens", total_tokens: 26 } }]);
+  });
+
+  it("fails without another provider call when durable capture rejects", async () => {
+    const provider = vi.fn(async () => providerResponse());
+    const capture = vi.fn(async () => { throw new Error("private storage failure"); });
+    const adapter = createOpenAITranscriptionCapability({ model: "gpt-4o-mini-transcribe",
+      resolve_audio: async () => resolvedAudio(), request: provider, capture_usage: capture });
+    const failure = await safeFailure(adapter.transcribe(transcriptionRequest()));
+    expect(failure.code).toBe("internal_failure");
+    expect(JSON.stringify(failure)).not.toContain("private storage failure");
+    expect(provider).toHaveBeenCalledOnce();
+    expect(capture.mock.calls[0]).toMatchObject([{ usage: { type: "unavailable" } }]);
+  });
+});

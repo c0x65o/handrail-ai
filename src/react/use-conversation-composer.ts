@@ -197,6 +197,8 @@ export interface ConversationComposerResult {
   readonly setDraft: (draft: string) => void;
   readonly attachments: readonly ConversationComposerAttachment[];
   readonly errors: readonly ConversationComposerError[];
+  /** Blocks every submit path until the returned idempotent release function is called. */
+  readonly acquireSubmissionBlock: () => () => void;
   readonly canSend: boolean;
   readonly isSending: boolean;
   readonly submit: (
@@ -505,6 +507,18 @@ export function useConversationComposer<TRequest = undefined>(
   >([]);
   const [isSending, setIsSending] = useState(false);
   const sendingRef = useRef(false);
+  const submissionBlocks = useRef(new Set<symbol>());
+  const [submissionBlockCount, setSubmissionBlockCount] = useState(0);
+  const acquireSubmissionBlock = useCallback(() => {
+    const token = Symbol("composer task");
+    submissionBlocks.current.add(token);
+    setSubmissionBlockCount(submissionBlocks.current.size);
+    return () => {
+      if (submissionBlocks.current.delete(token)) {
+        setSubmissionBlockCount(submissionBlocks.current.size);
+      }
+    };
+  }, []);
   const composing = useRef(false);
   const draftRef = useRef(draft);
   const ownedRef = useRef(owned);
@@ -657,7 +671,7 @@ export function useConversationComposer<TRequest = undefined>(
   );
   const uploadsReady = attachments.every((attachment) => attachment.status === "ready");
   const hasContent = draft.trim().length > 0 || attachments.length > 0;
-  const canSend = !isSending && activeTurnId === null && hasContent && uploadsReady;
+  const canSend = submissionBlockCount === 0 && !isSending && activeTurnId === null && hasContent && uploadsReady;
 
   const updateDraft = useCallback((nextDraft: string): void => {
     draftRef.current = nextDraft;
@@ -864,7 +878,7 @@ export function useConversationComposer<TRequest = undefined>(
       return item?.status === "ready" ? [item.reference] : [];
     });
     const currentDraft = draftRef.current;
-    const eligible = !sendingRef.current && activeTurnId === null &&
+    const eligible = submissionBlocks.current.size === 0 && !sendingRef.current && activeTurnId === null &&
       (currentDraft.trim().length > 0 || currentOwned.length > 0) &&
       readyReferences.length === currentOwned.length;
     if (!eligible) return null;
@@ -988,6 +1002,7 @@ export function useConversationComposer<TRequest = undefined>(
   return useMemo(() => Object.freeze({
     draft,
     setDraft: updateDraft,
+    acquireSubmissionBlock,
     attachments,
     errors,
     canSend,
@@ -1002,6 +1017,7 @@ export function useConversationComposer<TRequest = undefined>(
     getFileInputProps: () => fileInputProps,
     getDropProps: () => dropProps,
   }), [
+    acquireSubmissionBlock,
     attachments,
     canSend,
     cancelAttachment,

@@ -102,3 +102,57 @@ instances in the same Dart isolate, refuses to overwrite a different pending
 submission and compares the full submission before deleting it. Hosts sharing
 storage across processes/isolates must supply database atomicity through the
 interface instead. It is an adapter, not unencrypted filesystem persistence.
+
+### Retained realtime voice calls
+
+`HandrailRealtimeCallMonitor` is a headless, conversation-scoped observer for
+server-owned voice call records. Supply authenticated `readPage(afterCallId)`
+and `requestEnd(callId)` callbacks, subscribe to `changes`, then call
+`startPolling()`. Dispose it when leaving that conversation/account. It never
+contains provider credentials, SDP or a private provider call reference.
+
+Use `state.unfinished` for recovery controls and `state.canStartCall` for the
+presentation gate before starting a new voice session. A failed/incomplete read
+retains prior evidence and cannot authorize a start. Ending/ended evidence wins
+over older replies. A server acknowledgement of `ending` keeps recovery pending;
+only `ended` confirms termination. The host must still authorize/admit starts on
+the server; this UI gate is not an authorization boundary or a global mutex.
+
+Polling joins in-flight reads; paging and retained records are bounded. Disposing
+stops polling and discards late replies. Hosts should impose transport timeouts
+and use account-scoped authenticated adapters. This observer does not re-create a
+provider call, resume WebRTC, or infer termination from a missing record.
+
+
+`HandrailRealtimeActivityMonitor` observes one protected voice call's saved tool
+counts. Hosts supply `readPage(details, afterToolCallId)` and dispose the monitor
+on account/call changes. Details are off by default; `setDetails(true)` enables
+bounded pages and `loadMore()` expands the retained page window. Polling is
+serialized. Failed, foreign and regressed reads preserve saved evidence and
+surface a safe error. `hasUnresolvedTools` distinguishes missing outcomes from
+work on a call still confirmed active. These display records do not authorize
+execution and contain no tool arguments or business results.
+
+For endpoints that support completion receipts, activity pages include `unread`
+and a scope-bound `readToken`. Supply `acknowledgeRead(token)` and call
+`monitor.markRead(displayedToken)` only after that snapshot is visibly rendered.
+The monitor queues distinct acknowledgements, joins matching ones, and refreshes
+server state after success; it never optimistically clears newer outcomes.
+Failures retain unread state and expose `readError`. Hosts should retry on a later
+visible refresh, not immediately in response to the error. Hidden/background
+views must not acknowledge. Older endpoints without receipt fields still support
+counts/details but cannot supply durable read acknowledgements.
+
+`HandrailRealtimeWorkspaceMonitor` observes voice status/counts/unread across
+independent conversations without changing text run or text read state. Supply
+`readPage(conversationIds, after)`, call `setConversations()` with the current
+authorized catalog, and start polling. It queries at most 100 conversation IDs
+per request, joins refreshes, bounds total pages (100 by default), rejects foreign,
+duplicate, missing or regressed saved records, and ignores late results after
+scope changes/disposal. A failed or truncated refresh preserves the previous
+whole snapshot and exposes a safe error. `state.forConversation(id)` separates
+active calls, calls awaiting end confirmation, unread calls and unresolved tool
+outcomes. Reading or selecting a conversation never acknowledges voice results.
+Hosts should label cached active state as last reported when an error is present,
+show the checking/error state before inferring absence, enforce authenticated
+transport timeouts, and dispose/recreate the monitor on account changes.

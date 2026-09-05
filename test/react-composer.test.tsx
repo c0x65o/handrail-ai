@@ -749,3 +749,30 @@ describe("useConversationComposer", () => {
     expect(intake).toBeDefined();
   });
 });
+
+
+it("blocks synchronous, keyboard and direct submissions until all local tasks release", async () => {
+  const { runtime, sendMessage } = fakeRuntime();
+  const uploader = createAttachmentUploader<Blob>({ upload: async () => { throw new Error("Unused"); } });
+  const { result } = renderHook(() => useConversationComposer({ uploader, initialDraft: "Draft" }), {
+    wrapper: wrapper(runtime),
+  });
+  let releaseFirst!: () => void;
+  let releaseSecond!: () => void;
+  await act(async () => {
+    releaseFirst = result.current.acquireSubmissionBlock();
+    releaseSecond = result.current.acquireSubmissionBlock();
+    expect(await result.current.submit()).toBeNull();
+  });
+  expect(result.current.canSend).toBe(false);
+  act(() => result.current.getTextareaProps().onKeyDown({ key: "Enter", shiftKey: false,
+    nativeEvent: { isComposing: false }, preventDefault: vi.fn(),
+  } as unknown as Parameters<ReturnType<ConversationComposerResult["getTextareaProps"]>["onKeyDown"]>[0]));
+  act(() => { releaseFirst(); releaseFirst(); });
+  expect(result.current.canSend).toBe(false);
+  expect(sendMessage).not.toHaveBeenCalled();
+  act(() => releaseSecond());
+  expect(result.current.canSend).toBe(true);
+  await act(async () => { await result.current.submit(); });
+  expect(sendMessage).toHaveBeenCalledTimes(1);
+});

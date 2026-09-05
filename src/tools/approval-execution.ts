@@ -24,6 +24,7 @@ import type {
   ConversationStateApprovalReviewedArguments,
 } from "../conversation/state.js";
 import type { JsonObject, ToolDefinition } from "../protocol.js";
+import { originalApprovalEvidence } from "../conversation/approval-evidence.js";
 
 export const APPROVAL_EXECUTION_COORDINATOR_LIMITS = Object.freeze({
   eventAppendAttempts: 4,
@@ -467,7 +468,7 @@ async function readProposalAudit(
   limits: ApprovalExecutionCoordinatorLimits,
 ): Promise<DurableProposalAudit | null> {
   let cursor: Awaited<ReturnType<ConversationEventStore["read"]>>["nextCursor"] = null;
-  const matching: ConversationEvent[] = [];
+  let matching: ConversationEvent[] = [];
   try {
     for (let page = 0; page < limits.maxReconciliationPages; page += 1) {
       const read = await store.read({
@@ -484,6 +485,7 @@ async function readProposalAudit(
       if (cursor === null) return null;
       if (page === limits.maxReconciliationPages - 1) return null;
     }
+    matching = originalApprovalEvidence(matching);
   } catch {
     return null;
   }

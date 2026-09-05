@@ -9,6 +9,9 @@ part 'src/session.dart';
 part 'src/submission.dart';
 part 'src/protected_http.dart';
 part 'src/pending_turn_store.dart';
+part 'src/realtime_calls.dart';
+part 'src/realtime_activity.dart';
+part 'src/realtime_workspace.dart';
 
 const applicationGatewayProtocolVersion = 'handrail.application-gateway.v1';
 

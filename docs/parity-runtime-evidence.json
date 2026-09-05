@@ -1,0 +1,94 @@
+{
+  "date": "2026-09-05",
+  "candidate_sha256": "5683009ec79b0fde28bfd119737fa68ea8985155ba27d0b990b3cf7fecfe2102",
+  "mills": {
+    "service": "web",
+    "startup": "passed",
+    "database": "managed dev Postgres started non-destructively; web restarted with current generated environment",
+    "login_task_run": "16cc24d0-9235-4b8a-b4db-73505224d9a1",
+    "login_status": 200,
+    "session_status": 200,
+    "browser_task_run": "a8d716d1-a9ef-4273-8b9d-8b05999720ee",
+    "browser_checks": [
+      "visible login",
+      "legacy assistant and SDK switch visible",
+      "SDK client and conversation controls loaded",
+      "return to legacy"
+    ],
+    "browser_page_errors": 0,
+    "browser_server_failures": 0,
+    "cache_repair": "Moved stale generated Vite deps caches aside and restarted dev web; missing parseRealtimeWorkspacePage export no longer reproduced.",
+    "text_reload_attempt": {
+      "task_run": "1681e6cd-1d9c-4e97-a7dc-ba30a20ea742",
+      "status": "failed",
+      "failure_stage": "provider configuration before dispatch",
+      "domain_failure_code": "ai_unavailable",
+      "sdk_durable_status": "failed",
+      "sdk_error_code": "unavailable",
+      "conversation_id": "53b26f26-eb73-4dac-8ecd-05b4bfe225be",
+      "turn_id": "turn_5a31e424-e95d-4cd8-b180-d8ccb10aed0f",
+      "page_errors": 0,
+      "http_5xx": 0,
+      "note": "SSE 200 proves SDK admission only. The log label live provider turn admitted in this older script was incorrect and has been renamed live SDK turn admitted."
+    },
+    "environment_blocker": {
+      "capability": "ai_openai dev on the web repo",
+      "declared_model": "gpt-6-astra",
+      "capability_validation": "success",
+      "missing_running_process_keys": [
+        "APP_AI_PROVIDER",
+        "OPENAI_MODEL",
+        "HANDRAIL_AI_RUNTIME_ENABLED"
+      ],
+      "repair_attempts": [
+        "full start_dev_runtime timed out connecting",
+        "reapplied the unchanged model via typed capability update, then restarted web; provider/model still missing"
+      ],
+      "provider_key": "presence checked only; no value retained",
+      "note": "No provider credential was copied or changed. AI Runtime telemetry must be checked through its authoritative binding, not inferred solely from absence of an environment key."
+    }
+  },
+  "spartan": {
+    "service": "web",
+    "startup": "passed",
+    "database": "managed dev Postgres started non-destructively; dev startup migration path completed",
+    "browser_checks": "not run: task configuration tool rejected Spartan as outside config scope"
+  },
+  "scope": "Managed local dev and one real Mills browser surface check. No staging/production migration/deployment; no live provider, domain mutation, microphone/device or billing proof in this record.",
+  "qa_script_validation": {
+    "mills": "node --check and scoped ESLint passed",
+    "spartan": "node --check and scoped ESLint passed"
+  },
+  "platform_contract_audit": {
+    "revision": "9cab30c311a8cc28c927f5edff7f9a9f818f08cd",
+    "access": "Handrail source read-only tools",
+    "contract": "docs/AI_RUNTIME_USAGE_CONTROL.md",
+    "receipt_fields": "aggregate token quantities only; no audio modality or duration fields",
+    "cost_function": "aggregate per-million token prices",
+    "transcription": "existing v1 outbox receipts plus separate audio evidence",
+    "realtime": "audio evidence only; receipt delivery remains incomplete",
+    "live_environment_recheck": "APP_AI_PROVIDER and OPENAI_MODEL still missing in supervised Mills process",
+    "spartan_config_recheck": "group allow_config_changes=true, task configuration still rejected"
+  },
+  "goal_blocker_audit": {
+    "status": "blocked",
+    "consecutive_goal_turns": 3,
+    "goal_id": "555195ae-d655-4f16-ab3f-20c7a9f54cd4",
+    "scope_rechecked": [
+      "Mills Family Office",
+      "Spartan Cyber ERP",
+      "Handrail AI Assistant SDK"
+    ],
+    "mills_running_pid": 2427219,
+    "mills_env_presence": {
+      "APP_AI_PROVIDER": false,
+      "OPENAI_MODEL": false
+    },
+    "unchanged_dependencies": [
+      "Handrail generated dev provider/model environment reconciliation",
+      "Spartan task configuration authorization consistent with declared group access",
+      "Approved audio receipt and pricing support across Handrail and Telemetry, followed by SDK/host delivery integration"
+    ],
+    "verification_scope": "Fresh goal, group scope, service PID and environment-presence checks; retained prior platform source and Spartan action evidence. No new provider, device or billing acceptance claimed."
+  }
+}

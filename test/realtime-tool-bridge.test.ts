@@ -15,6 +15,9 @@ import {
   createIdempotentRealtimeVoiceSessionAuthority,
   createRealtimeVoiceServerToolBridge,
   parseRealtimeVoiceServerToolCall,
+  replayConversation,
+  parseConversationEvent,
+  type ConversationEventStore,
   type ApplicationToolExecutor,
   type ApplicationToolPolicy,
   type ApprovalExecutionResume,
@@ -471,8 +474,22 @@ describe("trusted-server realtime tool bridge", () => {
 });
 
 describe("realtime durable approval pause", () => {
-  it("persists one proposal, pauses with no side effect, and resumes only exact confirmation", async () => {
-    const events = new InMemoryConversationEventStore();
+  it.each(["new", "cancelled-before-resume", "legacy-orphan", "legacy-pending", "legacy-incomplete", "legacy-altered-review", "legacy-altered-actor"] as const)("persists a visible proposal and resumes exact confirmation from %s events", async (format) => {
+    let events = new InMemoryConversationEventStore();
+    const eventStore: ConversationEventStore = {
+      getLatestRevision: (id) => events.getLatestRevision(id), read: (input) => events.read(input),
+      append: (input) => events.append(input),
+    };
+    await events.append({ conversationId, expectedRevision: null, events: [parseConversationEvent({
+      version: 1, event_id: "voice-input", conversation_id: conversationId,
+      revision: 1, occurred_at: "2026-08-29T12:00:00.000Z", ...userAttribution,
+      payload: { type: "message.created", message_id: "voice-input", role: "user",
+        content: [{ type: "text", text: "Please update the record." }] },
+    }), parseConversationEvent({
+      version: 1, event_id: "voice-turn-start", conversation_id: conversationId,
+      revision: 2, occurred_at: "2026-08-29T12:00:00.000Z", ...systemAttribution,
+      payload: { type: "turn.started", turn_id: turnId, input_message_ids: ["voice-input"] },
+    })] });
     const proposals = new InMemoryApprovalProposalStore<string>({
       authorize: ({ permissionContext }) => permissionContext === "allowed" ? "allow" : "deny",
       clock: { now: () => "2026-08-29T12:00:00.000Z" as ConversationTimestamp },
@@ -484,13 +501,14 @@ describe("realtime durable approval pause", () => {
     registry.register({ definition: definition("write.sensitive"), executor: invoke });
     const approvalCoordinator = createApprovalExecutionCoordinator({
       proposalStore: proposals,
-      eventStore: events,
+      eventStore,
       authorize: ({ permissionContext }) => permissionContext === "allowed" ? "allow" : "deny",
       verifyArguments: ({ binding, reviewedArguments, arguments: arguments_ }) =>
         binding.type === "reviewed_arguments_digest" &&
           binding.digest === "reviewed-value" &&
           reviewedArguments.type === "redacted_json" &&
-          JSON.stringify(reviewedArguments.value) === JSON.stringify(arguments_)
+          JSON.stringify(reviewedArguments.value) === JSON.stringify({ value: "[redacted]" }) &&
+          arguments_.value === "private tool argument"
           ? "match"
           : "mismatch",
     });
@@ -506,10 +524,10 @@ describe("realtime durable approval pause", () => {
       bindingStore: bindings,
       approvalWorkflow: {
         proposalStore: proposals,
-        eventStore: events,
-        reviewArguments: ({ arguments: arguments_ }) => ({
+        eventStore,
+        reviewArguments: () => ({
           type: "redacted_json",
-          value: arguments_,
+          value: { value: "[redacted]" },
         }),
         expiresAt: () => "2026-08-29T13:00:00.000Z" as ConversationTimestamp,
         resolveExecution: ({ proposalId }) => confirmed === proposalId
@@ -540,15 +558,35 @@ describe("realtime durable approval pause", () => {
         attribution: systemAttribution,
       },
     });
-    const request = call({ name: "write.sensitive" });
+    const request = call({ name: "write.sensitive", arguments: { value: "private tool argument" } });
     const paused = await bridge.execute(request, { signal: signal() });
     expect(paused).toMatchObject({ status: "approval_required" });
     expect(invoke).not.toHaveBeenCalled();
     if (paused.status !== "approval_required") throw new Error("expected approval pause");
+    const projected = await replayConversation({ conversationId, eventStore, checkpointPolicy: false });
+    expect(projected.state.approval_proposals).toHaveLength(1);
+    expect(projected.state.tool_calls[0]?.arguments).toEqual({ value: "[redacted]" });
+    expect(JSON.stringify((await events.read({ conversationId })).entries)).not.toContain("private tool argument");
+    if (format.startsWith("legacy-")) {
+      // Earlier bridge versions persisted only approval events. Rebuild that
+      // historical stream and retain subsequent real confirmation evidence.
+      const saved = (await events.read({ conversationId })).entries.map((entry) => entry.event)
+        .filter((event) => event.payload.type !== "tool_call.requested");
+      const legacy = new InMemoryConversationEventStore();
+      await legacy.append({ conversationId, expectedRevision: null, events: saved.map((event, index) =>
+        parseConversationEvent({ ...event, revision: index + 1 })) });
+      events = legacy;
+      expect((await replayConversation({ conversationId, eventStore, checkpointPolicy: false })).state.approval_proposals).toEqual([]);
+    }
+    if (format === "legacy-pending" || format.startsWith("legacy-altered")) {
+      expect(await bridge.execute(request, { signal: signal() })).toMatchObject({ status: "approval_required" });
+      expect((await replayConversation({ conversationId, eventStore, checkpointPolicy: false })).state.approval_proposals)
+        .toMatchObject([{ status: "pending", proposal_version: 1 }]);
+    }
     confirmed = paused.proposal_id;
     const reviewer = createApprovalCoordinator({
       proposalStore: proposals,
-      eventStore: events,
+      eventStore,
       authorize: () => "allow",
     });
     await expect(reviewer.decide({
@@ -563,11 +601,56 @@ describe("realtime durable approval pause", () => {
       signal: signal(),
     })).resolves.toMatchObject({ outcome: "accepted", proposalVersion: 2 });
 
+    if (format === "cancelled-before-resume") {
+      const revision = await events.getLatestRevision(conversationId);
+      await events.append({ conversationId, expectedRevision: revision, events: [parseConversationEvent({
+        version: 1, event_id: "voice-cancelled", conversation_id: conversationId,
+        revision: Number(revision) + 1, occurred_at: "2026-08-29T12:01:00.000Z", ...systemAttribution,
+        payload: { type: "turn.cancelled", turn_id: turnId, reason: "user" },
+      })] });
+      expect(await bridge.execute(request, { signal: signal() })).toMatchObject({ status: "completed", result: { is_error: true } });
+      expect(invoke).not.toHaveBeenCalled();
+      return;
+    }
+
+    if (format.startsWith("legacy-altered")) {
+      const retained = (await events.read({ conversationId })).entries.map(({ event }) => {
+        if (event.metadata?.repair_of_event_id === undefined || event.payload.type !== "approval.proposal_created") return event;
+        return parseConversationEvent(format === "legacy-altered-review"
+          ? { ...event, payload: { ...event.payload, reviewed_arguments: { type: "redacted_json", value: { value: "altered review" } } } }
+          : { ...event, actor: { type: "system", id: "different-host" } });
+      });
+      events = new InMemoryConversationEventStore();
+      await events.append({ conversationId, expectedRevision: null, events: retained });
+      expect(await bridge.execute(request, { signal: signal() })).toMatchObject({ status: "completed", result: { is_error: true } });
+      expect(invoke).not.toHaveBeenCalled();
+      expect(await proposals.get({ permissionContext: "allowed", proposalId: confirmed }))
+        .toMatchObject({ status: "confirmed", proposal_version: 2 });
+      return;
+    }
+
+    if (format === "legacy-incomplete") {
+      const retained = (await events.read({ conversationId })).entries.map((entry) => entry.event)
+        .filter((event) => event.payload.type !== "approval.proposal_status_changed");
+      events = new InMemoryConversationEventStore();
+      await events.append({ conversationId, expectedRevision: null, events: retained.map((event, index) =>
+        parseConversationEvent({ ...event, revision: index + 1 })) });
+      expect(await bridge.execute(request, { signal: signal() })).toMatchObject({ status: "completed", result: { is_error: true } });
+      expect(invoke).not.toHaveBeenCalled();
+      expect((await replayConversation({ conversationId, eventStore, checkpointPolicy: false })).state.approval_proposals).toEqual([]);
+      return;
+    }
+
     await expect(bridge.execute(request, { signal: signal() })).resolves.toMatchObject({
       status: "completed",
       result: { is_error: false },
     });
     expect(invoke).toHaveBeenCalledTimes(1);
+    const afterExecution = await replayConversation({ conversationId, eventStore, checkpointPolicy: false });
+    expect(afterExecution.state.approval_proposals).toMatchObject([{ status: "executed", proposal_version: 4,
+      decision_attribution: userAttribution }]);
+    expect(afterExecution.state.tool_calls).toHaveLength(1);
+    expect(JSON.stringify((await events.read({ conversationId })).entries)).not.toContain("private tool argument");
 
     const restarted = makeBridge();
     restarted.registerSession({

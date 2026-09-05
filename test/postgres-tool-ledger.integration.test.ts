@@ -71,5 +71,12 @@ it("retains dispatch claims across real SQL rollback while keeping external writ
     await new PostgresToolExecutionLedger(persistence, "tenant", "scope-b").getOrCreate("local", scopedExecute, "bound");
     await new PostgresToolExecutionLedger(persistence, "tenant", "scope-a").getOrCreate("local", scopedExecute, "bound");
     expect(scopedExecute).toHaveBeenCalledTimes(2);
+    await database.query("INSERT INTO handrail_ai_tool_ledger (tenant_id,tool_call_id,status,result) VALUES ($1,$2,'completed',$3::jsonb)",
+      ["other-tenant", "successful", JSON.stringify({ private: true })]);
+    expect(await persistence.getToolResults("tenant", ["successful", "uncertain", "missing", "legacy", "successful"]))
+      .toEqual([{ toolCallId: "legacy", result: { old: true } }, { toolCallId: "successful", result: { applied: "successful" } }]);
+    expect(await persistence.getToolResults("tenant", [])).toEqual([]);
+    await expect(persistence.getToolResults("tenant", Array.from({ length: 101 }, (_, index) => `tool-${index}`))).rejects.toBeInstanceOf(TypeError);
+    expect(mutate).toHaveBeenCalledTimes(2);
   } finally { await database.close(); }
 }, 30_000);

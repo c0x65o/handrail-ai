@@ -1,4 +1,7 @@
-import { Fragment, createElement, useCallback, useEffect, useRef, useState, useSyncExternalStore, type ComponentProps, type CSSProperties, type ReactNode } from "react";
+import { useRealtimeWorkspaceActivity } from "../react/realtime-workspace.js";
+import { RealtimeWorkspaceMonitor, summarizeRealtimeWorkspace, type RealtimeWorkspaceMonitorOptions, type RealtimeWorkspaceSnapshot, type RealtimeWorkspaceSummary } from "../realtime/workspace.js";
+import { useConversationApprovals } from "../react/use-conversation-approvals.js";
+import { Fragment, createElement, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentProps, type CSSProperties, type ReactNode } from "react";
 import { createHandrailAiClient, type HandrailAiClient } from "../client/bootstrap.js";
 import { createAttachmentUploader, type AttachmentUploader } from "../attachments/uploader.js";
 import type { ApplicationGatewayAttachmentSource, ApplicationGatewayCapabilities } from "../transports/application-gateway.js";
@@ -6,7 +9,7 @@ import { AI_RUNTIME_DOCUMENT_MIME_TYPES, AI_RUNTIME_IMAGE_MIME_TYPES, AI_RUNTIME
   AI_RUNTIME_PROTOCOL_VERSION, type AttachmentMimeType, type ChatRequest, type StreamEvent } from "../protocol.js";
 import type { ConversationClientId, ConversationDeviceId } from "../conversation/events.js";
 import type { ConversationAttachmentReference } from "../conversation/events.js";
-import type { ConversationApprovalProposalRecord, ConversationMessageRecord, ConversationState, ConversationToolResultRecord } from "../conversation/state.js";
+import type { ConversationMessageRecord, ConversationState, ConversationToolResultRecord } from "../conversation/state.js";
 import type { PresenceController } from "../presence/controller.js";
 import { emitAiDiagnostic, type AiDiagnosticSink } from "../diagnostics.js";
 import type { MessageAttachmentRenderer, MessageContentRenderer, ToolResultRenderer } from "../react/primitives.js";
@@ -161,9 +164,16 @@ export interface StyledChatPresetProps {
   readonly labels?: Partial<{ attach: string; send: string; stop: string; retry: string; placeholder: string }>;
 }
 
+export interface HandrailChatVoiceControlsContext {
+  readonly conversationId: ConversationId | null;
+  readonly composer: ConversationComposerResult;
+}
+
 export interface HandrailChatProps<TRequest> extends Omit<StyledChatPresetProps,
   "composer" | "state" | "presence" | "toolRendererKeys" | "toolResultRenderers"> {
   readonly runtime: ConversationRuntime<TRequest>;
+  /** Return a control component bound to this conversation and its current draft. */
+  readonly renderVoiceControls?: (context: HandrailChatVoiceControlsContext) => ReactNode;
   readonly composer: UseConversationComposerOptions<TRequest>;
   readonly presence?: PresenceController;
   readonly rendererPlugins?: readonly ToolRendererPlugin[];
@@ -177,10 +187,11 @@ const DEFAULT_LABELS = { attach: "Attach", send: "Send", stop: "Stop", retry: "R
 export const handrailChatPresetCss = `
 .hr-chat{--hr-accent:#635bff;--hr-bg:#fff;--hr-panel:#f6f7fb;--hr-text:#171927;--hr-muted:#687083;--hr-border:#dfe3eb;--hr-danger:#a32020;--hr-activity:#6750a4;--hr-radius-panel:16px;--hr-radius-message:12px;--hr-radius-control:9px;--hr-font:ui-sans-serif,system-ui,sans-serif;color:var(--hr-text);background:var(--hr-bg);border:1px solid var(--hr-border);border-radius:var(--hr-radius-panel);display:grid;grid-template-rows:auto minmax(12rem,1fr) auto;inline-size:min(100%,48rem);block-size:min(80dvh,48rem);font:400 14px/1.5 var(--hr-font);overflow:hidden;box-shadow:0 18px 55px #1719272b}
 .hr-chat[data-theme=dark]{--hr-accent:#9f9aff;--hr-bg:#171927;--hr-panel:#242735;--hr-text:#f4f5fa;--hr-muted:#aeb5c4;--hr-border:#3b4051;--hr-danger:#ff8c8c;--hr-activity:#c7b8ff}@media(prefers-color-scheme:dark){.hr-chat[data-theme=system]{--hr-accent:#9f9aff;--hr-bg:#171927;--hr-panel:#242735;--hr-text:#f4f5fa;--hr-muted:#aeb5c4;--hr-border:#3b4051;--hr-danger:#ff8c8c;--hr-activity:#c7b8ff}}
-.hr-chat[data-layout=page]{inline-size:100%;block-size:100%;min-block-size:30rem}.hr-chat[data-layout=drawer]{border-radius:var(--hr-radius-panel) 0 0 var(--hr-radius-panel);max-inline-size:30rem}.hr-chat[data-layout=launcher]{inline-size:min(48rem,calc(100vw - 2rem));block-size:min(46rem,calc(100dvh - 6rem))}.hr-chat__sr{block-size:1px;clip:rect(0 0 0 0);clip-path:inset(50%);inline-size:1px;overflow:hidden;position:absolute;white-space:nowrap}.hr-chat__header{align-items:center;background:var(--hr-bg);border-block-end:1px solid var(--hr-border);display:flex;gap:.75rem;padding:.9rem 1rem}.hr-chat__header h2{font-size:1rem;font-weight:700;margin:0}.hr-chat__picker{margin-inline-start:auto}.hr-chat__body{background:color-mix(in srgb,var(--hr-panel),var(--hr-bg) 52%);display:grid;grid-template-columns:minmax(0,1fr);min-block-size:0}.hr-chat__transcript{overflow:auto;padding:1rem;scrollbar-gutter:stable}.hr-chat [role=listitem]{background:var(--hr-bg);border:1px solid color-mix(in srgb,var(--hr-border),transparent 25%);border-radius:var(--hr-radius-message);box-shadow:0 1px 2px #1719270d;margin:.65rem 0;max-inline-size:88%;padding:.75rem .9rem;white-space:pre-wrap}.hr-chat [aria-label='user message']{background:var(--hr-accent);border-color:var(--hr-accent);color:white;margin-inline-start:auto}.hr-chat__message-row{display:grid}.hr-chat__message-actions{display:flex;justify-content:flex-end;margin-block-start:.15rem}.hr-message-action-status:not(:empty){margin-inline-start:.4rem}.hr-chat__status{align-items:center;background:var(--hr-bg);color:var(--hr-muted);display:flex;gap:.75rem;min-block-size:2rem;padding-inline:1rem}.hr-chat__composer{background:var(--hr-bg);border-block-start:1px solid var(--hr-border);padding:.75rem}.hr-chat__attachments{display:flex;gap:.5rem;list-style:none;margin:0 0 .5rem;padding:0}.hr-chat__form{align-items:end;display:grid;gap:.5rem;grid-template-columns:auto minmax(0,1fr) auto auto}.hr-chat textarea{background:var(--bg,var(--hr-bg));border:1px solid var(--hr-border);border-radius:var(--hr-radius-control);color:inherit;font:inherit;min-block-size:2.75rem;padding:.65rem .75rem;resize:none}.hr-chat button,.hr-chat__file{align-items:center;background:var(--hr-panel);border:1px solid var(--hr-border);border-radius:var(--hr-radius-control);color:inherit;cursor:pointer;display:inline-flex;font:inherit;justify-content:center;padding:.6rem .75rem}.hr-chat button:hover:not(:disabled),.hr-chat__file:hover{border-color:color-mix(in srgb,var(--hr-accent),var(--hr-border) 45%)}.hr-chat button[type=submit]{background:var(--hr-accent);border-color:var(--hr-accent);color:#fff;font-weight:650}.hr-chat .hr-chat__copy{background:transparent;border-color:transparent;color:var(--hr-muted);font-size:.75rem;line-height:1;padding:.25rem .35rem}.hr-chat button:focus-visible,.hr-chat textarea:focus-visible,.hr-chat input:focus-visible,.hr-chat summary:focus-visible{outline:3px solid color-mix(in srgb,var(--hr-accent),transparent 55%);outline-offset:2px}.hr-chat button:disabled{cursor:not-allowed;opacity:.5}.hr-chat__errors{color:var(--hr-danger);grid-column:1/-1;margin:.25rem 0 0;padding-inline-start:1.25rem}.hr-chat__aux{background:var(--hr-bg);border-block-start:1px solid var(--hr-border);padding:.75rem 1rem}@media(max-width:520px){.hr-chat,.hr-chat[data-layout=launcher]{block-size:100dvh;border:0;border-radius:0;inline-size:100vw}.hr-chat__form{grid-template-columns:auto minmax(0,1fr) auto}.hr-chat__header{padding-inline:.75rem}.hr-chat__transcript{padding:.75rem}}@media(prefers-reduced-motion:reduce){.hr-chat *{scroll-behavior:auto!important;transition:none!important}}
+.hr-chat[data-layout=page]{inline-size:100%;block-size:100%;min-block-size:30rem}.hr-chat[data-layout=drawer]{border-radius:var(--hr-radius-panel) 0 0 var(--hr-radius-panel);max-inline-size:30rem}.hr-chat[data-layout=launcher]{inline-size:min(48rem,calc(100vw - 2rem));block-size:min(46rem,calc(100dvh - 6rem))}.hr-chat__sr{block-size:1px;clip:rect(0 0 0 0);clip-path:inset(50%);inline-size:1px;overflow:hidden;position:absolute;white-space:nowrap}.hr-chat__header{align-items:center;background:var(--hr-bg);border-block-end:1px solid var(--hr-border);display:flex;gap:.75rem;padding:.9rem 1rem}.hr-chat__header h2{font-size:1rem;font-weight:700;margin:0}.hr-chat__picker{margin-inline-start:auto}.hr-chat__body{background:color-mix(in srgb,var(--hr-panel),var(--hr-bg) 52%);display:grid;grid-template-columns:minmax(0,1fr);min-block-size:0}.hr-chat__transcript{overflow:auto;padding:1rem;scrollbar-gutter:stable}.hr-chat [role=listitem]{background:var(--hr-bg);border:1px solid color-mix(in srgb,var(--hr-border),transparent 25%);border-radius:var(--hr-radius-message);box-shadow:0 1px 2px #1719270d;margin:.65rem 0;max-inline-size:88%;padding:.75rem .9rem;white-space:pre-wrap}.hr-chat [aria-label='user message']{background:var(--hr-accent);border-color:var(--hr-accent);color:white;margin-inline-start:auto}.hr-chat__message-row{display:grid}.hr-chat__message-actions{display:flex;justify-content:flex-end;margin-block-start:.15rem}.hr-message-action-status:not(:empty){margin-inline-start:.4rem}.hr-chat__status{align-items:center;background:var(--hr-bg);color:var(--hr-muted);display:flex;gap:.75rem;min-block-size:2rem;padding-inline:1rem}.hr-chat__composer{background:var(--hr-bg);border-block-start:1px solid var(--hr-border);padding:.75rem}.hr-chat__attachments{display:flex;gap:.5rem;list-style:none;margin:0 0 .5rem;padding:0}.hr-chat__voice{grid-column:1/-1;display:flex;align-items:center;gap:8px;flex-wrap:wrap}.hr-chat__form{align-items:end;display:grid;gap:.5rem;grid-template-columns:auto minmax(0,1fr) auto auto}.hr-chat textarea{background:var(--bg,var(--hr-bg));border:1px solid var(--hr-border);border-radius:var(--hr-radius-control);color:inherit;font:inherit;min-block-size:2.75rem;padding:.65rem .75rem;resize:none}.hr-chat button,.hr-chat__file{align-items:center;background:var(--hr-panel);border:1px solid var(--hr-border);border-radius:var(--hr-radius-control);color:inherit;cursor:pointer;display:inline-flex;font:inherit;justify-content:center;padding:.6rem .75rem}.hr-chat button:hover:not(:disabled),.hr-chat__file:hover{border-color:color-mix(in srgb,var(--hr-accent),var(--hr-border) 45%)}.hr-chat button[type=submit]{background:var(--hr-accent);border-color:var(--hr-accent);color:#fff;font-weight:650}.hr-chat .hr-chat__copy{background:transparent;border-color:transparent;color:var(--hr-muted);font-size:.75rem;line-height:1;padding:.25rem .35rem}.hr-chat button:focus-visible,.hr-chat textarea:focus-visible,.hr-chat input:focus-visible,.hr-chat summary:focus-visible{outline:3px solid color-mix(in srgb,var(--hr-accent),transparent 55%);outline-offset:2px}.hr-chat button:disabled{cursor:not-allowed;opacity:.5}.hr-chat__errors{color:var(--hr-danger);grid-column:1/-1;margin:.25rem 0 0;padding-inline-start:1.25rem}.hr-chat__aux{background:var(--hr-bg);border-block-start:1px solid var(--hr-border);padding:.75rem 1rem}@media(max-width:520px){.hr-chat,.hr-chat[data-layout=launcher]{block-size:100dvh;border:0;border-radius:0;inline-size:100vw}.hr-chat__form{grid-template-columns:auto minmax(0,1fr) auto}.hr-chat__header{padding-inline:.75rem}.hr-chat__transcript{padding:.75rem}}@media(prefers-reduced-motion:reduce){.hr-chat *{scroll-behavior:auto!important;transition:none!important}}
 .hr-chat__markdown{overflow-wrap:anywhere;white-space:normal}.hr-chat__markdown>:first-child{margin-block-start:0}.hr-chat__markdown>:last-child{margin-block-end:0}.hr-chat__markdown pre{max-inline-size:100%;overflow:auto;white-space:pre}.hr-chat__markdown code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.hr-chat__markdown a{color:inherit;text-decoration:underline}.hr-chat__message-citations{font-size:.78rem;margin:.5rem 0 0;padding-inline-start:1.25rem}.hr-chat__message-citations li{background:transparent;margin:.15rem 0;max-inline-size:none;padding:0}.hr-chat__message-citations li>span:last-child{color:var(--hr-muted);margin-inline-start:.35rem}.hr-chat__attachment-card{align-items:center;border:1px solid var(--hr-border);border-radius:10px;color:inherit;display:flex;gap:.65rem;min-inline-size:11rem;overflow:hidden;padding:.5rem;text-decoration:none}.hr-chat__attachment-card img{block-size:5rem;inline-size:7rem;object-fit:cover}.hr-chat__attachment-copy{display:flex;min-inline-size:0;flex-direction:column}.hr-chat__attachment-copy strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.hr-chat__attachment-copy small{color:var(--hr-muted)}.hr-chat__voice{align-items:center;display:flex}
 .hr-chat__transcript-wrap{display:grid;min-block-size:0;position:relative}.hr-chat__transcript-wrap>.hr-chat__transcript{min-block-size:0}.hr-chat__jump{inset-block-end:.75rem;inset-inline-end:.75rem;position:absolute;z-index:1}.hr-chat__assistant-activity:not(:empty){font-weight:600}.hr-chat__body{grid-template-rows:minmax(0,1fr) auto auto}.hr-chat__tool-activity{background:var(--hr-bg);border-block-start:1px solid var(--hr-border);max-block-size:12rem;overflow:auto;padding:.5rem 1rem}.hr-chat__tool-activity summary{cursor:pointer;color:var(--hr-muted)}.hr-chat__tool-activity ol{margin:.5rem 0;padding-inline-start:1.5rem}.hr-chat__tool-activity li{padding:.2rem 0}
 .hr-chat__launcher-trigger{align-items:center;display:inline-flex;gap:.45rem}.hr-chat__launcher-status{font-size:.75rem;font-weight:600}.hr-chat__launcher-trigger[data-busy=true] .hr-chat__launcher-status{color:var(--hr-activity)}.hr-chat__launcher-trigger[data-error=true] .hr-chat__launcher-status{color:var(--hr-danger)}.hr-chat__launcher-badge:empty{display:none}.hr-chat__launcher-badge{align-items:center;background:var(--hr-danger);border-radius:999px;color:#fff;display:inline-flex;font-size:.7rem;justify-content:center;min-block-size:1.2rem;min-inline-size:1.2rem;padding-inline:.25rem}
+.hr-chat__voice-activity{display:block;font-size:.75rem;font-weight:400;line-height:1.35;max-inline-size:18rem;overflow-wrap:anywhere}.hr-chat__workspace-picker li .hr-chat__voice-activity{flex-basis:100%;margin-block-start:.25rem}.hr-chat__workspace-picker li button:first-child{flex-wrap:wrap}
 .hr-chat__workspace-picker{align-items:flex-start;display:flex;gap:.4rem;position:relative}.hr-chat__workspace-picker summary{background:var(--hr-panel,#f6f7fb);border:1px solid var(--hr-border,#dfe3eb);border-radius:9px;cursor:pointer;list-style:none;padding:.55rem .7rem}.hr-chat__workspace-picker summary::-webkit-details-marker{display:none}.hr-chat__workspace-picker ul{background:var(--hr-bg,#fff);border:1px solid var(--hr-border,#dfe3eb);border-radius:10px;box-shadow:0 12px 35px #17192724;display:grid;gap:.2rem;inset-block-start:calc(100% + .35rem);inset-inline-end:0;list-style:none;margin:0;max-block-size:20rem;min-inline-size:18rem;overflow:auto;padding:.4rem;position:absolute;z-index:10}.hr-chat__workspace-picker li{align-items:center;display:flex;margin:0;padding:0}.hr-chat__workspace-picker li button:first-child{align-items:center;display:flex;flex:1;inline-size:100%;justify-content:space-between;max-inline-size:none;text-align:start}.hr-chat__workspace-picker small{color:var(--hr-muted,#687083);margin-inline-start:.5rem}.hr-chat__workspace-picker [data-turn-status=running] small{color:var(--hr-activity)}.hr-chat__empty{display:grid;min-block-size:12rem;place-items:center;padding:1rem}
 .hr-chat__approvals{display:grid;gap:.5rem}.hr-chat__approval{background:var(--hr-panel);border:1px solid var(--hr-border);border-radius:var(--hr-radius-control);display:grid;gap:.4rem;padding:.65rem}.hr-chat__approval-actions{display:flex;gap:.5rem}.hr-chat__approval-error{color:var(--hr-danger)}
 `;
@@ -482,9 +493,12 @@ function BoundHandrailChat<TRequest>(props: HandrailChatProps<TRequest>): ReactN
   const composer = useConversationComposer(props.composer);
   const installed = installToolRendererPlugins(props.rendererPlugins ?? [], props.toolCatalog);
   const { runtime: _runtime, rendererPlugins: _plugins, toolCatalog: _catalog,
-    composer: _composer, presence: _presence, ...preset } = props;
-  void _runtime; void _plugins; void _catalog; void _composer; void _presence;
-  return <StyledChatPreset {...preset} composer={composer} {...(props.presence ? { presence: props.presence } : {})}
+    composer: _composer, presence: _presence, renderVoiceControls: _voiceRenderer, ...preset } = props;
+  void _runtime; void _plugins; void _catalog; void _composer; void _presence; void _voiceRenderer;
+  const voiceControls = props.renderVoiceControls === undefined ? props.voiceControls
+    : props.renderVoiceControls({ composer,
+      conversationId: props.composer.conversationId ?? props.runtime.getSnapshot().conversation_id });
+  return <StyledChatPreset {...preset} composer={composer} voiceControls={voiceControls} {...(props.presence ? { presence: props.presence } : {})}
     toolRendererKeys={installed.toolRendererKeys} toolResultRenderers={installed.renderers}/>;
 }
 
@@ -508,7 +522,37 @@ export interface ConversationCatalogWorkspaceOptions<TAuthorizationContext> {
   readonly pageSize?: number;
 }
 
+export interface VoiceActivityRenderInput {
+  readonly summary: RealtimeWorkspaceSummary;
+  readonly snapshot: RealtimeWorkspaceSnapshot;
+  readonly conversationId?: string;
+}
+export type VoiceActivityRenderer = (input: VoiceActivityRenderInput) => ReactNode;
+
+/** Safe default voice summary, independent of text run state and read receipts. */
+export function RealtimeWorkspaceActivity(props: { readonly monitor?: RealtimeWorkspaceMonitor;
+  readonly conversationId?: string; readonly render?: VoiceActivityRenderer; readonly showConnectionState?: boolean }): ReactNode {
+  const snapshot = useRealtimeWorkspaceActivity(props.monitor);
+  if (!props.monitor) return null;
+  const summary = summarizeRealtimeWorkspace(snapshot, props.conversationId);
+  const input = { summary, snapshot, ...(props.conversationId === undefined ? {} : { conversationId: props.conversationId }) };
+  if (props.render) return props.render(input);
+  const parts: string[] = [];
+  if (summary.activeCalls) parts.push(`${summary.activeCalls} voice ${summary.activeCalls === 1 ? "call" : "calls"} ${snapshot.error ? "last reported active" : "active"}`);
+  if (summary.unconfirmedCalls) parts.push(`${summary.unconfirmedCalls} voice ${summary.unconfirmedCalls === 1 ? "call needs" : "calls need"} end confirmation`);
+  if (summary.unreadCalls) parts.push(`${summary.unreadCalls} voice ${summary.unreadCalls === 1 ? "call" : "calls"} with unread results`);
+  if (summary.unresolvedTools) parts.push(`${summary.unresolvedTools} voice tool ${summary.unresolvedTools === 1 ? "outcome" : "outcomes"} unresolved`);
+  const connection = props.showConnectionState === false ? null : snapshot.error ?? (!snapshot.synchronized ? "Checking voice activity…" : null);
+  if (!parts.length && !connection) return null;
+  return <span className="hr-chat__voice-activity" aria-live="polite">
+    {parts.join(" · ")}{connection && <span role="status">{parts.length ? " · " : ""}{connection}</span>}
+  </span>;
+}
+
 export interface WorkspaceThreadPickerProps<TRequest, TAuthorizationContext> {
+  readonly voiceActivity?: RealtimeWorkspaceMonitor;
+  /** Return null to hide voice summaries or render a custom design. */
+  readonly renderVoiceActivity?: VoiceActivityRenderer;
   readonly activity?: ConversationActivityReadable;
   readonly workspace: ConversationWorkspaceController<TRequest, TAuthorizationContext>;
   readonly createConversation?: () => Promise<ConversationWorkspaceOpenInput<TAuthorizationContext>>;
@@ -522,6 +566,10 @@ export function WorkspaceThreadPicker<TRequest, TAuthorizationContext>(
 ): ReactNode {
   const snapshot = useConversationWorkspaceSnapshot(props.workspace);
   const activity = useConversationActivitySnapshot(props.workspace, props.activity);
+  const voiceIds = JSON.stringify(snapshot.threads.map((thread) => String(thread.conversationId)).sort());
+  useEffect(() => {
+    if (props.voiceActivity && !props.voiceActivity.usesConversationLoader) void props.voiceActivity.setConversations(JSON.parse(voiceIds) as string[]);
+  }, [props.voiceActivity, voiceIds]);
   const runningCount = activity.filter((record) => record.turnStatus === "running").length;
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
@@ -535,7 +583,9 @@ export function WorkspaceThreadPicker<TRequest, TAuthorizationContext>(
   return <div className="hr-chat__workspace-picker">
     {props.createConversation && <button type="button" disabled={creating} aria-busy={creating}
       onClick={() => void create()}>{creating ? "Creating…" : "New"}</button>}
-    <details><summary>Threads{runningCount > 0 ? ` (${runningCount} running)` : ""}</summary>
+    <details><summary>Threads{runningCount > 0 ? ` (${runningCount} running)` : ""}
+      <RealtimeWorkspaceActivity {...(props.voiceActivity ? { monitor: props.voiceActivity } : {})} {...(props.renderVoiceActivity ? { render: props.renderVoiceActivity } : {})}/>
+    </summary>
     <ul aria-label="Open conversations">{snapshot.threads.map((localThread) => {
       const thread = { ...localThread, ...activity.find((record) => record.conversationId === localThread.conversationId),
         conversationId: localThread.conversationId };
@@ -546,6 +596,8 @@ export function WorkspaceThreadPicker<TRequest, TAuthorizationContext>(
           void props.onConversationRead?.(thread.conversationId); }}>
         <span>{props.getThreadLabel?.(thread.conversationId) ?? thread.conversationId}</span>
         <small>{thread.turnStatus === "running" ? "Running" : thread.unread ? "Done" : thread.turnStatus}</small>
+        <RealtimeWorkspaceActivity {...(props.voiceActivity ? { monitor: props.voiceActivity } : {})} conversationId={String(thread.conversationId)}
+          showConnectionState={false} {...(props.renderVoiceActivity ? { render: props.renderVoiceActivity } : {})}/>
       </button></li>; })}</ul></details>
     {error && <span role="alert">{error}</span>}
   </div>;
@@ -584,6 +636,9 @@ export function CatalogWorkspaceThreadPicker<TRequest, TAuthorizationContext>(
         } while (cursor);
         if (cancelled) return;
         setDescriptors(found);
+        if (props.voiceActivity && !props.voiceActivity.usesConversationLoader) {
+          void props.voiceActivity.setConversations(found.filter((item) => item.lifecycle === "active").map((item) => String(item.conversationId)));
+        }
         const active = found.filter((descriptor) => descriptor.lifecycle === "active");
         if (props.workspace.getSnapshot().selectedConversationId === null && active[0]) {
           await props.workspace.open({ authorizationContext,
@@ -592,7 +647,7 @@ export function CatalogWorkspaceThreadPicker<TRequest, TAuthorizationContext>(
       } catch { if (!cancelled) setError("Conversations could not be loaded."); }
     })();
     return () => { cancelled = true; };
-  }, [authorizationContext, catalog, pageSize, props.workspace, refreshRevision]);
+  }, [authorizationContext, catalog, pageSize, props.workspace, props.voiceActivity, refreshRevision]);
   const create = async () => {
     if (!props.createConversation || busyId !== null) return;
     setBusyId("create"); setError("");
@@ -624,7 +679,9 @@ export function CatalogWorkspaceThreadPicker<TRequest, TAuthorizationContext>(
   return <div className="hr-chat__workspace-picker">
     {props.createConversation && <button type="button" disabled={busyId !== null} aria-busy={busyId === "create"}
       onClick={() => void create()}>{busyId === "create" ? "Creating…" : "New"}</button>}
-    <details><summary>Threads{runningCount > 0 ? ` (${runningCount} running)` : ""}</summary>
+    <details><summary>Threads{runningCount > 0 ? ` (${runningCount} running)` : ""}
+      <RealtimeWorkspaceActivity {...(props.voiceActivity ? { monitor: props.voiceActivity } : {})} {...(props.renderVoiceActivity ? { render: props.renderVoiceActivity } : {})}/>
+    </summary>
       <ul aria-label="Conversations">{active.map((descriptor) => {
         const thread = activity.find((item) => item.conversationId === descriptor.conversationId);
         const opened = snapshot.threads.some((item) => item.conversationId === descriptor.conversationId);
@@ -638,6 +695,8 @@ export function CatalogWorkspaceThreadPicker<TRequest, TAuthorizationContext>(
             })()}>
             <span>{props.getThreadLabel?.(descriptor.conversationId) ?? labels.get(descriptor.conversationId) ?? descriptor.conversationId}</span>
             <small>{thread?.turnStatus === "running" ? "Running" : thread?.unread ? "Done" : thread?.turnStatus ?? "idle"}</small>
+            <RealtimeWorkspaceActivity {...(props.voiceActivity ? { monitor: props.voiceActivity } : {})} conversationId={String(descriptor.conversationId)}
+              showConnectionState={false} {...(props.renderVoiceActivity ? { render: props.renderVoiceActivity } : {})}/>
           </button>
           {catalog.capabilities.archive.supported && <button type="button"
             disabled={busyId !== null} aria-label={`Archive ${descriptor.title ?? "conversation"}`}
@@ -658,6 +717,8 @@ export function CatalogWorkspaceThreadPicker<TRequest, TAuthorizationContext>(
 export interface HandrailChatWorkspaceProps<TRequest, TAuthorizationContext>
   extends Omit<HandrailChatProps<TRequest>, "runtime" | "composer" | "conversationPicker"> {
   readonly workspace: ConversationWorkspaceController<TRequest, TAuthorizationContext>;
+  readonly voiceActivity?: RealtimeWorkspaceMonitor;
+  readonly renderVoiceActivity?: VoiceActivityRenderer;
   readonly composerForConversation: (
     runtime: ConversationRuntime<TRequest>,
     conversationId: ConversationId,
@@ -683,11 +744,15 @@ export function HandrailChatWorkspace<TRequest, TAuthorizationContext>(
   const picker = props.conversationPicker ?? (props.catalogOptions
     ? <CatalogWorkspaceThreadPicker workspace={props.workspace} catalogOptions={props.catalogOptions}
       {...(props.activity ? { activity: props.activity } : {})}
+      {...(props.voiceActivity ? { voiceActivity: props.voiceActivity } : {})}
+      {...(props.renderVoiceActivity ? { renderVoiceActivity: props.renderVoiceActivity } : {})}
       {...(props.createConversation ? { createConversation: props.createConversation } : {})}
       {...(props.getThreadLabel ? { getThreadLabel: props.getThreadLabel } : {})}
       {...(props.onConversationRead ? { onConversationRead: props.onConversationRead } : {})}/>
     : <WorkspaceThreadPicker workspace={props.workspace}
     {...(props.activity ? { activity: props.activity } : {})}
+      {...(props.voiceActivity ? { voiceActivity: props.voiceActivity } : {})}
+      {...(props.renderVoiceActivity ? { renderVoiceActivity: props.renderVoiceActivity } : {})}
     {...(props.createConversation ? { createConversation: props.createConversation } : {})}
     {...(props.getThreadLabel ? { getThreadLabel: props.getThreadLabel } : {})}
     {...(props.onConversationRead ? { onConversationRead: props.onConversationRead } : {})}/>);
@@ -699,8 +764,9 @@ export function HandrailChatWorkspace<TRequest, TAuthorizationContext>(
   </section>;
   const { workspace: _workspace, composerForConversation: _composerFor, createConversation: _create,
     getThreadLabel: _label, onConversationRead: _onConversationRead, noConversation: _empty, conversationPicker: _picker,
-    presenceForConversation: _presenceFor, catalogOptions: _catalogOptions, ...chat } = props;
-  void _workspace; void _composerFor; void _create; void _label; void _onConversationRead; void _empty; void _picker; void _presenceFor; void _catalogOptions;
+    presenceForConversation: _presenceFor, catalogOptions: _catalogOptions, voiceActivity: _voiceActivity,
+    renderVoiceActivity: _renderVoiceActivity, ...chat } = props;
+  void _workspace; void _composerFor; void _create; void _label; void _onConversationRead; void _empty; void _picker; void _presenceFor; void _catalogOptions; void _voiceActivity; void _renderVoiceActivity;
   const runtime = selected.runtime as ConversationRuntime<TRequest>;
   const presence = props.presenceForConversation?.(selected.conversationId) ?? props.presence;
   const composer = props.composerForConversation(runtime, selected.conversationId);
@@ -759,6 +825,8 @@ export function HandrailChatWorkspaceLauncher<TRequest, TAuthorizationContext>(
     }</ChatLauncherStatus><ChatLauncherBadge className="hr-chat__launcher-badge">{(state) =>
       state.unreadCount > 0 ? state.unreadCount : null
     }</ChatLauncherBadge>
+    <RealtimeWorkspaceActivity {...(props.voiceActivity ? { monitor: props.voiceActivity } : {})}
+      {...(props.renderVoiceActivity ? { render: props.renderVoiceActivity } : {})}/>
   </ChatLauncherTrigger><ChatLauncherPortal><ChatLauncherPanel>
     <ChatLauncherTitle className="hr-chat__sr">{props.title ?? "Assistant"}</ChatLauncherTitle>
     <HandrailChatWorkspace {...workspaceProps} layout="launcher"/>
@@ -766,7 +834,9 @@ export function HandrailChatWorkspaceLauncher<TRequest, TAuthorizationContext>(
 }
 
 export interface HandrailAssistantLauncherProps extends Omit<HandrailChatWorkspaceLauncherProps<ChatRequest, object>,
-  "workspace" | "composerForConversation" | "createConversation" | "activity" | "presenceForConversation"> {
+  "workspace" | "composerForConversation" | "createConversation" | "activity" | "presenceForConversation" | "voiceActivity"> {
+  /** Host-authenticated voice feed; catalog discovery, polling and cleanup are SDK-owned. */
+  readonly voiceActivity?: Omit<RealtimeWorkspaceMonitorOptions, "loadConversationIds">;
   /** The only required integration value; capabilities and resources are negotiated from this endpoint. */
   readonly endpoint: string;
   readonly fetch?: typeof globalThis.fetch;
@@ -838,17 +908,22 @@ export function gatewayAttachmentIntake(
 }
 
 interface AssistantLauncherState {
+  readonly configurationKey: object;
   readonly client: HandrailAiClient<StreamEvent, ChatRequest, object>;
   readonly uploader: AttachmentUploader<ApplicationGatewayAttachmentSource>;
 }
 
-function AssistantWorkingObserver({ workspace, activity, onChange }: {
+function AssistantWorkingObserver({ workspace, activity, voiceActivity, onChange }: {
   readonly workspace: ConversationWorkspaceReadable;
   readonly activity?: ConversationActivityReadable;
+  readonly voiceActivity?: RealtimeWorkspaceMonitor;
   readonly onChange?: (working: boolean) => void;
 }) {
   const binding = useConversationLauncherBinding(workspace, undefined, activity);
-  useEffect(() => onChange?.(binding.turnStatus === "busy"), [binding.turnStatus, onChange]);
+  const voice = useRealtimeWorkspaceActivity(voiceActivity);
+  const working = binding.turnStatus === "busy" || summarizeRealtimeWorkspace(voice).activeCalls > 0;
+  useEffect(() => onChange?.(working), [working, onChange]);
+  useEffect(() => () => onChange?.(false), [onChange]);
   return null;
 }
 
@@ -914,71 +989,8 @@ function ConversationGatewayApprovals({ resources, conversationId }: {
   readonly resources: HandrailAiClient<StreamEvent, ChatRequest, object>["resources"];
   readonly conversationId: string;
 }) {
-  const [state, setState] = useState({ resources,
-    proposals: [] as readonly ConversationApprovalProposalRecord[], busy: null as string | null, failed: false });
-  const lifecycle = useRef<{
-    active: boolean; busy: boolean; revision: number; refresh: () => void;
-  } | null>(null);
-  useEffect(() => {
-    let loading = false;
-    let refreshAfterLoad = false;
-    const current = { active: true, busy: false, revision: 0, refresh: () => { void load(); } };
-    lifecycle.current = current;
-    setState({ resources, proposals: [], busy: null, failed: false });
-    async function load() {
-      if (!current.active) return;
-      if (loading) { refreshAfterLoad = true; return; }
-      loading = true;
-      const revision = current.revision;
-      try {
-        const proposals = await resources.listApprovalGroup({ groupId: conversationId as never });
-        if (current.active && revision === current.revision) {
-          setState((previous) => ({ ...previous, resources, proposals, failed: false }));
-        }
-      } catch {
-        if (current.active && revision === current.revision) {
-          setState((previous) => ({ ...previous, failed: true }));
-        }
-      } finally {
-        loading = false;
-        if (refreshAfterLoad && current.active) { refreshAfterLoad = false; void load(); }
-      }
-    }
-    void load();
-    const timer = globalThis.setInterval(current.refresh, 2_000);
-    return () => { current.active = false; globalThis.clearInterval(timer); };
-  }, [resources, conversationId]);
-  const decide = async (proposal: ConversationApprovalProposalRecord, status: "confirmed" | "rejected") => {
-    const current = lifecycle.current;
-    if (!current?.active || current.busy) return;
-    const identity = `assistant:${proposal.proposal_id}:${proposal.proposal_version}:${status}`;
-    current.busy = true;
-    current.revision++;
-    setState((previous) => ({ ...previous, busy: proposal.proposal_id, failed: false }));
-    try {
-      await resources.transitionApproval({ conversationId, proposalId: proposal.proposal_id,
-        expectedVersion: proposal.proposal_version, status, idempotencyKey: identity,
-        idempotencyFingerprint: identity });
-      if (current.active) {
-        // A read started before confirmation settled must not restore its pending card.
-        current.revision++;
-        setState((previous) => ({ ...previous,
-          proposals: previous.proposals.filter((item) => item.proposal_id !== proposal.proposal_id) }));
-        current.refresh();
-      }
-    } catch {
-      if (current.active) {
-        current.revision++;
-        setState((previous) => ({ ...previous, failed: true }));
-      }
-    } finally {
-      current.busy = false;
-      if (current.active) setState((previous) => ({ ...previous, busy: null }));
-    }
-  };
-  // A new credential/resource boundary must never display the old boundary's proposals.
-  const { proposals, busy, failed } = state.resources === resources
-    ? state : { proposals: [], busy: null, failed: false };
+  const { proposals, busy, error, decide } = useConversationApprovals(resources, conversationId);
+  const failed = error !== null;
   const pending = proposals.filter((proposal) => proposal.status === "pending");
   if (pending.length === 0 && !failed) return null;
   return <section className="hr-chat__approvals" aria-label="Assistant approvals">
@@ -1003,8 +1015,13 @@ function browserIdentity(prefix: string): string {
 
 /** Endpoint-only production launcher. It owns negotiation, catalog, runtimes, uploads, recovery, and cleanup. */
 export function HandrailAssistantLauncher(props: HandrailAssistantLauncherProps): ReactNode {
-  const [state, setState] = useState<AssistantLauncherState | null>(null);
-  const [error, setError] = useState<unknown>(null);
+  const configurationKey = useMemo(() => Object.freeze({}),
+    [props.endpoint, props.fetch, props.protectedRequest, props.diagnostics, props.clientId, props.deviceId]);
+  const [savedState, setState] = useState<AssistantLauncherState | null>(null);
+  // Never render or observe a previous account/endpoint while the replacement boots.
+  const state = savedState?.configurationKey === configurationKey ? savedState : null;
+  const [failure, setFailure] = useState<{ readonly configurationKey: object; readonly cause: unknown } | null>(null);
+  const error = failure?.configurationKey === configurationKey ? failure.cause : null;
   const [generatedTitles, setGeneratedTitles] = useState<ReadonlyMap<ConversationId, string>>(new Map());
   const rememberGeneratedTitle = useCallback((conversationId: ConversationId, title: string) => {
     setGeneratedTitles((current) => new Map(current).set(conversationId, title));
@@ -1013,10 +1030,12 @@ export function HandrailAssistantLauncher(props: HandrailAssistantLauncherProps)
   useEffect(() => () => {
     for (const uploader of hostUploaders.current.values()) uploader.dispose();
     hostUploaders.current.clear();
-  }, []);
+  }, [configurationKey]);
   useEffect(() => {
     let disposed = false;
     let owned: AssistantLauncherState | null = null;
+    setFailure(null);
+    setGeneratedTitles(new Map());
     void (async () => {
       try {
         const authorizationContext = EMPTY_ASSISTANT_AUTHORIZATION_CONTEXT;
@@ -1044,25 +1063,55 @@ export function HandrailAssistantLauncher(props: HandrailAssistantLauncherProps)
             correlation_hints: {},
           }),
         });
-        if (!client.workspace) throw new TypeError("The assistant endpoint did not create a conversation workspace");
+        if (disposed) { await client.dispose(); return; }
+        if (!client.workspace) {
+          await client.dispose();
+          throw new TypeError("The assistant endpoint did not create a conversation workspace");
+        }
         const uploader = createAttachmentUploader<ApplicationGatewayAttachmentSource>(client.attachmentUpload ?? {
           upload: async () => { throw new TypeError("This assistant does not accept attachments"); },
         });
-        owned = { client, uploader };
+        owned = { client, uploader, configurationKey };
         const listed = await client.catalog.list({ authorizationContext, lifecycle: "active", pageSize: 1,
           order: { field: "updated_at", direction: "desc" } });
         const descriptor = listed.items[0] ?? (await client.catalog.create({ authorizationContext,
           idempotencyKey: browserIdentity("conversation") as never })).descriptor;
         await client.workspace.open({ authorizationContext, conversationId: descriptor.conversationId });
         if (!disposed) setState(owned);
-      } catch (cause) { if (!disposed) setError(cause); }
+      } catch (cause) {
+        const failed = owned; owned = null;
+        failed?.uploader.dispose();
+        await failed?.client.dispose();
+        if (!disposed) setFailure({ configurationKey, cause });
+      }
     })();
     return () => {
       disposed = true;
-      owned?.uploader.dispose();
-      void owned?.client.dispose();
+      const previous = owned; owned = null;
+      previous?.uploader.dispose();
+      void previous?.client.dispose();
     };
-  }, [props.endpoint, props.fetch, props.protectedRequest, props.diagnostics, props.clientId, props.deviceId]);
+  }, [configurationKey, props.endpoint, props.fetch, props.protectedRequest, props.diagnostics, props.clientId, props.deviceId]);
+
+  const voiceMonitor = useMemo(() => {
+    if (!state || !props.voiceActivity) return null;
+    const client = state.client;
+    return new RealtimeWorkspaceMonitor({ ...props.voiceActivity, loadConversationIds: async (signal) => {
+      const ids: string[] = [], cursors = new Set<string>();
+      let cursor: Awaited<ReturnType<typeof client.catalog.list>>["nextCursor"] | undefined;
+      for (let index = 0; index < 100; index++) {
+        if (signal.aborted) throw new Error("Voice catalog observation cancelled.");
+        const page = await client.catalog.list({ authorizationContext: EMPTY_ASSISTANT_AUTHORIZATION_CONTEXT,
+          lifecycle: "active", pageSize: 100, order: { field: "updated_at", direction: "desc" }, ...(cursor ? { cursor } : {}) });
+        ids.push(...page.items.map((item) => String(item.conversationId)));
+        if (!page.hasMore) return ids;
+        if (!page.nextCursor || cursors.has(String(page.nextCursor))) throw new TypeError("Voice catalog cursor did not advance.");
+        cursor = page.nextCursor; cursors.add(String(cursor));
+      }
+      throw new TypeError("Voice catalog page limit reached.");
+    } });
+  }, [state, props.voiceActivity]);
+  useEffect(() => { voiceMonitor?.start(); return () => voiceMonitor?.dispose(); }, [voiceMonitor]);
 
   const styles = props.includeStyles === false ? null : <StyledChatPresetStyles/>;
   if (error !== null) return <>{styles}{props.failure?.(error) ?? <span role="alert">Assistant unavailable.</span>}</>;
@@ -1071,10 +1120,10 @@ export function HandrailAssistantLauncher(props: HandrailAssistantLauncherProps)
     deviceId: _deviceId, loading: _loading, failure: _failure, includeStyles: _includeStyles,
     onWorkingChange: _onWorkingChange, autoTitle: _autoTitle,
     presentation: _presentation, uploaderForConversation: _uploaderForConversation,
-    attachmentIntake: _attachmentIntake, ...launcher } = props;
+    attachmentIntake: _attachmentIntake, voiceActivity: _voiceOptions, ...launcher } = props;
   void _endpoint; void _fetch; void _protected; void _diagnostics; void _clientId; void _deviceId; void _loading;
   void _failure; void _includeStyles; void _onWorkingChange; void _autoTitle; void _presentation;
-  void _uploaderForConversation; void _attachmentIntake;
+  void _uploaderForConversation; void _attachmentIntake; void _voiceOptions;
   const authorizationContext = EMPTY_ASSISTANT_AUTHORIZATION_CONTEXT;
   const approvals = props.approvals === undefined
     ? <StandardGatewayApprovals client={state.client}/>
@@ -1086,6 +1135,7 @@ export function HandrailAssistantLauncher(props: HandrailAssistantLauncherProps)
   const workspaceProps = {
     ...launcher,
     workspace: state.client.workspace,
+    ...(voiceMonitor ? { voiceActivity: voiceMonitor } : {}),
     ...(state.client.activity === null ? {} : { activity: state.client.activity }),
     catalogOptions: { catalog: state.client.catalog, authorizationContext },
     getThreadLabel: (conversationId: ConversationId) => generatedTitles.get(conversationId)
@@ -1120,6 +1170,7 @@ export function HandrailAssistantLauncher(props: HandrailAssistantLauncherProps)
     ? <HandrailChatWorkspace {...workspaceProps} layout="page"/>
     : <HandrailChatWorkspaceLauncher {...workspaceProps}/>;
   return <>{styles}<AssistantWorkingObserver workspace={state.client.workspace}
+    {...(voiceMonitor ? { voiceActivity: voiceMonitor } : {})}
     {...(state.client.activity === null ? {} : { activity: state.client.activity })}
     {...(props.onWorkingChange === undefined ? {} : { onChange: props.onWorkingChange })}/>
     <StandardConversationTitleObserver client={state.client} enabled={props.autoTitle !== false}

@@ -4,6 +4,7 @@ import {
   createOpenAIRealtimeServer,
   type OpenAIRealtimeBootstrapRequestFunction,
   type OpenAIRealtimeCleanupFunction,
+  type OpenAIRealtimeUsageObservation,
   type OpenAIRealtimeDeleteRequestFunction,
   type OpenAIRealtimeProviderEventChannel,
   type OpenAIRealtimeProviderBootstrapResponse,
@@ -103,6 +104,7 @@ function harness(options: {
   requestBootstrap?: OpenAIRealtimeBootstrapRequestFunction;
   requestDelete?: OpenAIRealtimeDeleteRequestFunction;
   cleanupSession?: OpenAIRealtimeCleanupFunction;
+  captureUsage?: (value: OpenAIRealtimeUsageObservation) => Promise<void>;
   toolBridge?: RealtimeVoiceServerToolBridge;
   maximumTrackedSessions?: number;
   maximumConcurrentToolCalls?: number;
@@ -128,6 +130,7 @@ function harness(options: {
     request_bootstrap: requestBootstrap,
     request_delete: requestDelete,
     cleanup_session: cleanupSession,
+    ...(options.captureUsage === undefined ? {} : { capture_usage: options.captureUsage }),
     ...(options.toolBridge === undefined ? {} : { tool_bridge: options.toolBridge }),
     now: options.now ?? (() => NOW),
     ...(options.maximumTrackedSessions === undefined
@@ -951,5 +954,87 @@ describe("OpenAI trusted-server realtime event normalization", () => {
     });
     expect(JSON.stringify(terminal)).not.toMatch(/transcript|provider-secret|arguments/iu);
     expect(failedBridge.terminateSession).toHaveBeenCalledWith("session-1");
+  });
+});
+
+
+describe("OpenAI realtime usage capture", () => {
+  const done = (status = "completed", eventId = "done-1") => ({ type: "response.done", event_id: eventId,
+    response: { id: "response-1", status, output: [{ transcript: "private" }],
+      usage: { input_tokens: 132, output_tokens: 121, total_tokens: 253,
+        input_token_details: { audio_tokens: 13, text_tokens: 119 },
+        output_token_details: { audio_tokens: 91, text_tokens: 30 } } } });
+
+  it("coalesces concurrent completion capture by operation identity and rejects changed usage", async () => {
+    let release!: () => void;
+    const write = new Promise<void>((resolve) => { release = resolve; });
+    const capture = vi.fn(() => write);
+    const { server } = harness({ captureUsage: capture });
+    const { channel } = eventChannel();
+    await startProviderSession(server, channel);
+    await server.handleProviderEvent(providerEventRequest(responseCreated("start"), channel), providerOperation());
+    const first = server.handleProviderEvent(providerEventRequest(done(), channel), providerOperation());
+    const duplicate = server.handleProviderEvent(providerEventRequest(done("completed", "done-2"), channel), providerOperation());
+    await vi.waitFor(() => expect(capture).toHaveBeenCalledOnce());
+    expect(capture.mock.calls[0]).toEqual([{ session_id: "session-1", operation: "response",
+      operation_id: "response-1", content_index: null, terminal_status: "completed",
+      usage: expect.objectContaining({ total_tokens: 253 }) }]);
+    expect(JSON.stringify(capture.mock.calls)).not.toContain("private");
+    release();
+    await Promise.all([first, duplicate]);
+    const changed = done("completed", "done-3");
+    changed.response.usage.total_tokens = 254;
+    await expect(server.handleProviderEvent(providerEventRequest(changed, channel), providerOperation()))
+      .rejects.toMatchObject({ code: "idempotency_conflict" });
+    expect(capture).toHaveBeenCalledOnce();
+  });
+
+  it.each(["completed", "cancelled", "failed", "incomplete"])("captures %s usage after hangup without restarting the session", async (status) => {
+    const capture = vi.fn(async () => undefined);
+    const { server } = harness({ captureUsage: capture });
+    const { channel } = eventChannel();
+    await startProviderSession(server, channel);
+    await server.hangup(hangup());
+    await expect(server.handleProviderEvent(providerEventRequest(done(status), channel), providerOperation())).resolves.toBeNull();
+    expect(capture.mock.calls[0]).toMatchObject([{ terminal_status: status, usage: { total_tokens: 253 } }]);
+    expect(server.getTrackedSession("session-1" as RealtimeVoiceSessionId)?.terminal_state).toBe("ended");
+  });
+
+  it("cancels the caller immediately while retaining incurred usage and refuses unknown sessions", async () => {
+    let release!: () => void;
+    const capture = vi.fn(() => new Promise<void>((resolve) => { release = resolve; }));
+    const { server } = harness({ captureUsage: capture });
+    const { channel } = eventChannel();
+    await expect(server.handleProviderEvent(providerEventRequest(done(), channel), providerOperation()))
+      .rejects.toMatchObject({ code: "invalid_state" });
+    expect(capture).not.toHaveBeenCalled();
+    await startProviderSession(server, channel);
+    const controller = new AbortController();
+    controller.abort();
+    await expect(server.handleProviderEvent(providerEventRequest(done(), channel), providerOperation(controller.signal)))
+      .rejects.toMatchObject({ code: "cancelled" });
+    await vi.waitFor(() => expect(capture).toHaveBeenCalledOnce());
+    release();
+    await server.handleProviderEvent(providerEventRequest(done(), channel), providerOperation());
+    expect(capture).toHaveBeenCalledOnce();
+  });
+
+  it("retries a failed capture with the same identity and captures input transcription separately", async () => {
+    const capture = vi.fn<(value: OpenAIRealtimeUsageObservation) => Promise<void>>()
+      .mockRejectedValueOnce(new Error("private storage error")).mockResolvedValue(undefined);
+    const { server } = harness({ captureUsage: capture });
+    const { channel } = eventChannel();
+    await startProviderSession(server, channel);
+    await expect(server.handleProviderEvent(providerEventRequest(done(), channel), providerOperation()))
+      .rejects.toMatchObject({ code: "temporarily_unavailable" });
+    await server.handleProviderEvent(providerEventRequest(done(), channel), providerOperation());
+    expect(capture.mock.calls[0]).toEqual(capture.mock.calls[1]);
+    const transcription = { type: "conversation.item.input_audio_transcription.completed", event_id: "input-1",
+      item_id: "response-1", content_index: 0, transcript: "private", usage: { type: "duration", seconds: 2.25 } };
+    await server.handleProviderEvent(providerEventRequest(transcription, channel), providerOperation());
+    await server.handleProviderEvent(providerEventRequest(transcription, channel), providerOperation());
+    expect(capture).toHaveBeenCalledTimes(3);
+    expect(capture.mock.calls[2]).toEqual([{ session_id: "session-1", operation: "input_transcription",
+      operation_id: "response-1", content_index: 0, terminal_status: "completed", usage: { type: "duration", seconds: 2.25 } }]);
   });
 });

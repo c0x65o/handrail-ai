@@ -1,3 +1,5 @@
+import { parseOpenAIReportedAudioUsage, type OpenAIReportedAudioUsage } from "./openai-audio-usage.js";
+export { parseOpenAIReportedAudioUsage, type OpenAIReportedAudioUsage } from "./openai-audio-usage.js";
 import {
   REALTIME_VOICE_CONTRACT_VERSION,
   REALTIME_VOICE_LIMITS,
@@ -168,6 +170,16 @@ export interface OpenAIRealtimeProviderTerminalRequest {
   readonly reason: "closed" | "failure";
 }
 
+export interface OpenAIRealtimeUsageObservation {
+  readonly session_id: RealtimeVoiceSessionId;
+  readonly operation: "response" | "input_transcription";
+  /** Provider response ID or input item ID. Deduplicate with session/operation/content_index. */
+  readonly operation_id: string;
+  readonly content_index: number | null;
+  readonly terminal_status: "completed" | "cancelled" | "failed" | "incomplete";
+  readonly usage: OpenAIReportedAudioUsage;
+}
+
 export interface OpenAIRealtimeServerOptions<TAuthentication = unknown> {
   readonly authenticate: (
     input: OpenAIRealtimeAuthenticationInput<TAuthentication>,
@@ -180,6 +192,11 @@ export interface OpenAIRealtimeServerOptions<TAuthentication = unknown> {
   readonly request_delete: OpenAIRealtimeDeleteRequestFunction;
   /** Host cleanup for session-scoped resources. Defaults to a no-op. */
   readonly cleanup_session?: OpenAIRealtimeCleanupFunction;
+  /** Trusted-server durable usage capture, including late final events after hangup.
+   * Hosts derive model/attribution from the session and deduplicate in storage;
+   * response and input transcription may use different models. No prices inferred.
+   */
+  readonly capture_usage?: (observation: OpenAIRealtimeUsageObservation) => Promise<void>;
   /** Existing trusted-server bridge. Sessions must be registered with the exact offered capability. */
   readonly tool_bridge?: RealtimeVoiceServerToolBridge;
   readonly now?: () => number;
@@ -232,6 +249,7 @@ interface MutableTrackedSession {
   readonly capabilities: RealtimeVoiceCapabilities;
   readonly eventController: AbortController;
   readonly providerEvents: Map<string, string>;
+  readonly usageCaptures: Map<string, { fingerprint: string; promise: Promise<void>; pending: boolean }>;
   readonly toolCalls: Map<string, string>;
   readonly toolOperations: Map<string, Promise<null>>;
   readonly toolOutputsSent: Set<string>;
@@ -350,6 +368,30 @@ function requiredIndex(value: unknown): number {
     throw new RealtimeVoiceOperationError("invalid_request");
   }
   return value as number;
+}
+
+/** Parses numerical evidence from trusted provider events; never authorizes a session. */
+export function parseOpenAIRealtimeUsageObservation(
+  sessionId: RealtimeVoiceSessionId,
+  value: unknown,
+): OpenAIRealtimeUsageObservation | null {
+  const source = requiredRecord(value);
+  if (source.type !== "response.done" && source.type !== "conversation.item.input_audio_transcription.completed") return null;
+  requiredIdentifier(sessionId);
+  const response = source.type === "response.done" ? requiredRecord(source.response) : null;
+  const status = response === null ? "completed" : response.status;
+  if (!["completed", "cancelled", "failed", "incomplete"].includes(status as string)) {
+    throw new RealtimeVoiceOperationError("invalid_request");
+  }
+  try {
+    return Object.freeze({ session_id: sessionId,
+      operation: response === null ? "input_transcription" : "response",
+      operation_id: requiredIdentifier(response === null ? source.item_id : response.id),
+      content_index: response === null ? requiredIndex(source.content_index) : null,
+      terminal_status: status as OpenAIRealtimeUsageObservation["terminal_status"],
+      usage: parseOpenAIReportedAudioUsage(response === null ? source.usage : response.usage),
+    });
+  } catch { throw new RealtimeVoiceOperationError("invalid_request"); }
 }
 
 function parseProviderEvent(value: unknown): ParsedProviderEvent {
@@ -798,6 +840,7 @@ implements OpenAIRealtimeServer<TAuthentication> {
   readonly #requestBootstrap: OpenAIRealtimeBootstrapRequestFunction;
   readonly #requestDelete: OpenAIRealtimeDeleteRequestFunction;
   readonly #cleanupSession: OpenAIRealtimeCleanupFunction;
+  readonly #captureUsage: OpenAIRealtimeServerOptions<TAuthentication>["capture_usage"];
   readonly #toolBridge: RealtimeVoiceServerToolBridge | undefined;
   readonly #now: () => number;
   readonly #maximumTrackedSessions: number;
@@ -856,6 +899,10 @@ implements OpenAIRealtimeServer<TAuthentication> {
     this.#supported = parseSupportedCapabilities(options.capabilities);
     this.#requestBootstrap = options.request_bootstrap;
     this.#requestDelete = options.request_delete;
+    if (options.capture_usage !== undefined && typeof options.capture_usage !== "function") {
+      throw new TypeError("OpenAI realtime usage capture must be a function");
+    }
+    this.#captureUsage = options.capture_usage;
     this.#cleanupSession = options.cleanup_session ?? (() => undefined);
     this.#toolBridge = options.tool_bridge;
     this.#now = options.now ?? Date.now;
@@ -1007,6 +1054,7 @@ implements OpenAIRealtimeServer<TAuthentication> {
           capabilities,
           eventController: new AbortController(),
           providerEvents: new Map(),
+          usageCaptures: new Map(),
           toolCalls: new Map(),
           toolOperations: new Map(),
           toolOutputsSent: new Set(),
@@ -1057,17 +1105,29 @@ implements OpenAIRealtimeServer<TAuthentication> {
     operation: RealtimeVoiceOperationInput,
   ): Promise<RealtimeVoiceSessionEvent | null> {
     assertRealtimeVoiceAbortSignal(operation?.signal, "$provider_event_operation.signal");
-    throwIfRealtimeVoiceAborted(operation.signal);
+    if (this.#captureUsage === undefined) throwIfRealtimeVoiceAborted(operation.signal);
     const sessionId = boundedIdentifier(request?.session_id);
     if (sessionId === null) throw new RealtimeVoiceOperationError("invalid_request");
     if (
       request?.channel === null || typeof request?.channel !== "object" ||
       typeof request.channel.send !== "function"
     ) throw new RealtimeVoiceOperationError("invalid_request");
+    const tracked = this.#sessions.get(sessionId);
+    const usage = this.#captureUsage === undefined ? null
+      : parseOpenAIRealtimeUsageObservation(sessionId as RealtimeVoiceSessionId, request.event);
+    if (usage !== null) {
+      if (tracked === undefined) throw new RealtimeVoiceOperationError("invalid_state");
+      const retention = this.#retainUsage(tracked, usage);
+      // Cancellation stops waiting, not the durable write. Observe rejection
+      // even when awaitWithSignal sees an already-aborted caller.
+      void retention.catch(() => undefined);
+      await awaitWithSignal(retention, operation.signal);
+    }
+    throwIfRealtimeVoiceAborted(operation.signal);
     const parsed = parseProviderEvent(request.event);
     if (parsed.kind === "unknown") return null;
-    const tracked = this.#sessions.get(sessionId);
     if (tracked === undefined) throw new RealtimeVoiceOperationError("invalid_state");
+    if (usage !== null && tracked.terminal_state !== "open") return null;
     if (tracked.terminal_state !== "open") {
       if (parsed.kind === "failure" && tracked.terminal_event !== null) {
         return this.#terminateFromProvider(
@@ -1121,6 +1181,32 @@ implements OpenAIRealtimeServer<TAuthentication> {
         if (!tracked.provider_started || tracked.response_id !== parsed.responseId) return null;
         return this.#handleToolCall(tracked, parsed, request.channel, operation.signal);
     }
+  }
+
+  async #retainUsage(tracked: MutableTrackedSession, observation: OpenAIRealtimeUsageObservation): Promise<void> {
+    const key = JSON.stringify([observation.operation, observation.operation_id, observation.content_index]);
+    const fingerprint = JSON.stringify(observation);
+    const prior = tracked.usageCaptures.get(key);
+    if (prior !== undefined) {
+      if (prior.fingerprint !== fingerprint) throw new RealtimeVoiceOperationError("idempotency_conflict");
+      return prior.promise;
+    }
+    if (tracked.usageCaptures.size >= OPENAI_REALTIME_LIMITS.maximumTrackedProviderEvents) {
+      const settled = [...tracked.usageCaptures].find(([, value]) => !value.pending);
+      if (settled === undefined) throw new RealtimeVoiceOperationError("temporarily_unavailable");
+      // This is a bounded in-process cache. The host's durable identity still
+      // prevents charging twice if an evicted operation is replayed later.
+      tracked.usageCaptures.delete(settled[0]);
+    }
+    const entry = { fingerprint, pending: true, promise: Promise.resolve() };
+    entry.promise = Promise.resolve().then(() => this.#captureUsage!(observation)).then(() => {
+      entry.pending = false;
+    }, () => {
+      tracked.usageCaptures.delete(key);
+      throw new RealtimeVoiceOperationError("temporarily_unavailable");
+    });
+    tracked.usageCaptures.set(key, entry);
+    return entry.promise;
   }
 
   async providerTerminated(

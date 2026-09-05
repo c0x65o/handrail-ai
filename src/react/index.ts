@@ -238,6 +238,9 @@ export {
   TranscriptionControlsStatus,
   TranscriptionControlsStop,
   useTranscriptionControls,
+  useCapturedAudioTranscription,
+  type CapturedAudioTranscriptionInput,
+  type UseCapturedAudioTranscriptionOptions,
   type TranscriptionCaptureFactory,
   type TranscriptionCaptureFactoryInput,
   type TranscriptionControlsActionProps,
@@ -300,3 +303,7 @@ export {
 } from "./realtime-voice.js";
 export * from "./primitives.js";
 export { ToolActivity, type ToolActivityProps } from "./tool-activity.js";
+
+export { useConversationApprovals, type ConversationApprovalResources } from "./use-conversation-approvals.js";
+
+export { useRealtimeWorkspaceActivity } from "./realtime-workspace.js";

@@ -66,7 +66,8 @@ import {
 import { createAttachmentStagingService, type AttachmentBlobStore, type AttachmentStagingMetadataStore,
   type AttachmentStagingLimits, type StagedAttachmentRecord } from "../attachments/staging.js";
 import { diagnoseAiOperation, type AiDiagnosticSink } from "../diagnostics.js";
-import { parseNormalizedUsageReceipt } from "../usage.js";
+import { parseNormalizedUsageReceipt, type NormalizedUsageReceipt } from "../usage.js";
+import { parseOpenAIReportedAudioUsage, type OpenAIReportedAudioUsage } from "../providers/openai-audio-usage.js";
 import {
   createAIRuntimeUsageReceiptSink,
   type AIRuntimeAdmissionInput,
@@ -203,7 +204,9 @@ export const handrailPostgresSchemaV1 = Object.freeze([
   `CREATE INDEX IF NOT EXISTS handrail_ai_attachment_blobs_expiry ON handrail_ai_attachment_blobs (tenant_id, expires_at)`,
 ] as const);
 
-export type PostgresDocumentKind = "checkpoint" | "catalog" | "approval" | "turn_state" | "durable_turn" | "activity" | "sync_state" | "openai_continuation" | "attachment" | "usage_outbox" | "tool_execution";
+export type PostgresDocumentKind = "checkpoint" | "catalog" | "approval" | "turn_state" | "durable_turn" | "activity" | "sync_state" | "openai_continuation" | "attachment" | "usage_outbox" | "audio_usage_evidence" | "tool_execution" | "provider_operation" | "realtime_call" | "realtime_tool_activity" | "realtime_activity_read";
+export * from "./realtime-calls.js";
+export * from "./realtime-tool-activity.js";
 
 export interface PostgresVersionedDocument<T = unknown> {
   readonly tenantId: string;
@@ -396,6 +399,19 @@ export class PostgresAiPersistence {
       [id(tenantId, "tenantId"), id(toolCallId, "toolCallId")],
     );
     return result.rows[0] ? jsonClone(result.rows[0].result) : null;
+  }
+
+  /** Bounded, read-only recovery. Missing entries are not failed executions and
+   * never authorize redispatch. Tenant ownership is supplied by the host. */
+  async getToolResults<T>(tenantId: string, toolCallIds: readonly string[]): Promise<readonly { readonly toolCallId: string; readonly result: T }[]> {
+    const tenant = id(tenantId, "tenantId");
+    if (!Array.isArray(toolCallIds) || toolCallIds.length > 100) throw new TypeError("A tool result batch must contain at most 100 identities.");
+    const calls = [...new Set(toolCallIds.map((call) => id(call, "toolCallId")))];
+    if (calls.length === 0) return Object.freeze([]);
+    const rows = await this.client.query<{ tool_call_id: string; result: T }>(
+      "SELECT tool_call_id,result FROM handrail_ai_tool_ledger WHERE tenant_id=$1 AND tool_call_id IN (SELECT jsonb_array_elements_text($2::jsonb)) ORDER BY tool_call_id",
+      [tenant, JSON.stringify(calls)]);
+    return Object.freeze(rows.rows.map((row) => Object.freeze({ toolCallId: row.tool_call_id, result: jsonClone(row.result) })));
   }
 
   async getOrCreateIdempotent<T>(input: { readonly tenantId: string; readonly domain: string; readonly scopeId: string;
@@ -610,6 +626,102 @@ export class PostgresConversationActivityStore implements DurableConversationAct
       } catch (error) { if (!(error instanceof PostgresPersistenceConflictError)) throw error; }
     }
     throw new PostgresPersistenceConflictError();
+  }
+}
+
+/** Numerical provider evidence awaiting a supported billing contract, never an outbound receipt. */
+export interface OpenAIAudioUsageEvidence {
+  readonly version: 1;
+  /** Stable provider-operation identity and server-derived attribution. */
+  readonly context: Omit<NormalizedUsageReceipt, "version" | "tokens" | "provider_cost">;
+  readonly usage: OpenAIReportedAudioUsage;
+}
+
+function audioUsageEvidence(value: OpenAIAudioUsageEvidence): OpenAIAudioUsageEvidence {
+  if (value?.version !== 1 || value.context?.provider_id !== "openai" || value.context.source !== "provider" || value.usage === undefined || value.usage === null) {
+    throw new TypeError("Invalid OpenAI audio usage evidence");
+  }
+  // Reuse the existing strict identity/attribution validation, without estimating
+  // tokens or creating a billable receipt. Only the validated context is retained.
+  const normalized = parseNormalizedUsageReceipt({ ...value.context, version: 1,
+    tokens: { input_tokens: { status: "unavailable" }, cached_input_tokens: { status: "unavailable" },
+      output_tokens: { status: "unavailable" }, reasoning_tokens: { status: "unavailable" },
+      total_tokens: { status: "unavailable" } }, provider_cost: { status: "unavailable" } });
+  const context: OpenAIAudioUsageEvidence["context"] = Object.freeze({
+    ...(normalized.occurred_at === undefined ? {} : { occurred_at: normalized.occurred_at }),
+    usage_receipt_id: normalized.usage_receipt_id, conversation_id: normalized.conversation_id,
+    turn_id: normalized.turn_id, logical_request_id: normalized.logical_request_id, trace_id: normalized.trace_id,
+    attempt: normalized.attempt, continuation: normalized.continuation, provider_id: normalized.provider_id,
+    model_id: normalized.model_id, attribution: normalized.attribution, source: normalized.source,
+    terminal_status: normalized.terminal_status,
+  });
+  const usage = value.usage?.type === "unavailable" ? Object.freeze({ type: "unavailable" as const })
+    : parseOpenAIReportedAudioUsage(value.usage);
+  return Object.freeze({ version: 1, context, usage });
+}
+
+/**
+ * Immutable, tenant/environment-scoped provider evidence in the SDK document
+ * schema. This store never submits to telemetry or deletes evidence on delivery.
+ * Hosts must derive the stable receipt identity from the provider operation and
+ * keep the same context on retry. The SDK receipt outbox remains separate.
+ */
+export class PostgresOpenAIAudioUsageEvidenceStore {
+  constructor(
+    readonly persistence: PostgresAiPersistence,
+    readonly tenantId: string,
+    readonly serviceEnvironmentId: string,
+  ) {
+    id(tenantId, "tenantId");
+    id(serviceEnvironmentId, "serviceEnvironmentId");
+  }
+
+  async capture(value: OpenAIAudioUsageEvidence): Promise<void> {
+    const evidence = audioUsageEvidence(value);
+    if (evidence.context.attribution.service_environment.id !== this.serviceEnvironmentId) {
+      throw new TypeError("Audio usage environment does not match storage scope");
+    }
+    const recordId = evidence.context.usage_receipt_id;
+    const existing = await this.get(recordId);
+    if (existing !== null) {
+      if (!jsonValuesEqual(existing, evidence)) throw new PostgresPersistenceConflictError();
+      return;
+    }
+    try {
+      await this.persistence.compareAndSetDocument({ tenantId: this.tenantId, kind: "audio_usage_evidence",
+        scopeId: this.serviceEnvironmentId, recordId, expectedVersion: null, value: evidence });
+    } catch (error) {
+      if (!(error instanceof PostgresPersistenceConflictError)) throw error;
+      const winner = await this.get(recordId);
+      if (winner === null || !jsonValuesEqual(winner, evidence)) throw error;
+    }
+  }
+
+  async get(receiptId: string): Promise<OpenAIAudioUsageEvidence | null> {
+    const document = await this.persistence.getDocument<OpenAIAudioUsageEvidence>(
+      this.tenantId, "audio_usage_evidence", this.serviceEnvironmentId, id(receiptId, "receiptId"));
+    if (document === null) return null;
+    return this.#validateStored(receiptId, document.value);
+  }
+
+  /** Bounded keyset scan for reconciliation; rescan to discover later inserts. */
+  async list(options: { readonly afterId?: string; readonly limit?: number } = {}): Promise<readonly OpenAIAudioUsageEvidence[]> {
+    const limit = options.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError("Audio evidence limit must be between 1 and 100");
+    const afterId = options.afterId === undefined ? null : id(options.afterId, "afterId");
+    const result = await this.persistence.client.query<{ record_id: string; payload: OpenAIAudioUsageEvidence }>(
+      "SELECT record_id,payload FROM handrail_ai_documents WHERE tenant_id=$1 AND kind='audio_usage_evidence' AND scope_id=$2 AND ($3::text IS NULL OR record_id>$3) ORDER BY record_id LIMIT $4",
+      [this.tenantId, this.serviceEnvironmentId, afterId, limit]);
+    return Object.freeze(result.rows.map((row) => this.#validateStored(row.record_id, row.payload)));
+  }
+
+  #validateStored(receiptId: string, value: OpenAIAudioUsageEvidence): OpenAIAudioUsageEvidence {
+    const evidence = audioUsageEvidence(value);
+    if (evidence.context.usage_receipt_id !== receiptId ||
+      evidence.context.attribution.service_environment.id !== this.serviceEnvironmentId) {
+      throw new TypeError("Audio usage evidence identity does not match storage scope");
+    }
+    return evidence;
   }
 }
 
@@ -914,6 +1026,101 @@ export class PostgresConversationSyncStateStore implements ConversationSyncState
         expectedGeneration: input.expectedGeneration, actualGeneration: actual?.version ?? null,
       });
     }
+  }
+}
+
+/** A provider request was admitted but no completed result is durably known. */
+export class PostgresProviderOperationUncertainError extends Error {
+  readonly code = "provider_operation_uncertain" as const;
+  constructor() {
+    super("The provider operation is running or its outcome requires reconciliation.");
+    this.name = "PostgresProviderOperationUncertainError";
+  }
+}
+
+export class PostgresProviderOperationConflictError extends Error {
+  readonly code = "provider_operation_conflict" as const;
+  constructor() {
+    super("The provider operation identity is bound to different input.");
+    this.name = "PostgresProviderOperationConflictError";
+  }
+}
+
+interface ProviderOperationRecord {
+  readonly version: 1;
+  readonly fingerprint: string;
+  readonly status: "started" | "completed";
+  readonly result?: unknown;
+}
+
+/**
+ * Claims one host-authorized provider operation before external dispatch. Keys
+ * must include the authenticated owner/request scope; authorize before every run.
+ * Completed JSON results are retained for replay. Failed/uncertain claims never
+ * expire automatically: deleting one can duplicate provider work or charges.
+ */
+export class PostgresProviderOperationStore {
+  constructor(readonly persistence: PostgresAiPersistence, readonly tenantId: string, readonly scopeId: string) {
+    id(tenantId, "tenantId"); id(scopeId, "scopeId");
+  }
+
+  async run<T>(input: {
+    readonly operationId: string;
+    readonly requestFingerprint: string;
+    /** Runs only after the claim transaction commits. Rejections retain the claim. */
+    readonly execute: () => Promise<T>;
+    /** Validate both newly returned and stored JSON before exposing it to callers. */
+    readonly parseResult: (value: unknown) => T;
+  }): Promise<T> {
+    const operationId = id(input.operationId, "operationId");
+    const fingerprint = createHash("sha256").update(id(input.requestFingerprint, "requestFingerprint")).digest("hex");
+    const readCompleted = async (): Promise<{ readonly found: boolean; readonly result?: T }> => {
+      const record = await this.persistence.getDocument<ProviderOperationRecord>(
+        this.tenantId, "provider_operation", this.scopeId, operationId);
+      if (record === null) return { found: false };
+      const value = record.value;
+      if (!value || value.version !== 1 || typeof value.fingerprint !== "string" ||
+        (value.status !== "started" && value.status !== "completed") ||
+        record.version !== (value.status === "started" ? 1 : 2)) {
+        throw new TypeError("The stored provider operation is invalid.");
+      }
+      if (value.fingerprint !== fingerprint) throw new PostgresProviderOperationConflictError();
+      if (value.status !== "completed") throw new PostgresProviderOperationUncertainError();
+      return { found: true, result: input.parseResult(jsonClone(value.result)) };
+    };
+    const existing = await readCompleted();
+    if (existing.found) return existing.result!;
+    try {
+      await this.persistence.compareAndSetDocument<ProviderOperationRecord>({
+        tenantId: this.tenantId, kind: "provider_operation", scopeId: this.scopeId,
+        recordId: operationId, expectedVersion: null,
+        value: { version: 1, fingerprint, status: "started" },
+      });
+    } catch (error) {
+      // A known competing claim may already have completed. An ambiguous commit
+      // failure never grants permission to dispatch based on absence alone.
+      if (error instanceof PostgresPersistenceConflictError) {
+        const winner = await readCompleted();
+        if (winner.found) return winner.result!;
+      }
+      throw error;
+    }
+    const result = input.parseResult(jsonClone(await input.execute()));
+    try {
+      await this.persistence.compareAndSetDocument<ProviderOperationRecord>({
+        tenantId: this.tenantId, kind: "provider_operation", scopeId: this.scopeId,
+        recordId: operationId, expectedVersion: 1,
+        value: { version: 1, fingerprint, status: "completed", result },
+      });
+    } catch (error) {
+      // Repair a lost completion acknowledgement without another provider call.
+      try {
+        const saved = await readCompleted();
+        if (saved.found) return saved.result!;
+      } catch { /* The original write error remains the primary failure. */ }
+      throw error;
+    }
+    return jsonClone(result);
   }
 }
 
@@ -1573,3 +1780,5 @@ export function postgresFromClient(
     },
   });
 }
+
+export { PostgresRealtimeWorkspaceActivityStore, type AuthorizedRealtimeConversation, type RealtimeWorkspaceCursor } from "./realtime-workspace.js";

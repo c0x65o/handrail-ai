@@ -15,7 +15,7 @@ import { createApplicationGateway, createConversationActivityHttpHandler,
 import { createApplicationGatewayExpressMiddleware, type ExpressLikeNext,
   type ExpressLikeRequest, type ExpressLikeResponse } from "./application-gateway.js";
 import { createDurableApplicationTransport, type DurableApplicationTransport } from "../transports/durable.js";
-import type { ConversationCatalog } from "../conversation/catalog.js";
+import { ConversationCatalogError, type ConversationCatalog } from "../conversation/catalog.js";
 import { createInMemoryLiveConversationActivityDelivery,
   createConversationActivityReporter,
   type LiveConversationActivityDelivery, type LiveConversationActivityPubSub } from "../conversation/activity.js";
@@ -588,11 +588,31 @@ export async function createHandrailAssistant<TContext extends HandrailAssistant
       }
       const bundle = bundleFor(input.permissionContext);
       const proposalStore = approvalStoreFor(input.permissionContext);
-      await catalogFor(input.permissionContext).get({ authorizationContext: input.permissionContext,
-        conversationId: supplied.conversationId as never });
+      try {
+        await catalogFor(input.permissionContext).get({ authorizationContext: input.permissionContext,
+          conversationId: supplied.conversationId as never });
+      } catch (error) {
+        if (error instanceof ConversationCatalogError) {
+          throw new ApprovalProposalStoreError(error.code === "not_found" ? "not_found"
+            : error.code === "forbidden" ? "permission_denied" : "unavailable", "transition");
+        }
+        throw error;
+      }
       const history = await bundle.events.read({ conversationId: supplied.conversationId as never });
       if (!history.entries.some(({ event }) => event.payload.type === "approval.proposal_created" &&
         event.payload.proposal_id === input.proposalId)) {
+        // Older application proposals may predate the SDK event history. Only
+        // an explicitly configured host authority can prove their membership;
+        // SDK-owned proposals still require their canonical creation event.
+        if (options.approvalStoreFor) {
+          const group = await proposalStore.listGroup({ permissionContext: input.permissionContext,
+            groupId: supplied.conversationId as never });
+          if (group.some((proposal) => proposal.proposal_id === input.proposalId)) {
+            return proposalStore.transition({ ...input,
+              attribution: { actor: { type: "user", id: input.permissionContext.principalId as never },
+                source: { type: "runtime" } } });
+          }
+        }
         throw new ApprovalProposalStoreError("not_found", "transition");
       }
       const coordinator = createApprovalCoordinator<TContext>({ proposalStore,

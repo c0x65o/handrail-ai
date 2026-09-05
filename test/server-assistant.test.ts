@@ -87,7 +87,7 @@ describe("createHandrailAssistant", () => {
       } });
     const events = new InMemoryConversationEventStore();
     const approvals = new InMemoryApprovalProposalStore<Context>({ authorize: () => "allow" });
-    const catalog = new InMemoryConversationCatalog<Context>({ authorize: () => "allow",
+    const catalog = new InMemoryConversationCatalog<Context>({ authorize: (request) => request.authorizationContext.principalId === "alice" ? "allow" : "deny",
       createConversationId: () => "conversation-approved" as never });
     const durableTurns = new InMemoryDurableApplicationTurnStore();
     const activityRecords: import("../src/conversation/activity.js").ConversationActivityRecord[] = [];
@@ -159,6 +159,14 @@ describe("createHandrailAssistant", () => {
       groupId: "conversation-approved" as never })).map((proposal) => proposal.proposal_id))
       .toEqual([proposalId]);
     expect(executions).toBe(0);
+    const forbidden = await assistant.handle(new Request("https://example.test/approvals/transition", {
+      method: "POST", headers: { "x-user": "bob", "content-type": "application/json" }, body: JSON.stringify({
+        conversationId: "conversation-approved", proposalId, expectedVersion: 1, status,
+        idempotencyKey: "forbidden", idempotencyFingerprint: "forbidden",
+      }),
+    }));
+    expect(forbidden.status).toBe(403);
+    expect(executions).toBe(0);
     const decision = await assistant.handle(new Request("https://example.test/approvals/transition", {
       method: "POST", headers: { "x-user": "alice", "content-type": "application/json" }, body: JSON.stringify({
         conversationId: "conversation-approved", proposalId, expectedVersion: 1, status,
@@ -167,6 +175,30 @@ describe("createHandrailAssistant", () => {
       }),
     }));
     expect(decision.status).toBe(200);
+    // An explicitly configured host authority also handles pre-SDK proposals,
+    // without fabricating a historical tool call or accepting a different group.
+    for (const group of ["conversation-approved", "another-conversation"]) {
+      const legacyId = `legacy-${group}`;
+      await approvals.create({ permissionContext: context(new Request("https://example.test")),
+        proposalId: legacyId as never, groupId: group as never, turnId: "old-turn" as never,
+        toolCallId: "old-call" as never, toolName: "dangerous", reviewedArguments: { type: "redacted_json", value: {} },
+        expiresAt: new Date(Date.now() + 60_000).toISOString() as never,
+        attribution: { actor: { type: "system" }, source: { type: "import" } },
+        idempotencyKey: legacyId, idempotencyFingerprint: legacyId });
+      const result = await assistant.handle(new Request("https://example.test/approvals/transition", {
+        method: "POST", headers: { "x-user": "alice", "content-type": "application/json" }, body: JSON.stringify({
+          conversationId: "conversation-approved", proposalId: legacyId, expectedVersion: 1, status,
+          idempotencyKey: `decide-${legacyId}`, idempotencyFingerprint: `decide-${legacyId}`,
+          attribution: { actor: { type: "system" }, source: { type: "import" } },
+        }),
+      }));
+      expect(result.status).toBe(group === "conversation-approved" ? 200 : 404);
+      const retained = await approvals.get({ permissionContext: context(new Request("https://example.test")), proposalId: legacyId as never });
+      expect(retained?.status).toBe(group === "conversation-approved" ? status : "pending");
+      if (group === "conversation-approved") expect(retained?.latest_attribution.actor).toEqual({ type: "user", id: "alice" });
+      expect((await events.read({ conversationId: "conversation-approved" as never })).entries.some(({ event }) =>
+        event.payload.type === "approval.proposal_created" && event.payload.proposal_id === legacyId)).toBe(false);
+    }
     if (status === "rejected") {
       expect(await pending).toMatchObject({ status: "completed", result: { is_error: true } });
       expect(executions).toBe(0);

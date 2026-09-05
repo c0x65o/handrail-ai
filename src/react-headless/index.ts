@@ -30,3 +30,7 @@ export {
   type ConversationLauncherBinding,
   type ConversationWorkspaceReadable,
 } from "../react/workspace.js";
+
+export { useConversationApprovals, type ConversationApprovalResources } from "../react/use-conversation-approvals.js";
+
+export { useRealtimeWorkspaceActivity } from "../react/realtime-workspace.js";

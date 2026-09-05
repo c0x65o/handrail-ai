@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { renderToString } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -29,6 +29,8 @@ import {
   TranscriptionControlsStatus,
   TranscriptionControlsStop,
   useTranscriptionControls,
+  useCapturedAudioTranscription,
+  type UseCapturedAudioTranscriptionOptions,
   type TranscriptionCaptureFactoryInput,
   type TranscriptionControlsController,
   type TranscriptionUploadInput,
@@ -438,5 +440,59 @@ describe("TranscriptionControls", () => {
     view.unmount();
     await waitFor(() => expect(controller.cancel).toHaveBeenCalledTimes(1));
     expect(controller.dispose).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+function CapturedHarness({ options }: { options: UseCapturedAudioTranscriptionOptions }) {
+  const controller = useCapturedAudioTranscription(options);
+  return <TranscriptionControlsRoot controller={controller}>
+    <TranscriptionControlsStart/><TranscriptionControlsStop/><TranscriptionControlsCancel/>
+    <TranscriptionControlsRetry/><TranscriptionControlsStatus/>
+  </TranscriptionControlsRoot>;
+}
+
+describe("direct captured-audio controls", () => {
+  it("retries the same recording and identity without recording or uploading again", async () => {
+    const capture = new FakeCaptureController();
+    const apply = vi.fn();
+    const transcribe = vi.fn<UseCapturedAudioTranscriptionOptions["transcribeCapturedAudio"]>()
+      .mockRejectedValueOnce(new TranscriptionOperationError("service_unavailable")).mockResolvedValue(transcript);
+    render(<CapturedHarness options={{ conversationId: "conversation-1", createCaptureController: () => capture,
+      transcribeCapturedAudio: transcribe, applyTranscript: apply }}/>);
+    expect(capture.start).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Start transcription" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Stop transcription" })).toHaveProperty("disabled", false));
+    fireEvent.click(screen.getByRole("button", { name: "Stop transcription" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Retry transcription" })).toHaveProperty("disabled", false));
+    fireEvent.click(screen.getByRole("button", { name: "Retry transcription" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry transcription" }));
+    await waitFor(() => expect(apply).toHaveBeenCalledWith(transcript));
+    expect(capture.start).toHaveBeenCalledOnce();
+    expect(transcribe).toHaveBeenCalledTimes(2);
+    expect(transcribe.mock.calls[0]![0].capture.source).toBe(transcribe.mock.calls[1]![0].capture.source);
+    expect(transcribe.mock.calls[0]![0].idempotencyKey).toBe(transcribe.mock.calls[1]![0].idempotencyKey);
+    expect(transcribe.mock.calls[0]![0].requestId).toBe(transcribe.mock.calls[1]![0].requestId);
+  });
+
+  it.each(["switch", "unmount", "cancel"] as const)("cancels direct transcription on %s and ignores its late text", async (action) => {
+    const capture = new FakeCaptureController();
+    const pending = deferred<string>();
+    const transcribe = vi.fn<UseCapturedAudioTranscriptionOptions["transcribeCapturedAudio"]>(() => pending.promise);
+    const apply = vi.fn();
+    const options = { conversationId: "conversation-1", createCaptureController: () => capture,
+      transcribeCapturedAudio: transcribe, applyTranscript: apply };
+    const view = render(<CapturedHarness options={options}/>);
+    fireEvent.click(screen.getByRole("button", { name: "Start transcription" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Stop transcription" })).toHaveProperty("disabled", false));
+    fireEvent.click(screen.getByRole("button", { name: "Stop transcription" }));
+    await waitFor(() => expect(transcribe).toHaveBeenCalledOnce());
+    if (action === "switch") view.rerender(<CapturedHarness options={{ ...options, conversationId: "conversation-2" }}/>);
+    else if (action === "unmount") view.unmount();
+    else fireEvent.click(screen.getByRole("button", { name: "Cancel transcription" }));
+    expect(transcribe.mock.calls[0]![0].signal.aborted).toBe(true);
+    await act(async () => { pending.resolve(transcript); });
+    await waitFor(() => expect(capture.dispose).toHaveBeenCalled());
+    expect(apply).not.toHaveBeenCalled();
   });
 });

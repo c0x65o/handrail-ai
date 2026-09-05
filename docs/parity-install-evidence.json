@@ -1,0 +1,61 @@
+{
+  "node": "22.23.1",
+  "npm": "10.9.8",
+  "installs": [
+    {
+      "host": "mills",
+      "mode": "development",
+      "sdk_version": "0.2.7",
+      "archive_sha256": "5683009ec79b0fde28bfd119737fa68ea8985155ba27d0b990b3cf7fecfe2102",
+      "verified_package_files": 317,
+      "javascript_entrypoints_imported": 24,
+      "npm_ci": "passed",
+      "manifest_sha256": "3fba3b999a27991026a436256796d83d76c56770b834f1684b718f227c099f9c",
+      "lock_sha256": "df83f02b0488e2c513e6fd8b8cfd57fc2d8c41270e4ed332c4923265449cfd5c"
+    },
+    {
+      "host": "mills",
+      "mode": "production",
+      "sdk_version": "0.2.7",
+      "archive_sha256": "5683009ec79b0fde28bfd119737fa68ea8985155ba27d0b990b3cf7fecfe2102",
+      "verified_package_files": 317,
+      "javascript_entrypoints_imported": 24,
+      "npm_ci": "passed",
+      "manifest_sha256": "3fba3b999a27991026a436256796d83d76c56770b834f1684b718f227c099f9c",
+      "lock_sha256": "df83f02b0488e2c513e6fd8b8cfd57fc2d8c41270e4ed332c4923265449cfd5c"
+    },
+    {
+      "host": "spartan",
+      "mode": "development",
+      "sdk_version": "0.2.7",
+      "archive_sha256": "5683009ec79b0fde28bfd119737fa68ea8985155ba27d0b990b3cf7fecfe2102",
+      "verified_package_files": 317,
+      "javascript_entrypoints_imported": 24,
+      "npm_ci": "passed",
+      "manifest_sha256": "600406748a997de28439abfa7704f75a6e58a24bca331d18fd423549967d29e0",
+      "lock_sha256": "25f7a259036cb528e64f1ef4d14458189a69576b8521304b466dea3ea1037512"
+    },
+    {
+      "host": "spartan",
+      "mode": "production",
+      "sdk_version": "0.2.7",
+      "archive_sha256": "5683009ec79b0fde28bfd119737fa68ea8985155ba27d0b990b3cf7fecfe2102",
+      "verified_package_files": 317,
+      "javascript_entrypoints_imported": 24,
+      "npm_ci": "passed",
+      "manifest_sha256": "600406748a997de28439abfa7704f75a6e58a24bca331d18fd423549967d29e0",
+      "lock_sha256": "25f7a259036cb528e64f1ef4d14458189a69576b8521304b466dea3ea1037512"
+    }
+  ],
+  "scope": "Isolated manifest/lockfile/vendor/scripts installs; no application startup, provider calls, deployment, or live billing verification.",
+  "commands": [
+    "npm ci --include=dev --no-audit --no-fund --prefer-offline",
+    "npm ci --omit=dev --no-audit --no-fund --prefer-offline"
+  ],
+  "migration_checks": {
+    "mills": "3 passed: journal/idempotence/down-up, SDK schema equivalence/retention, synchronized admission",
+    "spartan": "1 passed: journal/idempotence, SDK schema equivalence, retained execution document"
+  },
+  "qualified_at": "2026-09-05",
+  "scripts_enabled": true
+}
